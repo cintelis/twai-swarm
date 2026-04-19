@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Env
+.env
+.env.local
+*.tfvars
+!*.tfvars.example
+
+# Terraform
+deploy/terraform/.terraform/
+deploy/terraform/.terraform.lock.hcl
+deploy/terraform/terraform.tfstate
+deploy/terraform/terraform.tfstate.backup
+deploy/terraform/crash.log
+deploy/terraform/backend.conf
+
+# Terraform — state bootstrap (local state, never commit)
+deploy/bootstrap/.terraform/
+deploy/bootstrap/.terraform.lock.hcl
+deploy/bootstrap/terraform.tfstate
+deploy/bootstrap/terraform.tfstate.backup
+deploy/bootstrap/crash.log
+
+# Temporal Cloud mTLS certs -- never commit
+*.pem
+*.crt
+*.key
+temporal*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local-only orchestration files
+AGENTS.md
+_agent-instructions.lnk

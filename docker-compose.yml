@@ -1,0 +1,49 @@
+services:
+  # Postgres for both Temporal's persistence AND our app data (with pgvector)
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Temporal server (dev mode - single binary, no Elasticsearch, no separate history/matching)
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=postgres
+      - DBNAME=temporal
+      - VISIBILITY_DBNAME=temporal_visibility
+    ports:
+      - "7233:7233"  # gRPC for SDK
+
+  # Temporal Web UI - your observability during dev
+  temporal-ui:
+    image: temporalio/ui:2.27.2
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:

@@ -1,0 +1,16 @@
+# Terraform remote state backend config.
+# Paste the output of `terraform output backend_config_hcl` from deploy/bootstrap/
+# into `backend.conf` (gitignored — never commit the real file).
+#
+# Then initialise this config:
+#   terraform init -backend-config=backend.conf
+#
+# First init after migrating from local state:
+#   terraform init -backend-config=backend.conf -migrate-state
+
+bucket         = "twai-swarm-tfstate-123456789012"
+key            = "deploy/terraform.tfstate"
+region         = "ap-southeast-2"
+dynamodb_table = "twai-swarm-tflock"
+encrypt        = true
+kms_key_id     = "arn:aws:kms:ap-southeast-2:123456789012:key/abc-def-..."
