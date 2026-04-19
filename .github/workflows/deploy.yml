@@ -12,10 +12,13 @@ concurrency:
 
 env:
   AWS_REGION: ap-southeast-2
+  AWS_ACCOUNT_ID: "637675605233"
   ECR_REPOSITORY: lean-agent-app
   ECS_CLUSTER: lean-agent-cluster
   API_SERVICE: lean-agent-api
   WORKER_SERVICE: lean-agent-worker
+  EXEC_ROLE_ARN: arn:aws:iam::637675605233:role/lean-agent-exec
+  INFRA_ROLE_ARN: arn:aws:iam::637675605233:role/lean-agent-express-infra
 
 permissions:
   id-token: write    # for OIDC
@@ -102,7 +105,7 @@ jobs:
         with:
           task-definition: deploy/ecs/worker-task-def.json
           container-name: worker
-          image: ${{ needs.build-and-push.outputs.image-tag }}
+          image: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image-tag }}
 
       - name: Deploy worker
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
@@ -114,28 +117,33 @@ jobs:
 
       # The API service is Express Mode -- use the dedicated action.
       # It handles the Express API shape (update-express-gateway-service).
+      # execution-role-arn and infrastructure-role-arn are required inputs even
+      # for updates; they must match the roles set when the service was created.
       - name: Deploy API (Express Mode)
         uses: aws-actions/amazon-ecs-deploy-express-service@v1
         with:
           service-name: ${{ env.API_SERVICE }}
-          image: ${{ needs.build-and-push.outputs.image-tag }}
           cluster: ${{ env.ECS_CLUSTER }}
+          image: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image-tag }}
+          execution-role-arn: ${{ env.EXEC_ROLE_ARN }}
+          infrastructure-role-arn: ${{ env.INFRA_ROLE_ARN }}
 
       - name: Smoke test
         run: |
-          # Resolve the Express-managed ALB DNS and hit /health directly.
-          # Express Mode provisions its own ALB per service; describe-load-balancers
-          # without a Names filter returns all ALBs in the account, which is fine
-          # for single-project accounts. Narrow the query if you run multiple
-          # Express services in the same account.
-          DNS=$(aws elbv2 describe-load-balancers \
-            --query 'LoadBalancers[*].DNSName' --output text)
+          # Express Mode issues an ACM cert on a *.region.on.aws hostname; the
+          # raw ALB DNS won't match the cert SAN, so curl --fail rejects the
+          # response. Pull the actual hostname out of the cert's SubjectAltNames.
+          DNS=$(aws acm list-certificates \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'CertificateSummaryList[?contains(DomainName, `ecs.${{ env.AWS_REGION }}.on.aws`)].DomainName | [0]' \
+                  --output text)
 
-          if [ -z "$DNS" ]; then
-            echo "::error::Could not resolve ALB DNS"
+          if [ -z "$DNS" ] || [ "$DNS" = "None" ]; then
+            echo "::error::Could not resolve Express service hostname"
             exit 1
           fi
 
+          echo "Probing https://${DNS}/health"
           for i in 1 2 3 4 5; do
             if curl --fail -sS "https://${DNS}/health"; then
               echo "/health OK"
