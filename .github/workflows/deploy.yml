@@ -15,7 +15,7 @@ env:
   AWS_ACCOUNT_ID: "637675605233"
   ECR_REPOSITORY: lean-agent-app
   ECS_CLUSTER: lean-agent-cluster
-  API_SERVICE: lean-agent-api
+  API_SERVICE: lean-agent-api-v2
   WORKER_SERVICE: lean-agent-worker
   EXEC_ROLE_ARN: arn:aws:iam::637675605233:role/lean-agent-exec
   INFRA_ROLE_ARN: arn:aws:iam::637675605233:role/lean-agent-express-infra

@@ -166,7 +166,11 @@ module "api_express" {
   source  = "terraform-aws-modules/ecs/aws//modules/express-service"
   version = "= 7.5.0"
 
-  name    = "${local.name_prefix}-api"
+  # -v2 suffix because the original lean-agent-api service is stuck in
+  # INACTIVE for ~1h after a forced delete, and Express Mode blocks name
+  # reuse during that window. Drop the suffix on a future apply once the
+  # INACTIVE record has aged out (or just leave it).
+  name    = "${local.name_prefix}-api-v2"
   cluster = aws_ecs_cluster.main.name
 
   cpu    = 512
