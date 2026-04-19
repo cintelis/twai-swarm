@@ -17,6 +17,11 @@ from app.workflows import ProjectWorkflow, ProjectInput
 app = FastAPI(title="Lean Agent Framework")
 _temporal: Client | None = None
 
+
+@app.on_event("startup")
+async def _validate_config() -> None:
+    config.validate_runtime()
+
 def _connect_kwargs():
     """Temporal Cloud uses TLS + API key; local dev uses plaintext."""
     if not config.TEMPORAL_TLS:

@@ -17,12 +17,19 @@ PG_DSN = os.getenv("PG_DSN", "postgresql://postgres:postgres@localhost:5432/agen
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 
-if not ANTHROPIC_API_KEY:
-    raise RuntimeError("ANTHROPIC_API_KEY is not set — check .env or Secrets Manager binding")
-if not XAI_API_KEY:
-    raise RuntimeError("XAI_API_KEY is not set — check .env or Secrets Manager binding")
-if TEMPORAL_TLS and not TEMPORAL_API_KEY:
-    raise RuntimeError("TEMPORAL_API_KEY is required when TEMPORAL_TLS=true (Temporal Cloud)")
+def validate_runtime() -> None:
+    """Fail fast if a runtime-required env var is missing.
+
+    Call from API / worker entry points only — NOT at import time, so that
+    CI smoke imports, the bootstrap container, and ad-hoc debug sessions
+    can `from app import config` without supplying the LLM credentials.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set — check .env or Secrets Manager binding")
+    if not XAI_API_KEY:
+        raise RuntimeError("XAI_API_KEY is not set — check .env or Secrets Manager binding")
+    if TEMPORAL_TLS and not TEMPORAL_API_KEY:
+        raise RuntimeError("TEMPORAL_API_KEY is required when TEMPORAL_TLS=true (Temporal Cloud)")
 
 QUEUES = {
     "ba": "ba-tasks",

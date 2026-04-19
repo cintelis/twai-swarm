@@ -50,6 +50,7 @@ def _connect_kwargs():
     return {"tls": True, "api_key": config.TEMPORAL_API_KEY}
 
 async def main():
+    config.validate_runtime()
     queues_env = os.getenv("TEMPORAL_QUEUES", "").strip()
     if queues_env:
         roles = [r.strip() for r in queues_env.split(",") if r.strip()]
