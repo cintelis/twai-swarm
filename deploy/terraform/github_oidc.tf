@@ -153,6 +153,18 @@ resource "aws_iam_role_policy" "github_deploy" {
   policy = data.aws_iam_policy_document.github_deploy.json
 }
 
+# CI runs `terraform apply -target=local_file.worker_task_def_json` which
+# triggers refresh of every dependency of the worker task definition: IAM
+# roles, Secrets Manager secrets, the ECR repo, the log group, the RDS
+# instance, the VPC/subnets/SGs. Enumerating each Describe/Get action gets
+# unwieldy fast — granting the AWS-managed ReadOnlyAccess covers them all
+# for a small security trade-off (the deploy role can read secret values,
+# acceptable for dev). Narrow this in prod.
+resource "aws_iam_role_policy_attachment" "github_deploy_readonly" {
+  role       = aws_iam_role.github_deploy.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+}
+
 output "github_deploy_role_arn" {
   value       = aws_iam_role.github_deploy.arn
   description = "Set this as the AWS_DEPLOY_ROLE_ARN secret in GitHub"
