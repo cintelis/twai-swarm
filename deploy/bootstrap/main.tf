@@ -27,10 +27,10 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  account_id   = data.aws_caller_identity.current.account_id
-  bucket_name  = "${var.project_name}-tfstate-${local.account_id}"
-  table_name   = "${var.project_name}-tflock"
-  kms_alias    = "alias/${var.project_name}-tfstate"
+  account_id  = data.aws_caller_identity.current.account_id
+  bucket_name = "${var.project_name}-tfstate-${local.account_id}"
+  table_name  = "${var.project_name}-tflock"
+  kms_alias   = "alias/${var.project_name}-tfstate"
   common_tags = {
     Project   = var.project_name
     ManagedBy = "terraform-bootstrap"

@@ -60,7 +60,7 @@ resource "null_resource" "db_bootstrap" {
     # On Linux/macOS bash is already the natural choice. Requires Git Bash on
     # PATH on Windows — if `bash --version` works in PowerShell, you're set.
     interpreter = ["bash", "-c"]
-    command = <<-EOT
+    command     = <<-EOT
       set -e
       TASK_ARN=$(aws ecs run-task \
         --region ${var.aws_region} \

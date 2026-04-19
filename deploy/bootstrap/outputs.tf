@@ -30,7 +30,7 @@ output "kms_key_id" {
 
 # Ready-to-paste config for deploy/terraform/backend.conf
 output "backend_config_hcl" {
-  value = <<-EOT
+  value       = <<-EOT
     bucket         = "${aws_s3_bucket.state.id}"
     key            = "deploy/terraform.tfstate"
     region         = "${var.aws_region}"

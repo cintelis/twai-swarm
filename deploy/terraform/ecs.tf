@@ -88,18 +88,18 @@ resource "aws_ecs_task_definition" "worker" {
       ]
 
       environment = [
-        { name = "TEMPORAL_HOST",      value = var.temporal_host },
+        { name = "TEMPORAL_HOST", value = var.temporal_host },
         { name = "TEMPORAL_NAMESPACE", value = var.temporal_namespace },
-        { name = "TEMPORAL_TLS",       value = "true" },
+        { name = "TEMPORAL_TLS", value = "true" },
         # Empty = handle all queues. Narrow this on specialised worker services.
-        { name = "TEMPORAL_QUEUES",    value = "" },
+        { name = "TEMPORAL_QUEUES", value = "" },
       ]
 
       secrets = [
-        { name = "ANTHROPIC_API_KEY",  valueFrom = aws_secretsmanager_secret.anthropic.arn },
-        { name = "XAI_API_KEY",        valueFrom = aws_secretsmanager_secret.xai.arn },
-        { name = "TEMPORAL_API_KEY",   valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
-        { name = "PG_DSN",             valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+        { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic.arn },
+        { name = "XAI_API_KEY", valueFrom = aws_secretsmanager_secret.xai.arn },
+        { name = "TEMPORAL_API_KEY", valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
+        { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
       ]
 
       healthCheck = {
@@ -177,16 +177,16 @@ module "api_express" {
     container_port = 8000
 
     environment = [
-      { name = "TEMPORAL_HOST",      value = var.temporal_host },
+      { name = "TEMPORAL_HOST", value = var.temporal_host },
       { name = "TEMPORAL_NAMESPACE", value = var.temporal_namespace },
-      { name = "TEMPORAL_TLS",       value = "true" },
+      { name = "TEMPORAL_TLS", value = "true" },
     ]
 
     secret = [
       { name = "ANTHROPIC_API_KEY", value_from = aws_secretsmanager_secret.anthropic.arn },
-      { name = "XAI_API_KEY",       value_from = aws_secretsmanager_secret.xai.arn },
-      { name = "TEMPORAL_API_KEY",  value_from = aws_secretsmanager_secret.temporal_api_key.arn },
-      { name = "PG_DSN",            value_from = aws_secretsmanager_secret.pg_dsn.arn },
+      { name = "XAI_API_KEY", value_from = aws_secretsmanager_secret.xai.arn },
+      { name = "TEMPORAL_API_KEY", value_from = aws_secretsmanager_secret.temporal_api_key.arn },
+      { name = "PG_DSN", value_from = aws_secretsmanager_secret.pg_dsn.arn },
     ]
   }
 

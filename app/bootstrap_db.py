@@ -74,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_task_embeddings_vec ON task_embeddings
 """
 
 async def main() -> int:
-    print(f"[bootstrap] connecting to DB...")
+    print("[bootstrap] connecting to DB...")
     try:
         conn = await asyncpg.connect(PG_DSN)
     except Exception as e:
