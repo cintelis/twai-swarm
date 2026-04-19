@@ -35,9 +35,10 @@ MODELS: dict[str, ModelSpec] = {
 
     # xAI -- grok-4.20 is their current flagship (2M context, reasoning + tools).
     # Using the base alias so we auto-track stable releases; pin to
-    # "grok-4.20-<date>" if you need reproducibility.
-    "grok":      ModelSpec("xai", "grok-4.20",      "flagship", 2.00, 6.00),
-    "grok-fast": ModelSpec("xai", "grok-4.1-fast",  "fast",     0.20, 0.50),
+    # "grok-4.20-<date>" (e.g. grok-4.20-0309-non-reasoning) for reproducibility.
+    # Naming convention is all-dashes: grok-4-1-fast (NOT grok-4.1-fast).
+    "grok":      ModelSpec("xai", "grok-4.20",     "flagship", 2.00, 6.00),
+    "grok-fast": ModelSpec("xai", "grok-4-1-fast", "fast",     0.20, 0.50),
 }
 
 # Default model key per role. Mix providers freely.
