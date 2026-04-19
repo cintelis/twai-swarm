@@ -39,4 +39,5 @@ QUEUES = {
     "reviewer": "reviewer-tasks",
     "researcher": "researcher-tasks",
     "documenter": "documenter-tasks",
+    "coder": "coder-tasks",
 }

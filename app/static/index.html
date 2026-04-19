@@ -369,6 +369,53 @@
       line-height: 1.6;
     }
 
+    /* ── Code scaffold card ──────────────────────────────── */
+    .code-card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      margin-bottom: 12px;
+    }
+    .code-card .code-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .code-card .code-title {
+      font-family: var(--font-head);
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .code-card .code-summary {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .file-tree {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      max-height: 280px;
+      overflow: auto;
+    }
+    .file-tree-item {
+      padding: 2px 0;
+      white-space: nowrap;
+    }
+    .file-tree-item .file-size {
+      color: var(--muted2);
+      font-size: 11px;
+      margin-left: 10px;
+    }
+
     /* ── Cost summary card ───────────────────────────────── */
     .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .cost-table th, .cost-table td {
@@ -634,6 +681,29 @@ function renderProject(data) {
       }
     }
     html += `</div>`;
+  }
+
+  // ── Generated code (when coder is done) ─────────────────
+  const coderTask = tasks.find(t => t.role === 'coder' && t.status === 'done' && t.output);
+  if (coderTask && coderTask.output && Array.isArray(coderTask.output.files)) {
+    const out = coderTask.output;
+    const files = out.files;
+    const totalSize = files.reduce((acc, f) => acc + (f.content || '').length, 0);
+    html += `
+      <div class="code-card">
+        <div class="code-head">
+          <div class="code-title">Generated scaffold ${out.language ? `<span class="meta">· ${escapeHtml(out.language)}</span>` : ''}</div>
+          <a href="${API}/projects/${escapeHtml(workflow_id)}/download" class="btn btn-primary" download>Download .zip</a>
+        </div>
+        ${out.summary ? `<div class="code-summary">${escapeHtml(out.summary)}</div>` : ''}
+        <div class="file-tree">
+    `;
+    for (const f of files) {
+      const path = f.path || '(no path)';
+      const size = (f.content || '').length;
+      html += `<div class="file-tree-item">${escapeHtml(path)}<span class="file-size">${size.toLocaleString()} chars</span></div>`;
+    }
+    html += `</div></div>`;
   }
 
   // ── Approval banner ─────────────────────────────────────

@@ -12,7 +12,7 @@ cost observability share a single source of truth.
 from dataclasses import dataclass
 from typing import Literal
 
-Role = Literal["ba", "architect", "se", "estimator", "reviewer", "researcher", "documenter"]
+Role = Literal["ba", "architect", "se", "estimator", "reviewer", "researcher", "documenter", "coder"]
 Provider = Literal["anthropic", "xai"]
 Tier = Literal["fast", "mid", "flagship"]
 
@@ -54,6 +54,7 @@ ROLE_DEFAULTS: dict[Role, str] = {
     "reviewer":   "grok",       # second opinion from different family
     "researcher": "grok-research",  # web_search + x_search (see ROLE_TOOLS in runner.py)
     "documenter": "grok-fast",      # writing up; speed > nuance
+    "coder":      "opus",           # code generation: precision > speed
 }
 
 # Escalation: complexity_hint=3 bumps one step along this chain.

@@ -198,9 +198,22 @@ class ProjectWorkflow:
             parent=review_result.task_id,
         )
 
+        # Phase 5: code scaffold
+        # Generates a runnable starter tree from the plan + docs. Output is
+        # consumed by GET /projects/{id}/download (zip).
+        await run_step(
+            "coder",
+            "Code scaffold",
+            "Generate a runnable starter scaffold for the project based on the architecture, "
+            "implementation plan, and README produced by the previous agents. Stub non-trivial "
+            "logic with TODO comments — the goal is a green-build skeleton, not finished code.",
+            parent=doc_result.task_id,
+            complexity=2,
+        )
+
         return ProjectOutput(
             project_id=project_id,
             final_docs=doc_result.output,
-            task_count=7,
+            task_count=8,
             approved=True,
         )

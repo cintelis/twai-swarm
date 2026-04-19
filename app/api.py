@@ -6,14 +6,18 @@ Thin intake API + bundled UI. Endpoints:
 - POST /projects           -> start a workflow
 - GET  /projects/{id}      -> poll status
 - GET  /projects/{id}/costs
+- GET  /projects/{id}/download -> zip of the coder agent's scaffold
 - POST /projects/{id}/approve
 - POST /projects/{id}/reject
 """
 import asyncio
+import io
 import pathlib
+import re
 import uuid
+import zipfile
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from temporalio.client import Client
@@ -161,6 +165,59 @@ async def project_costs(workflow_id: str):
         "total_usd": round(total, 4),
         "breakdown": [dict(r) for r in rows],
     }
+
+@app.get("/projects/{workflow_id}/download")
+async def download_project(workflow_id: str):
+    """Bundle the Coder agent's file tree into a zip and stream it back."""
+    pool = await db.get_pool()
+    project_row = await pool.fetchrow(
+        "SELECT id, name FROM projects WHERE workflow_id=$1", workflow_id
+    )
+    if not project_row:
+        raise HTTPException(404, "project not found")
+
+    coder_row = await pool.fetchrow(
+        """
+        SELECT output FROM tasks
+        WHERE project_id=$1 AND role='coder' AND status='done'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        project_row["id"],
+    )
+    if not coder_row or not coder_row["output"]:
+        raise HTTPException(404, "no coder output yet — workflow may still be running")
+
+    import json as _json
+    output = _json.loads(coder_row["output"])
+    files = output.get("files") if isinstance(output, dict) else None
+    if not isinstance(files, list) or not files:
+        raise HTTPException(422, "coder output has no `files` array")
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", project_row["name"]).strip("-") or "project"
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Drop a small marker so users know what produced the zip.
+        zf.writestr(
+            f"{safe_name}/.swarm-info",
+            f"workflow_id: {workflow_id}\nproject: {safe_name}\nlanguage: {output.get('language', 'unknown')}\n",
+        )
+        for f in files:
+            path = (f.get("path") or "").lstrip("/").replace("\\", "/")
+            content = f.get("content") or ""
+            if not path or ".." in path.split("/"):
+                continue
+            zf.writestr(f"{safe_name}/{path}", content)
+
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}-scaffold.zip"',
+        },
+    )
+
 
 @app.get("/projects/{workflow_id}")
 async def get_project(workflow_id: str):

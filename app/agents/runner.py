@@ -66,6 +66,36 @@ Output as JSON: {"findings": [...], "sources_needed": [...]}""",
 - overview: 2-3 sentence summary
 - sections: list of {heading, body} for a README
 Output as JSON: {"overview": "...", "sections": [...]}""",
+
+    "coder": """You are a Code Scaffolder. Given an architecture, an implementation plan, and a README, produce a runnable starter scaffold for the project.
+
+Rules:
+- Pick the language and framework that the architect's tech_choices recommended. If ambiguous, default to Python.
+- Generate every file the project needs to compile / run / lint cleanly: source files, config (package manifest, lockfile if cheap), README, .gitignore, and at least one smoke test.
+- Keep files SHORT and idiomatic. Stub out non-trivial logic with a clear `TODO:` comment and a one-line description. This is a starting point, not finished code.
+- Paths must be relative (no leading slash). Use forward slashes. No backslashes.
+- Do NOT generate binary files, lockfiles longer than ~300 lines, or anything you have to base64-encode.
+
+Output as JSON: {
+  "language": "python | typescript | rust | go | ...",
+  "summary": "1-2 sentence description of what this scaffold does and what's stubbed",
+  "files": [
+    {"path": "README.md",       "content": "..."},
+    {"path": "src/main.py",     "content": "..."},
+    {"path": "tests/test_smoke.py", "content": "..."}
+  ]
+}
+
+Be honest in the summary about what's stubbed vs implemented. Reviewers downstream of you should see exactly what's safe to run and what needs human work.""",
+}
+
+# Some roles need more output headroom than the default 2048 (code gen
+# especially). Defaults conservative — bump per-role here.
+ROLE_MAX_TOKENS: dict[str, int] = {
+    "coder": 16000,
+    "se": 4096,
+    "architect": 4096,
+    "documenter": 4096,
 }
 
 def _format_context(context: list[dict]) -> str:
@@ -127,6 +157,7 @@ Respond with ONLY the JSON object specified in your system prompt. No preamble, 
         model=decision.model,
         system=system,
         user=user_msg,
+        max_tokens=ROLE_MAX_TOKENS.get(role, 2048),
         tools=ROLE_TOOLS.get(role),
     )
 
