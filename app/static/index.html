@@ -241,16 +241,172 @@
 
     /* ── Tasks ───────────────────────────────────────────── */
     .task-list { display: flex; flex-direction: column; gap: 8px; }
+    .task-item {
+      background: var(--bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
     .task-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 12px 14px;
+      gap: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .task-row:hover { background: var(--hover); }
+    .task-row .chevron {
+      color: var(--muted);
+      font-size: 11px;
+      transition: transform .15s;
+      display: inline-block;
+      width: 12px;
+    }
+    .task-item.expanded .task-row .chevron { transform: rotate(90deg); }
+    .task-detail {
+      border-top: 0.5px solid var(--border);
+      padding: 14px 16px 18px;
+      background: var(--surface);
+      display: none;
+    }
+    .task-item.expanded .task-detail { display: block; }
+    .detail-label {
+      font-size: 10px;
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      font-weight: 600;
+      margin: 14px 0 8px;
+    }
+    .detail-label:first-child { margin-top: 0; }
+    .json-block {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
       background: var(--bg);
       border: 0.5px solid var(--border);
       border-radius: var(--radius-sm);
-      gap: 12px;
+      padding: 12px 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--muted);
+      max-height: 480px;
+      overflow: auto;
     }
+    .citations { display: flex; flex-direction: column; gap: 6px; }
+    .citation {
+      display: block;
+      padding: 8px 12px;
+      background: var(--bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      text-decoration: none;
+      color: var(--text);
+      font-size: 13px;
+      transition: border-color .15s, background .15s;
+    }
+    .citation:hover { border-color: var(--iris); }
+    .citation .url {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      display: block;
+      margin-top: 2px;
+      word-break: break-all;
+    }
+    .citation-quote {
+      color: var(--muted);
+      font-size: 12px;
+      font-style: italic;
+      margin-top: 6px;
+      padding-left: 10px;
+      border-left: 2px solid var(--border);
+    }
+
+    /* ── Final docs card ─────────────────────────────────── */
+    .docs-card {
+      background: linear-gradient(180deg, var(--surface) 0%, var(--surface) 100%);
+      border: 0.5px solid var(--iris);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      margin-bottom: 12px;
+    }
+    .docs-card .docs-eyebrow {
+      font-size: 10px;
+      color: var(--iris);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .docs-card h2 {
+      font-family: var(--font-head);
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      margin-bottom: 12px;
+    }
+    .docs-card .docs-overview {
+      color: var(--muted);
+      font-size: 15px;
+      margin-bottom: 18px;
+      line-height: 1.6;
+    }
+    .docs-section { margin-bottom: 14px; }
+    .docs-section h3 {
+      font-family: var(--font-head);
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+    .docs-section .docs-body {
+      color: var(--muted);
+      font-size: 14px;
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    /* ── Cost summary card ───────────────────────────────── */
+    .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .cost-table th, .cost-table td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 0.5px solid var(--border);
+    }
+    .cost-table th {
+      font-size: 10px;
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      font-weight: 600;
+    }
+    .cost-table td.num { font-family: var(--font-mono); text-align: right; color: var(--muted); }
+    .cost-table tr:last-child td { border-bottom: none; }
+    .cost-total {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 0.5px solid var(--border);
+    }
+    .cost-total .label {
+      font-size: 11px;
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      font-weight: 600;
+    }
+    .cost-total .amount {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
     .role {
       font-weight: 600;
       text-transform: capitalize;
@@ -440,6 +596,9 @@ async function refreshProject(workflowId) {
   }
 }
 
+// Preserved across re-renders so expanded rows don't collapse on each poll.
+const expandedTasks = new Set();
+
 function renderProject(data) {
   const { workflow_id, status, awaiting_approval, project, tasks } = data;
 
@@ -454,6 +613,30 @@ function renderProject(data) {
     </div>
   `;
 
+  // ── Final docs (when documenter is done) ────────────────
+  const documenterTask = tasks.find(t => t.role === 'documenter' && t.status === 'done' && t.output);
+  if (documenterTask && documenterTask.output) {
+    const docs = documenterTask.output;
+    html += `
+      <div class="docs-card">
+        <div class="docs-eyebrow">Final Docs</div>
+        <h2>${escapeHtml(docs.overview ? project.name : 'Documentation')}</h2>
+        ${docs.overview ? `<div class="docs-overview">${escapeHtml(docs.overview)}</div>` : ''}
+    `;
+    if (Array.isArray(docs.sections)) {
+      for (const sec of docs.sections) {
+        html += `
+          <div class="docs-section">
+            <h3>${escapeHtml(sec.heading || '')}</h3>
+            <div class="docs-body">${escapeHtml(sec.body || '')}</div>
+          </div>
+        `;
+      }
+    }
+    html += `</div>`;
+  }
+
+  // ── Approval banner ─────────────────────────────────────
   if (awaiting_approval) {
     html += `
       <div class="approval-banner">
@@ -467,35 +650,150 @@ function renderProject(data) {
     `;
   }
 
+  // ── Task list (with drilldown) ──────────────────────────
   html += `<div class="section-label">Tasks (${tasks.length})</div>`;
   if (tasks.length === 0) {
     html += `<div class="card empty">Workflow just started — agents will appear here as they're scheduled.</div>`;
   } else {
     html += `<div class="card"><div class="task-list">`;
     for (const t of tasks) {
+      const tid = t.id;
+      const isExpanded = expandedTasks.has(tid);
+      const hasOutput = t.output != null && t.status === 'done';
       const cost = t.cost_usd != null ? `$${parseFloat(t.cost_usd).toFixed(4)}` : '';
       const tokens = (t.tokens_in || t.tokens_out) ? `${t.tokens_in || 0}→${t.tokens_out || 0} tok` : '';
       const model = t.model_used || '';
+
       html += `
-        <div class="task-row">
-          <span class="role">${escapeHtml(t.role)}</span>
-          <span class="meta-row">
-            ${model ? `<span class="meta">${escapeHtml(model)}</span>` : ''}
-            ${tokens ? `<span class="meta">${tokens}</span>` : ''}
-            ${cost ? `<span class="meta">${cost}</span>` : ''}
-            <span class="badge ${t.status}">${t.status}</span>
-          </span>
+        <div class="task-item${isExpanded ? ' expanded' : ''}" data-task-id="${escapeHtml(tid)}">
+          <div class="task-row">
+            <span class="role"><span class="chevron">${hasOutput ? '▶' : ''}</span> ${escapeHtml(t.role)}</span>
+            <span class="meta-row">
+              ${model ? `<span class="meta">${escapeHtml(model)}</span>` : ''}
+              ${tokens ? `<span class="meta">${tokens}</span>` : ''}
+              ${cost ? `<span class="meta">${cost}</span>` : ''}
+              <span class="badge ${t.status}">${t.status}</span>
+            </span>
+          </div>
+          ${hasOutput ? `<div class="task-detail">${renderTaskDetail(t)}</div>` : ''}
         </div>
       `;
     }
     html += `</div></div>`;
   }
 
+  // ── Cost summary (when finished) ────────────────────────
+  if (status === 'COMPLETED') {
+    html += `<div id="costSummary" class="section-label">Cost summary</div><div class="card empty" id="costSummaryBody">Loading…</div>`;
+  }
+
   root.innerHTML = html;
 
+  // Wire up approval
   if (awaiting_approval) {
     document.getElementById('approveBtn').addEventListener('click', () => approveProject(workflow_id));
     document.getElementById('rejectBtn').addEventListener('click', () => rejectProject(workflow_id));
+  }
+
+  // Wire up task expand/collapse (only on rows that actually have output)
+  for (const item of root.querySelectorAll('.task-item')) {
+    const row = item.querySelector('.task-row');
+    const tid = item.dataset.taskId;
+    const hasOutput = item.querySelector('.task-detail') != null;
+    if (!hasOutput) continue;
+    row.addEventListener('click', () => {
+      if (expandedTasks.has(tid)) {
+        expandedTasks.delete(tid);
+        item.classList.remove('expanded');
+      } else {
+        expandedTasks.add(tid);
+        item.classList.add('expanded');
+      }
+    });
+  }
+
+  // Lazy-load cost summary when finished
+  if (status === 'COMPLETED') {
+    loadCostSummary(workflow_id);
+  }
+}
+
+function renderTaskDetail(t) {
+  const out = t.output || {};
+  const citations = Array.isArray(out._citations) ? out._citations : [];
+  // Strip _citations from the JSON we display so the citations card isn't duplicated.
+  const visible = {};
+  for (const k of Object.keys(out)) if (k !== '_citations') visible[k] = out[k];
+
+  let html = '';
+  if (citations.length > 0) {
+    html += `<div class="detail-label">Sources (${citations.length})</div><div class="citations">`;
+    for (const c of citations) {
+      const url = c.url || '#';
+      const title = c.title || c.url || '(no title)';
+      const cited = c.cited_text || '';
+      html += `
+        <a class="citation" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+          <strong>${escapeHtml(title)}</strong>
+          <span class="url">${escapeHtml(url)}</span>
+          ${cited ? `<div class="citation-quote">"${escapeHtml(cited)}"</div>` : ''}
+        </a>
+      `;
+    }
+    html += `</div>`;
+  }
+  html += `<div class="detail-label">Output</div>`;
+  html += `<pre class="json-block">${escapeHtml(JSON.stringify(visible, null, 2))}</pre>`;
+  return html;
+}
+
+async function loadCostSummary(workflowId) {
+  try {
+    const r = await fetch(`${API}/projects/${workflowId}/costs`);
+    if (!r.ok) {
+      document.getElementById('costSummaryBody').innerHTML = `<span class="empty">Cost data unavailable.</span>`;
+      return;
+    }
+    const data = await r.json();
+    const rows = data.breakdown || [];
+    let body = `<div class="card">`;
+    if (rows.length === 0) {
+      body += `<span class="empty">No completed tasks yet.</span>`;
+    } else {
+      body += `
+        <table class="cost-table">
+          <thead>
+            <tr><th>Role</th><th>Provider</th><th>Model</th><th class="num">Calls</th><th class="num">In→Out tokens</th><th class="num">Cost</th></tr>
+          </thead>
+          <tbody>
+      `;
+      for (const r of rows) {
+        const cost = r.cost_usd != null ? `$${parseFloat(r.cost_usd).toFixed(4)}` : '—';
+        body += `
+          <tr>
+            <td>${escapeHtml(r.role)}</td>
+            <td><span class="meta">${escapeHtml(r.provider || '')}</span></td>
+            <td><span class="meta">${escapeHtml(r.model_used || '')}</span></td>
+            <td class="num">${r.calls || 0}</td>
+            <td class="num">${r.tokens_in || 0} → ${r.tokens_out || 0}</td>
+            <td class="num">${cost}</td>
+          </tr>
+        `;
+      }
+      body += `
+          </tbody>
+        </table>
+        <div class="cost-total">
+          <span class="label">Total</span>
+          <span class="amount">$${(data.total_usd || 0).toFixed(4)}</span>
+        </div>
+      `;
+    }
+    body += `</div>`;
+    document.getElementById('costSummaryBody').outerHTML = body;
+  } catch (err) {
+    const el = document.getElementById('costSummaryBody');
+    if (el) el.innerHTML = `<span class="empty">Cost data error: ${escapeHtml(err.message)}</span>`;
   }
 }
 

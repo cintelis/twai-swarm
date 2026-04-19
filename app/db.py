@@ -114,9 +114,21 @@ async def get_project_tasks(project_id: str) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, parent_task_id, role, title, status, model_used, created_at
+        SELECT id, parent_task_id, role, title, status, provider, model_used,
+               tokens_in, tokens_out, cost_usd, output,
+               created_at, updated_at
         FROM tasks WHERE project_id=$1 ORDER BY created_at ASC
         """,
         UUID(project_id),
     )
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        # asyncpg returns JSONB as a string; UI needs structured data.
+        if d.get("output") is not None:
+            d["output"] = json.loads(d["output"])
+        # Numeric is a Decimal; JSON encoder won't serialise that.
+        if d.get("cost_usd") is not None:
+            d["cost_usd"] = float(d["cost_usd"])
+        out.append(d)
+    return out

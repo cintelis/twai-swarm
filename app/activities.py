@@ -66,9 +66,17 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
         await db.fail_task(task_id, str(e))
         raise
 
+    # Sidecar grounding metadata (web_search citations etc.) lands inside the
+    # output JSON under `_citations` so it's queryable without a schema change
+    # or sidecar table. UI strips it when pretty-printing the agent's payload.
+    output_to_persist = result["output"]
+    citations = result.get("citations") or []
+    if isinstance(output_to_persist, dict) and citations:
+        output_to_persist = {**output_to_persist, "_citations": citations}
+
     await db.complete_task(
         task_id,
-        output=result["output"],
+        output=output_to_persist,
         provider=result["provider"],
         model=result["model"],
         tokens_in=result["tokens_in"],
