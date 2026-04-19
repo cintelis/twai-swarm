@@ -9,10 +9,23 @@ from app import router
 from app.providers import anthropic_provider, xai_provider, ProviderResult
 
 SYSTEM_PROMPTS = {
-    "ba": """You are a Business Analyst agent. Given a project brief, produce:
-- A numbered list of concrete requirements
-- A list of open questions that would block progress
-Output as JSON: {"requirements": [...], "open_questions": [...]}""",
+    "ba": """You are a Business Analyst agent. Given a project brief, produce a structured analysis that explicitly separates what the brief actually says from what you are inferring.
+
+Process (think step by step before writing JSON):
+1. facts_from_brief — statements directly supported by the brief's wording. Quote or paraphrase. Do NOT add detail the brief doesn't contain.
+2. assumptions — anything you must assume to write requirements. Each must be falsifiable (a stakeholder could say "no, that's wrong"). Tag each with a short label like {{"assumption": "...", "id": "A1"}}.
+3. requirements — concrete, testable. For each, list the fact/assumption ids it depends on under "depends_on": ["F2","A1"].
+4. open_questions — blockers whose answer would meaningfully change the requirements. Phrase as questions a human could answer in one sentence.
+
+Be honest: if the brief is too thin to ground a requirement, push it into open_questions instead of inventing assumptions to fill the gap.
+
+Output as JSON:
+{
+  "facts_from_brief": [{"id": "F1", "text": "..."}, ...],
+  "assumptions":      [{"id": "A1", "text": "..."}, ...],
+  "requirements":     [{"text": "...", "depends_on": ["F1","A2"]}, ...],
+  "open_questions":   ["...", ...]
+}""",
 
     "architect": """You are a Software Architect. Given requirements, produce a system design:
 - components: list of components with responsibility
@@ -64,11 +77,25 @@ _PROVIDERS = {
     "xai":       xai_provider.complete,
 }
 
-async def _complete(provider: str, model: str, system: str, user: str, max_tokens: int = 2048) -> ProviderResult:
+# Per-role grounding tools. Empty/missing = no tools (cheaper path).
+# xAI server-side tools live behind the Responses API; Anthropic tool wiring
+# is a future step (see anthropic_provider.complete docstring).
+ROLE_TOOLS: dict[str, list[dict]] = {
+    "researcher": [{"type": "web_search"}, {"type": "x_search"}],
+}
+
+async def _complete(
+    provider: str,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int = 2048,
+    tools: list[dict] | None = None,
+) -> ProviderResult:
     fn = _PROVIDERS.get(provider)
     if fn is None:
         raise ValueError(f"Unknown provider: {provider}")
-    return await fn(model, system, user, max_tokens)
+    return await fn(model, system, user, max_tokens, tools)
 
 async def run_agent(
     role: str,
@@ -92,6 +119,7 @@ Respond with ONLY the JSON object specified in your system prompt. No preamble, 
         model=decision.model,
         system=system,
         user=user_msg,
+        tools=ROLE_TOOLS.get(role),
     )
 
     # Defensive parse -- strip markdown fences if the model added them
@@ -118,4 +146,5 @@ Respond with ONLY the JSON object specified in your system prompt. No preamble, 
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
         "cost_usd": round(cost, 6),
+        "citations": result.citations or [],
     }

@@ -13,3 +13,6 @@ class ProviderResult:
     tokens_in: int
     tokens_out: int
     finish_reason: str | None = None
+    # Populated when the provider made grounding tool calls (e.g. web_search).
+    # List of {"url": "...", "title": "..."} dicts. Empty list = no citations.
+    citations: list[dict] | None = None

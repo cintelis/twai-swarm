@@ -37,8 +37,12 @@ MODELS: dict[str, ModelSpec] = {
     # Using the base alias so we auto-track stable releases; pin to
     # "grok-4.20-<date>" (e.g. grok-4.20-0309-non-reasoning) for reproducibility.
     # Naming convention is all-dashes: grok-4-1-fast (NOT grok-4.1-fast).
-    "grok":      ModelSpec("xai", "grok-4.20",     "flagship", 2.00, 6.00),
-    "grok-fast": ModelSpec("xai", "grok-4-1-fast", "fast",     0.20, 0.50),
+    "grok":          ModelSpec("xai", "grok-4.20",           "flagship", 2.00, 6.00),
+    "grok-fast":     ModelSpec("xai", "grok-4-1-fast",       "fast",     0.20, 0.50),
+    # Reasoning variant required for server-side tools (web_search, x_search)
+    # via the Responses API. Same per-token pricing as the flagship; the
+    # extra cost is tool invocations ($5 / 1k calls).
+    "grok-research": ModelSpec("xai", "grok-4.20-reasoning", "flagship", 2.00, 6.00),
 }
 
 # Default model key per role. Mix providers freely.
@@ -48,8 +52,8 @@ ROLE_DEFAULTS: dict[Role, str] = {
     "se":         "sonnet",     # implementation plans
     "estimator":  "grok",       # reasoning + cost-awareness; Grok's strength
     "reviewer":   "grok",       # second opinion from different family
-    "researcher": "grok-fast",  # cheap & fast
-    "documenter": "grok-fast",  # writing up; speed > nuance
+    "researcher": "grok-research",  # web_search + x_search (see ROLE_TOOLS in runner.py)
+    "documenter": "grok-fast",      # writing up; speed > nuance
 }
 
 # Escalation: complexity_hint=3 bumps one step along this chain.

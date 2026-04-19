@@ -22,14 +22,56 @@ def _get_client() -> AsyncOpenAI:
         )
     return _client
 
-async def complete(model: str, system: str, user: str, max_tokens: int = 2048) -> ProviderResult:
+async def complete(
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int = 2048,
+    tools: list[dict] | None = None,
+) -> ProviderResult:
+    """
+    Chat-Completions path when tools is None/empty (cheaper, simpler).
+    Responses-API path when tools are passed — required for xAI's server-side
+    tools (web_search, x_search). Live Search on Chat Completions is deprecated
+    per https://docs.x.ai/docs/tools/web-search.
+    """
     client = _get_client()
+
+    if tools:
+        resp = await client.responses.create(
+            model=model,
+            instructions=system,
+            input=user,
+            tools=tools,
+            max_output_tokens=max_tokens,
+        )
+        text = (resp.output_text or "").strip()
+        if not text:
+            raise RuntimeError(
+                f"xAI Responses returned empty content (model={model}, status={getattr(resp, 'status', None)})"
+            )
+        # Citations (web_search) live on annotations of output text items.
+        citations: list[dict] = []
+        for item in getattr(resp, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                for ann in getattr(content, "annotations", []) or []:
+                    url = getattr(ann, "url", None)
+                    if url:
+                        citations.append({"url": url, "title": getattr(ann, "title", None)})
+        return ProviderResult(
+            text=text,
+            tokens_in=resp.usage.input_tokens,
+            tokens_out=resp.usage.output_tokens,
+            finish_reason=getattr(resp, "status", None),
+            citations=citations or None,
+        )
+
     resp = await client.chat.completions.create(
         model=model,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system},
-            {"role": "user",   "content": user},
+            {"role": "user", "content": user},
         ],
     )
     choice = resp.choices[0]
