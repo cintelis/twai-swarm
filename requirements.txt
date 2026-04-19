@@ -7,3 +7,8 @@ asyncpg==0.30.0
 pydantic==2.9.2
 python-dotenv==1.0.1
 aiohttp==3.10.11
+# Pin httpx to the last release that exposes `proxies=` on AsyncClient.
+# anthropic 0.39 and openai 1.54 both pass `proxies=` to httpx; httpx 0.28
+# renamed the kwarg to `mounts` and broke them. Bump these SDKs in lockstep
+# if/when you raise this pin.
+httpx<0.28
