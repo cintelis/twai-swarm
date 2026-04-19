@@ -6,15 +6,17 @@ project_name = "lean-agent"
 # Set to "owner/repo" -- must match your actual GitHub repo
 github_repo = "cintelis/twai-swarm"
 
-# Temporal Cloud -- after signing up, the endpoint has this shape:
-temporal_host      = "your-namespace.abcde.tmprl.cloud:7233"
-temporal_namespace = "your-namespace.abcde"
+# Temporal Cloud (API key auth).
+#   - temporal_host: the REGIONAL endpoint shown on the API-key page,
+#     e.g. ap-southeast-2.aws.api.temporal.io:7233 (NOT the namespace endpoint)
+#   - temporal_namespace: namespace.account_id, e.g. quickstart-twai-swarm.m8cb4
+temporal_host      = "ap-southeast-2.aws.api.temporal.io:7233"
+temporal_namespace = "quickstart-twai-swarm.m8cb4"
 
-# Paste secrets directly or read from files:
-anthropic_api_key        = "sk-ant-..."
-xai_api_key              = "xai-..."
-temporal_client_cert_pem = file("./temporal.crt")
-temporal_client_key_pem  = file("./temporal.key")
+# Paste secrets directly:
+anthropic_api_key = "sk-ant-..."
+xai_api_key       = "xai-..."
+temporal_api_key  = "tmprl_..."
 
 db_password = "generate-a-strong-password-here"
 

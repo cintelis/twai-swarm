@@ -96,11 +96,10 @@ resource "aws_ecs_task_definition" "worker" {
       ]
 
       secrets = [
-        { name = "ANTHROPIC_API_KEY",      valueFrom = aws_secretsmanager_secret.anthropic.arn },
-        { name = "XAI_API_KEY",            valueFrom = aws_secretsmanager_secret.xai.arn },
-        { name = "TEMPORAL_CLIENT_CERT",   valueFrom = aws_secretsmanager_secret.temporal_cert.arn },
-        { name = "TEMPORAL_CLIENT_KEY",    valueFrom = aws_secretsmanager_secret.temporal_key.arn },
-        { name = "PG_DSN",                 valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+        { name = "ANTHROPIC_API_KEY",  valueFrom = aws_secretsmanager_secret.anthropic.arn },
+        { name = "XAI_API_KEY",        valueFrom = aws_secretsmanager_secret.xai.arn },
+        { name = "TEMPORAL_API_KEY",   valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
+        { name = "PG_DSN",             valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
       ]
 
       healthCheck = {
@@ -184,11 +183,10 @@ module "api_express" {
     ]
 
     secrets = [
-      { name = "ANTHROPIC_API_KEY",    valueFrom = aws_secretsmanager_secret.anthropic.arn },
-      { name = "XAI_API_KEY",          valueFrom = aws_secretsmanager_secret.xai.arn },
-      { name = "TEMPORAL_CLIENT_CERT", valueFrom = aws_secretsmanager_secret.temporal_cert.arn },
-      { name = "TEMPORAL_CLIENT_KEY",  valueFrom = aws_secretsmanager_secret.temporal_key.arn },
-      { name = "PG_DSN",               valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+      { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic.arn },
+      { name = "XAI_API_KEY",       valueFrom = aws_secretsmanager_secret.xai.arn },
+      { name = "TEMPORAL_API_KEY",  valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
+      { name = "PG_DSN",            valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
     ]
   }
 

@@ -38,14 +38,8 @@ variable "xai_api_key" {
   sensitive   = true
 }
 
-variable "temporal_client_cert_pem" {
-  description = "PEM content of the Temporal Cloud mTLS cert"
-  type        = string
-  sensitive   = true
-}
-
-variable "temporal_client_key_pem" {
-  description = "PEM content of the Temporal Cloud mTLS key"
+variable "temporal_api_key" {
+  description = "Temporal Cloud API key (replaces mTLS cert/key auth)"
   type        = string
   sensitive   = true
 }

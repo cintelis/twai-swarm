@@ -85,7 +85,7 @@ Seven agents, two providers (Anthropic + xAI/Grok 4.20). Router in `app/router.p
 
 ### One-time setup
 
-1. **Temporal Cloud account** — [temporal.io/cloud](https://temporal.io/cloud). Create a namespace. Download the mTLS cert + key. Free tier is enough for a solo project.
+1. **Temporal Cloud account** — [temporal.io/cloud](https://temporal.io/cloud). Create a namespace, then generate an API key from the namespace settings. Free tier is enough for a solo project.
 
 2. **Copy the tfvars template and fill it in:**
    ```bash
@@ -143,7 +143,7 @@ GitHub Actions ──OIDC──▶ AWS
                              ├── Express Mode: API service ──▶ AWS-managed ALB (*.on.aws)
                              └── Fargate:      Worker service ──▶ (no ALB)
 
-                         Both services ──mTLS──▶ Temporal Cloud
+                         Both services ──TLS+API key──▶ Temporal Cloud
                                        ──HTTPS─▶ api.anthropic.com
 ```
 

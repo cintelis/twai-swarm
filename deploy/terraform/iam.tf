@@ -33,8 +33,7 @@ data "aws_iam_policy_document" "secrets_access" {
     resources = [
       aws_secretsmanager_secret.anthropic.arn,
       aws_secretsmanager_secret.xai.arn,
-      aws_secretsmanager_secret.temporal_cert.arn,
-      aws_secretsmanager_secret.temporal_key.arn,
+      aws_secretsmanager_secret.temporal_api_key.arn,
       aws_secretsmanager_secret.pg_dsn.arn,
     ]
   }

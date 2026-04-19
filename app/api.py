@@ -18,15 +18,10 @@ app = FastAPI(title="Lean Agent Framework")
 _temporal: Client | None = None
 
 def _connect_kwargs():
+    """Temporal Cloud uses TLS + API key; local dev uses plaintext."""
     if not config.TEMPORAL_TLS:
         return {}
-    from temporalio.service import TLSConfig
-    return {
-        "tls": TLSConfig(
-            client_cert=config.TEMPORAL_CLIENT_CERT.encode() if config.TEMPORAL_CLIENT_CERT else None,
-            client_private_key=config.TEMPORAL_CLIENT_KEY.encode() if config.TEMPORAL_CLIENT_KEY else None,
-        )
-    }
+    return {"tls": True, "api_key": config.TEMPORAL_API_KEY}
 
 async def temporal() -> Client:
     global _temporal

@@ -34,22 +34,13 @@ resource "aws_secretsmanager_secret_version" "xai" {
   secret_string = var.xai_api_key
 }
 
-resource "aws_secretsmanager_secret" "temporal_cert" {
-  name                    = "${local.name_prefix}/temporal-client-cert"
+resource "aws_secretsmanager_secret" "temporal_api_key" {
+  name                    = "${local.name_prefix}/temporal-api-key"
   recovery_window_in_days = 0
 }
-resource "aws_secretsmanager_secret_version" "temporal_cert" {
-  secret_id     = aws_secretsmanager_secret.temporal_cert.id
-  secret_string = var.temporal_client_cert_pem
-}
-
-resource "aws_secretsmanager_secret" "temporal_key" {
-  name                    = "${local.name_prefix}/temporal-client-key"
-  recovery_window_in_days = 0
-}
-resource "aws_secretsmanager_secret_version" "temporal_key" {
-  secret_id     = aws_secretsmanager_secret.temporal_key.id
-  secret_string = var.temporal_client_key_pem
+resource "aws_secretsmanager_secret_version" "temporal_api_key" {
+  secret_id     = aws_secretsmanager_secret.temporal_api_key.id
+  secret_string = var.temporal_api_key
 }
 
 resource "aws_secretsmanager_secret" "pg_dsn" {

@@ -26,11 +26,10 @@ deploy/bootstrap/terraform.tfstate
 deploy/bootstrap/terraform.tfstate.backup
 deploy/bootstrap/crash.log
 
-# Temporal Cloud mTLS certs -- never commit
+# Defensive: any stray cert/key material — never commit
 *.pem
 *.crt
 *.key
-temporal*.pem
 
 # IDE
 .idea/
@@ -41,3 +40,4 @@ temporal*.pem
 # Local-only orchestration files
 AGENTS.md
 _agent-instructions.lnk
+.claude/

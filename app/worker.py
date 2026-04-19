@@ -44,16 +44,10 @@ async def start_health_server():
     return runner
 
 def _connect_kwargs():
-    """Temporal Cloud uses mTLS; local dev uses plaintext."""
+    """Temporal Cloud uses TLS + API key; local dev uses plaintext."""
     if not config.TEMPORAL_TLS:
         return {}
-    from temporalio.service import TLSConfig
-    return {
-        "tls": TLSConfig(
-            client_cert=config.TEMPORAL_CLIENT_CERT.encode() if config.TEMPORAL_CLIENT_CERT else None,
-            client_private_key=config.TEMPORAL_CLIENT_KEY.encode() if config.TEMPORAL_CLIENT_KEY else None,
-        )
-    }
+    return {"tls": True, "api_key": config.TEMPORAL_API_KEY}
 
 async def main():
     queues_env = os.getenv("TEMPORAL_QUEUES", "").strip()
