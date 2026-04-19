@@ -90,6 +90,18 @@ jobs:
       # is IAM-gated via the assumed deploy role).
       - name: Sync worker task def from Terraform
         working-directory: deploy/terraform
+        # The targeted apply only needs the worker task def (which references
+        # secret ARNs, not values). Real values live in tfvars locally and in
+        # Secrets Manager at runtime — CI just needs Terraform to satisfy its
+        # variable-validation pass. Dummies are fine here.
+        env:
+          TF_VAR_anthropic_api_key: ci-render-only
+          TF_VAR_xai_api_key: ci-render-only
+          TF_VAR_temporal_api_key: ci-render-only
+          TF_VAR_temporal_host: ci-render-only
+          TF_VAR_temporal_namespace: ci-render-only
+          TF_VAR_db_password: ci-render-only
+          TF_VAR_github_repo: cintelis/twai-swarm
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
