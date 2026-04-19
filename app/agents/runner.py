@@ -19,6 +19,8 @@ Process (think step by step before writing JSON):
 
 Be honest: if the brief is too thin to ground a requirement, push it into open_questions instead of inventing assumptions to fill the gap.
 
+Use web_search when domain conventions aren't obvious (e.g. "what's the standard CLI surface for tools in this category", "what licensing models are common", "are there existing tools doing this that constrain naming"). Cite what you find via the citations the search returns. Don't search just to look busy — only when grounding meaningfully changes a requirement.
+
 Output as JSON:
 {
   "facts_from_brief": [{"id": "F1", "text": "..."}, ...],
@@ -31,6 +33,9 @@ Output as JSON:
 - components: list of components with responsibility
 - data_flow: how data moves between components
 - tech_choices: key technology decisions with rationale
+
+Each tech_choice must reference current best practice — use web_search to verify versions, idioms, and ecosystem fit before recommending a library or pattern. Don't recommend something based purely on training-data recall when the field moves quickly (frameworks, package managers, deployment targets).
+
 Output as JSON: {"components": [...], "data_flow": "...", "tech_choices": [...]}""",
 
     "se": """You are a Software Engineer. Given a design, produce an implementation plan:
@@ -78,10 +83,13 @@ _PROVIDERS = {
 }
 
 # Per-role grounding tools. Empty/missing = no tools (cheaper path).
-# xAI server-side tools live behind the Responses API; Anthropic tool wiring
-# is a future step (see anthropic_provider.complete docstring).
+# xAI server-side tools live behind the Responses API (handled in xai_provider).
+# Anthropic uses the dated tool-type strings (web_search_20260209 = current,
+# supports dynamic filtering on Sonnet 4.6 / Opus 4.7).
 ROLE_TOOLS: dict[str, list[dict]] = {
     "researcher": [{"type": "web_search"}, {"type": "x_search"}],
+    "ba":         [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
+    "architect":  [{"type": "web_search_20260209", "name": "web_search", "max_uses": 8}],
 }
 
 async def _complete(

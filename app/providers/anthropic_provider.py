@@ -18,21 +18,49 @@ async def complete(
     tools: list[dict] | None = None,
 ) -> ProviderResult:
     """
-    `tools` accepted for signature symmetry with xai_provider; not yet wired
-    to Anthropic's native tool-use surface. When we enable web_search for
-    Claude roles, branch on `tools` here and pass to messages.create(tools=...).
+    Pass `tools` (e.g. [{"type": "web_search_20260209", "name": "web_search"}])
+    to enable Anthropic server-side tools. Web search citations are extracted
+    from each text block's `citations` field and bubbled up.
     """
-    _ = tools  # explicit ignore until we wire Anthropic tool use
     client = _get_client()
-    resp = await client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if tools:
+        kwargs["tools"] = tools
+
+    resp = await client.messages.create(**kwargs)
+
+    # Concatenate every text block; web_search interleaves Claude's narration,
+    # server_tool_use blocks, web_search_tool_result blocks, and final cited
+    # text. Only the text blocks carry the actual response prose.
+    text_parts: list[str] = []
+    citations: list[dict] = []
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            text_parts.append(block.text)
+            for c in (getattr(block, "citations", None) or []):
+                if getattr(c, "type", None) == "web_search_result_location":
+                    citations.append({
+                        "url": getattr(c, "url", None),
+                        "title": getattr(c, "title", None),
+                        "cited_text": getattr(c, "cited_text", None),
+                    })
+
+    text = "".join(text_parts).strip()
+    if not text:
+        raise RuntimeError(
+            f"Anthropic returned no text content (model={model}, stop_reason={resp.stop_reason})"
+        )
+
     return ProviderResult(
-        text=resp.content[0].text,
+        text=text,
         tokens_in=resp.usage.input_tokens,
         tokens_out=resp.usage.output_tokens,
         finish_reason=resp.stop_reason,
+        citations=citations or None,
     )
