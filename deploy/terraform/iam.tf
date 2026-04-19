@@ -54,13 +54,26 @@ resource "aws_iam_role" "task" {
 #-----------------------------------------------------------------------------
 # Infrastructure role for ECS Express Mode -- lets Express manage ALB/target
 # groups/security groups on your behalf. AWS-managed policy covers it.
+#
+# Trust policy: ecs.amazonaws.com (the SERVICE), not ecs-tasks.amazonaws.com
+# (the TASKS). Express uses the service principal to provision ALB/TGs/SGs.
 #-----------------------------------------------------------------------------
+data "aws_iam_policy_document" "ecs_service_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs.amazonaws.com"]
+    }
+  }
+}
+
 resource "aws_iam_role" "express_infra" {
   name               = "${local.name_prefix}-express-infra"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+  assume_role_policy = data.aws_iam_policy_document.ecs_service_assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "express_infra_managed" {
   role       = aws_iam_role.express_infra.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonECSInfrastructureRoleforExpressGatewayServices"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices"
 }

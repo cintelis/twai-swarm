@@ -12,10 +12,17 @@ Note: this mirrors db/init.sql. If you change one, change the other -- or
 better, refactor to read from a packaged resource. For a lean starter, dupe is fine.
 """
 import asyncio
+import os
 import sys
 import asyncpg
 
-from app import config
+# Bootstrap reads PG_DSN directly instead of importing app.config — the
+# config module validates LLM keys at import time, which the bootstrap
+# task doesn't have (and shouldn't need).
+PG_DSN = os.environ.get("PG_DSN")
+if not PG_DSN:
+    print("[bootstrap] PG_DSN env var is required", file=sys.stderr)
+    sys.exit(1)
 
 # Kept identical to db/init.sql but authored to work against an already-created
 # database (the RDS instance was created by Terraform with db_name=agentdb).
@@ -69,7 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_task_embeddings_vec ON task_embeddings
 async def main() -> int:
     print(f"[bootstrap] connecting to DB...")
     try:
-        conn = await asyncpg.connect(config.PG_DSN)
+        conn = await asyncpg.connect(PG_DSN)
     except Exception as e:
         print(f"[bootstrap] connection failed: {e}", file=sys.stderr)
         return 1

@@ -182,20 +182,22 @@ module "api_express" {
       { name = "TEMPORAL_TLS",       value = "true" },
     ]
 
-    secrets = [
-      { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic.arn },
-      { name = "XAI_API_KEY",       valueFrom = aws_secretsmanager_secret.xai.arn },
-      { name = "TEMPORAL_API_KEY",  valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
-      { name = "PG_DSN",            valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+    secret = [
+      { name = "ANTHROPIC_API_KEY", value_from = aws_secretsmanager_secret.anthropic.arn },
+      { name = "XAI_API_KEY",       value_from = aws_secretsmanager_secret.xai.arn },
+      { name = "TEMPORAL_API_KEY",  value_from = aws_secretsmanager_secret.temporal_api_key.arn },
+      { name = "PG_DSN",            value_from = aws_secretsmanager_secret.pg_dsn.arn },
     ]
   }
 
-  execution_role_arn      = aws_iam_role.exec.arn
-  infrastructure_role_arn = aws_iam_role.express_infra.arn
+  # Reuse the IAM roles from iam.tf instead of letting the module create new
+  # ones. Disabling create_*_iam_role makes the module honour the _arn vars.
+  create_execution_iam_role      = false
+  execution_iam_role_arn         = aws_iam_role.exec.arn
+  create_infrastructure_iam_role = false
+  infrastructure_iam_role_arn    = aws_iam_role.express_infra.arn
 
-  health_check = {
-    path = "/health"
-  }
+  health_check_path = "/health"
 
   network_configuration = {
     subnets = data.aws_subnets.target.ids

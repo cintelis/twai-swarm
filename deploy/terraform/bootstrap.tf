@@ -56,6 +56,10 @@ resource "null_resource" "db_bootstrap" {
   ]
 
   provisioner "local-exec" {
+    # Force bash on Windows (default would be cmd.exe, which can't run this script).
+    # On Linux/macOS bash is already the natural choice. Requires Git Bash on
+    # PATH on Windows — if `bash --version` works in PowerShell, you're set.
+    interpreter = ["bash", "-c"]
     command = <<-EOT
       set -e
       TASK_ARN=$(aws ecs run-task \

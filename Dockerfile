@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Force unbuffered stdout/stderr so print() lands in CloudWatch immediately.
+# Without this, Python block-buffers when stdout is a pipe and short messages
+# never appear until ~4KB accumulates (or the process exits).
+ENV PYTHONUNBUFFERED=1
+
 # Keep the image small but include the bits we'll inevitably need for debugging.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \

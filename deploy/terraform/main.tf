@@ -42,14 +42,22 @@ locals {
 # ─── Remote-state resources (created by deploy/bootstrap/) ─────────────
 # Looked up here so IAM policies can reference their real ARNs.
 # If these data lookups fail, run `terraform apply` in deploy/bootstrap/ first.
+#
+# The state infra prefix ("twai-swarm") is the REPO name, NOT var.project_name
+# ("lean-agent", the AWS resource prefix). Keep these in sync with
+# deploy/bootstrap/variables.tf:project_name.
+locals {
+  state_prefix = "twai-swarm"
+}
+
 data "aws_s3_bucket" "state" {
-  bucket = "${var.project_name}-tfstate-${local.account_id}"
+  bucket = "${local.state_prefix}-tfstate-${local.account_id}"
 }
 
 data "aws_dynamodb_table" "lock" {
-  name = "${var.project_name}-tflock"
+  name = "${local.state_prefix}-tflock"
 }
 
 data "aws_kms_alias" "state" {
-  name = "alias/${var.project_name}-tfstate"
+  name = "alias/${local.state_prefix}-tfstate"
 }
