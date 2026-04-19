@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TW AI Swarm</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    /* ── Totally Wild AI design tokens (mirrors ads-optimiser-crm) ── */
+    :root, [data-theme="dark"] {
+      --bg: #0F0F0F;
+      --surface: #1A1A1A;
+      --surface2: #2E2E2E;
+      --border: rgba(255,255,255,0.12);
+      --border2: rgba(255,255,255,0.06);
+      --text: #FFFFFF;
+      --muted: #C4C4C4;
+      --muted2: #A1A1A1;
+      --iris: #9B8EE8;
+      --iris-strong: #6E5CCC;
+      --green: #4ADE80;
+      --red: #F87171;
+      --amber: #FBBF24;
+      --input-bg: #1A1A1A;
+      --hover: #2E2E2E;
+      --focus: rgba(155,142,232,0.5);
+      --selected: rgba(110,92,204,0.12);
+      --font-head: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-mono: 'Geist Mono', 'SF Mono', 'Fira Code', monospace;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --radius-pill: 999px;
+      --header-height: 48px;
+    }
+    [data-theme="light"] {
+      --bg: #FFFFFF;
+      --surface: #FFFFFF;
+      --surface2: #F7F7F7;
+      --border: #E2E2E2;
+      --border2: #F0F0F0;
+      --text: #172B4D;
+      --muted: #5E6C84;
+      --muted2: #6B778C;
+      --iris: #6E5CCC;
+      --iris-strong: #6E5CCC;
+      --green: #16A34A;
+      --red: #DC2626;
+      --amber: #D97706;
+      --input-bg: #FFFFFF;
+      --hover: #F0F0F0;
+      --focus: rgba(110,92,204,0.4);
+      --selected: #F3F1FC;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 15px;
+      line-height: 1.55;
+      letter-spacing: -0.2px;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    /* ── Top bar ─────────────────────────────────────────── */
+    .topbar {
+      height: var(--header-height);
+      background: var(--surface);
+      border-bottom: 0.5px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .topbar-logo {
+      font-family: var(--font-head);
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: var(--text);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .topbar-logo .swarm { color: var(--iris); }
+    .topbar-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      border: 0.5px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-body);
+      font-size: 13px;
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    .icon-btn:hover { background: var(--hover); color: var(--text); }
+
+    /* ── Layout ──────────────────────────────────────────── */
+    .container {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .crumb {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .crumb a { color: var(--iris); text-decoration: none; }
+    .crumb a:hover { text-decoration: underline; }
+
+    h1 {
+      font-family: var(--font-head);
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 4px;
+    }
+    .section-label {
+      font-size: 11px;
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      font-weight: 600;
+      margin: 28px 0 10px;
+    }
+
+    /* ── Cards ────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 12px;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .card-title {
+      font-family: var(--font-head);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: var(--text);
+    }
+    .brief-text {
+      color: var(--muted);
+      white-space: pre-wrap;
+      font-size: 14px;
+    }
+
+    /* ── Form ────────────────────────────────────────────── */
+    label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      font-weight: 500;
+      margin-bottom: 6px;
+    }
+    input[type="text"], textarea {
+      width: 100%;
+      background: var(--input-bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+      margin-bottom: 16px;
+    }
+    input[type="text"]:focus, textarea:focus { border-color: var(--iris); }
+    textarea {
+      min-height: 140px;
+      resize: vertical;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+    .checkbox-row input { margin: 0; cursor: pointer; }
+    .checkbox-row label {
+      margin: 0;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: -0.2px;
+      font-size: 14px;
+      font-weight: 400;
+      cursor: pointer;
+    }
+
+    /* ── Buttons ─────────────────────────────────────────── */
+    .btn {
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      border: none;
+      cursor: pointer;
+      font-family: var(--font-body);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+      transition: opacity .15s, background .15s, border-color .15s;
+    }
+    .btn-primary { background: var(--iris-strong); color: #fff; }
+    .btn-primary:hover { background: var(--iris); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 0.5px solid var(--border);
+    }
+    .btn-ghost:hover { background: var(--hover); }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-danger:hover { opacity: 0.88; }
+
+    /* ── Tasks ───────────────────────────────────────────── */
+    .task-list { display: flex; flex-direction: column; gap: 8px; }
+    .task-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: var(--bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      gap: 12px;
+    }
+    .role {
+      font-weight: 600;
+      text-transform: capitalize;
+      min-width: 110px;
+      letter-spacing: -0.2px;
+    }
+    .meta-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+
+    /* ── Status badges ───────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: var(--radius-pill);
+      border: 0.5px solid transparent;
+    }
+    .badge.pending  { background: var(--surface2); color: var(--muted); }
+    .badge.running, .badge.RUNNING { background: rgba(251,191,36,0.12); color: var(--amber); border-color: rgba(251,191,36,0.3); }
+    .badge.done, .badge.COMPLETED { background: rgba(74,222,128,0.12); color: var(--green); border-color: rgba(74,222,128,0.3); }
+    .badge.failed, .badge.FAILED, .badge.CANCELED, .badge.TERMINATED { background: rgba(248,113,113,0.12); color: var(--red); border-color: rgba(248,113,113,0.3); }
+
+    /* ── Approval banner ─────────────────────────────────── */
+    .approval-banner {
+      background: rgba(155,142,232,0.08);
+      border: 0.5px solid var(--iris);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      margin-bottom: 12px;
+    }
+    .approval-banner .banner-title {
+      font-family: var(--font-head);
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--iris);
+      margin-bottom: 6px;
+    }
+    .approval-banner .banner-body {
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .approval-buttons { display: flex; gap: 8px; }
+
+    /* ── Misc ────────────────────────────────────────────── */
+    code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 0.5px solid var(--border);
+    }
+    .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+    .error-msg { color: var(--red); font-size: 14px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="#/" class="topbar-logo">TW <span class="swarm">Swarm</span></a>
+    <div class="topbar-actions">
+      <button id="themeBtn" class="icon-btn" title="Toggle theme">◐</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="crumb" class="crumb"></div>
+    <div id="root"></div>
+  </div>
+
+<script>
+const API = '';   // same-origin
+const root = document.getElementById('root');
+const crumb = document.getElementById('crumb');
+let pollTimer = null;
+
+// ─── Theme toggle (persisted) ───────────────────────────
+const themeBtn = document.getElementById('themeBtn');
+const savedTheme = localStorage.getItem('tw-swarm-theme') || 'dark';
+document.documentElement.setAttribute('data-theme', savedTheme);
+themeBtn.addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('tw-swarm-theme', next);
+});
+
+// ─── Router ─────────────────────────────────────────────
+function route() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  const hash = location.hash.replace(/^#\/?/, '');
+  if (hash.startsWith('p/')) showProject(hash.substring(2));
+  else showSubmit();
+}
+window.addEventListener('hashchange', route);
+window.addEventListener('load', route);
+
+// ─── Submit view ────────────────────────────────────────
+function showSubmit() {
+  crumb.innerHTML = '';
+  root.innerHTML = `
+    <h1>New project</h1>
+    <p class="brief-text" style="margin-bottom: 24px;">Describe what you'd like the agent swarm to plan, design, estimate, review, and document.</p>
+
+    <div class="card">
+      <form id="submitForm">
+        <label for="name">Name</label>
+        <input type="text" id="name" required placeholder="my-cli-tool" autocomplete="off" />
+
+        <label for="brief">Brief</label>
+        <textarea id="brief" required placeholder="Build a CLI tool that summarises git commits using idiomatic Rust..."></textarea>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="auto_approve" />
+          <label for="auto_approve">Skip approval gate (auto-approve after architect)</label>
+        </div>
+
+        <button type="submit" id="submitBtn" class="btn btn-primary">Start workflow</button>
+      </form>
+      <div id="submitError" class="error-msg"></div>
+    </div>
+  `;
+
+  document.getElementById('submitForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('submitError');
+    const btn = document.getElementById('submitBtn');
+    errorEl.textContent = '';
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    try {
+      const body = {
+        name: document.getElementById('name').value,
+        brief: document.getElementById('brief').value,
+        auto_approve: document.getElementById('auto_approve').checked,
+      };
+      const r = await fetch(API + '/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const data = await r.json();
+      location.hash = '#/p/' + data.workflow_id;
+    } catch (err) {
+      errorEl.textContent = err.message;
+      btn.disabled = false;
+      btn.textContent = 'Start workflow';
+    }
+  });
+}
+
+// ─── Status view ────────────────────────────────────────
+async function showProject(workflowId) {
+  crumb.innerHTML = `<a href="#/">← New project</a>`;
+  root.innerHTML = `<div class="card empty">Loading <code>${escapeHtml(workflowId)}</code>…</div>`;
+  await refreshProject(workflowId);
+  pollTimer = setInterval(() => refreshProject(workflowId), 3000);
+}
+
+async function refreshProject(workflowId) {
+  try {
+    const r = await fetch(`${API}/projects/${workflowId}`);
+    if (r.status === 404) {
+      root.innerHTML = `<div class="card empty">Project not found: <code>${escapeHtml(workflowId)}</code></div>`;
+      if (pollTimer) clearInterval(pollTimer);
+      return;
+    }
+    if (!r.ok) {
+      root.innerHTML = `<div class="card error-msg">Failed to load (HTTP ${r.status})</div>`;
+      return;
+    }
+    const data = await r.json();
+    renderProject(data);
+    if (['COMPLETED', 'FAILED', 'CANCELED', 'TERMINATED'].includes(data.status)) {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+  } catch (err) {
+    root.innerHTML = `<div class="card error-msg">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderProject(data) {
+  const { workflow_id, status, awaiting_approval, project, tasks } = data;
+
+  let html = `
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">${escapeHtml(project.name)}</div>
+        <span class="badge ${status}">${status}</span>
+      </div>
+      <div class="brief-text">${escapeHtml(project.brief)}</div>
+      <div style="margin-top: 14px;"><code>${escapeHtml(workflow_id)}</code></div>
+    </div>
+  `;
+
+  if (awaiting_approval) {
+    html += `
+      <div class="approval-banner">
+        <div class="banner-title">Awaiting approval</div>
+        <div class="banner-body">The Architect has produced a design. Approve to continue with SE → Estimator → Reviewer → Documenter, or reject with a reason.</div>
+        <div class="approval-buttons">
+          <button id="approveBtn" class="btn btn-primary">Approve</button>
+          <button id="rejectBtn" class="btn btn-danger">Reject</button>
+        </div>
+      </div>
+    `;
+  }
+
+  html += `<div class="section-label">Tasks (${tasks.length})</div>`;
+  if (tasks.length === 0) {
+    html += `<div class="card empty">Workflow just started — agents will appear here as they're scheduled.</div>`;
+  } else {
+    html += `<div class="card"><div class="task-list">`;
+    for (const t of tasks) {
+      const cost = t.cost_usd != null ? `$${parseFloat(t.cost_usd).toFixed(4)}` : '';
+      const tokens = (t.tokens_in || t.tokens_out) ? `${t.tokens_in || 0}→${t.tokens_out || 0} tok` : '';
+      const model = t.model_used || '';
+      html += `
+        <div class="task-row">
+          <span class="role">${escapeHtml(t.role)}</span>
+          <span class="meta-row">
+            ${model ? `<span class="meta">${escapeHtml(model)}</span>` : ''}
+            ${tokens ? `<span class="meta">${tokens}</span>` : ''}
+            ${cost ? `<span class="meta">${cost}</span>` : ''}
+            <span class="badge ${t.status}">${t.status}</span>
+          </span>
+        </div>
+      `;
+    }
+    html += `</div></div>`;
+  }
+
+  root.innerHTML = html;
+
+  if (awaiting_approval) {
+    document.getElementById('approveBtn').addEventListener('click', () => approveProject(workflow_id));
+    document.getElementById('rejectBtn').addEventListener('click', () => rejectProject(workflow_id));
+  }
+}
+
+async function approveProject(workflowId) {
+  try {
+    const r = await fetch(`${API}/projects/${workflowId}/approve`, { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    await refreshProject(workflowId);
+  } catch (err) {
+    alert('Approve failed: ' + err.message);
+  }
+}
+
+async function rejectProject(workflowId) {
+  const reason = prompt('Reject reason (optional):') || '';
+  try {
+    const r = await fetch(`${API}/projects/${workflowId}/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    await refreshProject(workflowId);
+  } catch (err) {
+    alert('Reject failed: ' + err.message);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>

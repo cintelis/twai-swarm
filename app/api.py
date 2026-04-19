@@ -1,18 +1,27 @@
 """
-Thin intake API. Three endpoints:
-- GET  /health        -> ALB health check target
-- POST /projects      -> start a workflow
-- GET  /projects/{id} -> poll status
+Thin intake API + bundled UI. Endpoints:
+- GET  /                   -> redirects to /ui/
+- GET  /ui/                -> static SPA (app/static/index.html)
+- GET  /health             -> ALB health check target
+- POST /projects           -> start a workflow
+- GET  /projects/{id}      -> poll status
+- GET  /projects/{id}/costs
+- POST /projects/{id}/approve
+- POST /projects/{id}/reject
 """
 import asyncio
+import pathlib
 import uuid
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from temporalio.client import Client
 
 from app import config, db
 from app.workflows import ProjectWorkflow, ProjectInput
+
+STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 app = FastAPI(title="Lean Agent Framework")
 _temporal: Client | None = None
@@ -200,3 +209,13 @@ async def get_project(workflow_id: str):
             for t in tasks
         ],
     }
+
+
+# ─── UI ─────────────────────────────────────────────────
+# Mount AFTER all API routes so they win on the path resolver.
+@app.get("/", include_in_schema=False)
+async def root_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/ui/")
+
+
+app.mount("/ui", StaticFiles(directory=str(STATIC_DIR), html=True), name="ui")
