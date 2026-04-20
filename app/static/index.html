@@ -803,25 +803,35 @@ function renderProject(data) {
 
   // ── Generated code (when coder is done) ─────────────────
   const coderTask = tasks.find(t => t.role === 'coder' && t.status === 'done' && t.output);
-  if (coderTask && coderTask.output && Array.isArray(coderTask.output.files)) {
+  if (coderTask && coderTask.output) {
     const out = coderTask.output;
-    const files = out.files;
-    const totalSize = files.reduce((acc, f) => acc + (f.content || '').length, 0);
-    html += `
-      <div class="code-card">
-        <div class="code-head">
-          <div class="code-title">Generated scaffold ${out.language ? `<span class="meta">· ${escapeHtml(out.language)}</span>` : ''}</div>
-          <button class="btn btn-primary" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
-        </div>
-        ${out.summary ? `<div class="code-summary">${escapeHtml(out.summary)}</div>` : ''}
-        <div class="file-tree">
-    `;
-    for (const f of files) {
-      const path = f.path || '(no path)';
-      const size = (f.content || '').length;
-      html += `<div class="file-tree-item">${escapeHtml(path)}<span class="file-size">${size.toLocaleString()} chars</span></div>`;
+    const isTruncated = out.parse_error === true && typeof out.raw_text === 'string';
+    const hasFiles = Array.isArray(out.files) && out.files.length > 0;
+
+    if (hasFiles || isTruncated) {
+      html += `
+        <div class="code-card">
+          <div class="code-head">
+            <div class="code-title">Generated scaffold ${out.language ? `<span class="meta">· ${escapeHtml(out.language)}</span>` : ''}</div>
+            <button class="btn btn-primary" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
+          </div>
+      `;
+      if (isTruncated && !hasFiles) {
+        html += `<div class="code-summary" style="color: var(--amber);">⚠ Output was truncated mid-generation (max_tokens exceeded). The download still works — we salvage every complete file from what the model did produce.</div>`;
+      } else if (out.summary) {
+        html += `<div class="code-summary">${escapeHtml(out.summary)}</div>`;
+      }
+      if (hasFiles) {
+        html += `<div class="file-tree">`;
+        for (const f of out.files) {
+          const path = f.path || '(no path)';
+          const size = (f.content || '').length;
+          html += `<div class="file-tree-item">${escapeHtml(path)}<span class="file-size">${size.toLocaleString()} chars</span></div>`;
+        }
+        html += `</div>`;
+      }
+      html += `</div>`;
     }
-    html += `</div></div>`;
   }
 
   // ── Approval banner ─────────────────────────────────────
