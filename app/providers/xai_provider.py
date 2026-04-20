@@ -18,7 +18,9 @@ def _get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             api_key=config.XAI_API_KEY,
             base_url="https://api.x.ai/v1",
-            timeout=60.0,
+            # Mirrors the Anthropic client — Grok reasoning + web_search can
+            # take 3-5 min on complex briefs.
+            timeout=300.0,
         )
     return _client
 

@@ -7,7 +7,11 @@ _client: AsyncAnthropic | None = None
 def _get_client() -> AsyncAnthropic:
     global _client
     if _client is None:
-        _client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0)
+        # 300s matches Anthropic's guidance for long requests (Opus + web_search
+        # + 16K output can legitimately take 3-5 min). For calls that genuinely
+        # shouldn't take this long, the workflow's heartbeat_timeout catches
+        # wedged workers independently.
+        _client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
     return _client
 
 async def complete(

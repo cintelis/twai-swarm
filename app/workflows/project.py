@@ -26,6 +26,7 @@ via activities, no datetime.now() or random.
 from dataclasses import dataclass
 from datetime import timedelta
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.activities import (
@@ -36,6 +37,29 @@ with workflow.unsafe.imports_passed_through():
         run_agent_activity,
     )
     from app import config
+
+# Cap retries so a single wedged activity can't drain LLM credits.
+# Default Temporal retry policy is infinite exponential backoff, which is
+# catastrophic for LLM calls: each retry re-bills the full token count even
+# when the client timed out mid-read.
+#
+# - maximum_attempts=3 bounds the worst case at 3x the expected cost.
+# - non_retryable_error_types skip retries on errors that won't self-heal
+#   (auth, bad request, quota exhausted). Temporal keeps retrying on
+#   transient errors (timeouts, rate limits) up to the attempt cap.
+LLM_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    non_retryable_error_types=[
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "BadRequestError",
+        "NotFoundError",
+        "TypeError",  # caught SDK mismatches like the httpx/proxies crash
+    ],
+)
 
 @dataclass
 class ProjectInput:
@@ -126,6 +150,9 @@ class ProjectWorkflow:
                 # keeps us honest about whether the worker is actually alive.
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(minutes=2),
+                # CAPPED retries — infinite default drained Anthropic credits
+                # when the SDK timeout + web_search kept timing out.
+                retry_policy=LLM_RETRY_POLICY,
             )
 
         # Phase 1: discovery (parallel)
