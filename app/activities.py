@@ -4,6 +4,7 @@ Workflows must stay deterministic, so they can ONLY call into here.
 
 Rule of thumb: if it touches the network, a clock, or randomness, it's an activity.
 """
+import asyncio
 import logging
 import traceback
 from dataclasses import dataclass
@@ -13,6 +14,21 @@ from temporalio import activity
 from . import db, agents
 
 logger = logging.getLogger(__name__)
+
+
+async def _keep_alive(interval: float = 20.0, message: str = "calling LLM") -> None:
+    """Background heartbeat so long LLM calls don't trip Temporal's timeout.
+
+    Web search grounding on BA/architect easily takes >60s; without a
+    background heartbeat the activity looks stuck even though it's making
+    progress. Cancelled via asyncio when the awaited work completes.
+    """
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            activity.heartbeat(message)
+    except asyncio.CancelledError:
+        pass
 
 @dataclass
 class AgentTaskInput:
@@ -48,8 +64,10 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
 
     context = await db.get_ancestor_outputs(task_id)
 
-    # Heartbeat lets Temporal know we're alive during the LLM call.
+    # Fire an initial heartbeat, then hand it off to a background task that
+    # keeps pinging Temporal every 20s while we're awaiting the LLM.
     activity.heartbeat("calling LLM")
+    hb_task = asyncio.create_task(_keep_alive())
 
     try:
         result = await agents.run_agent(
@@ -65,6 +83,12 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
         )
         await db.fail_task(task_id, str(e))
         raise
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
 
     # Sidecar grounding metadata (web_search citations etc.) lands inside the
     # output JSON under `_citations` so it's queryable without a schema change

@@ -120,8 +120,12 @@ class ProjectWorkflow:
                 run_agent_activity,
                 args=[task_id, task_input],
                 task_queue=config.QUEUES[role],
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=60),
+                # Architect + coder can run 3-8 min with web_search / 16K
+                # output; BA + researcher 1-3 min. Generous ceiling so real
+                # work finishes; the background heartbeat in activities.py
+                # keeps us honest about whether the worker is actually alive.
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(minutes=2),
             )
 
         # Phase 1: discovery (parallel)
