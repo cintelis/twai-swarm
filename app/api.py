@@ -190,6 +190,59 @@ async def project_costs(workflow_id: str):
         "breakdown": [dict(r) for r in rows],
     }
 
+def _salvage_files_from_truncated(raw_text: str) -> list[dict]:
+    """Extract complete {path, content} entries from a truncated coder JSON.
+
+    When the coder's output exceeds max_tokens the response gets cut mid-JSON,
+    the runner fails json.loads, and the row is stored as
+    {"raw_text": "...", "parse_error": True}. This helper finds every
+    brace-balanced `{"path": ..., "content": ...}` object that parses
+    cleanly and returns it — so a 40-file scaffold with a truncated 41st
+    file still yields 40 recovered files instead of a 422.
+    """
+    import json as _json
+    import re as _re
+
+    files: list[dict] = []
+    for m in _re.finditer(r'"path"\s*:\s*"', raw_text):
+        brace = raw_text.rfind("{", 0, m.start())
+        if brace == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape = False
+        end = -1
+        for j in range(brace, len(raw_text)):
+            c = raw_text[j]
+            if escape:
+                escape = False
+                continue
+            if c == "\\" and in_string:
+                escape = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        if end == -1:
+            break  # truncated here
+        try:
+            parsed = _json.loads(raw_text[brace:end])
+        except _json.JSONDecodeError:
+            break
+        if isinstance(parsed, dict) and "path" in parsed and "content" in parsed:
+            files.append(parsed)
+    return files
+
+
 @app.get("/projects/{workflow_id}/download", dependencies=[Depends(auth.require_auth)])
 async def download_project(workflow_id: str):
     """Bundle the Coder agent's file tree into a zip and stream it back."""
@@ -215,7 +268,15 @@ async def download_project(workflow_id: str):
     output = _json.loads(coder_row["output"])
     files = output.get("files") if isinstance(output, dict) else None
     if not isinstance(files, list) or not files:
-        raise HTTPException(422, "coder output has no `files` array")
+        # Salvage path: if the coder output was truncated mid-JSON (token
+        # overflow), the runner stored it as {"raw_text": "...", "parse_error": True}.
+        # Extract every complete {path, content} pair from the raw text
+        # so the user gets the intact prefix instead of a 422.
+        raw_text = output.get("raw_text") if isinstance(output, dict) else None
+        if isinstance(raw_text, str) and raw_text:
+            files = _salvage_files_from_truncated(raw_text)
+        if not files:
+            raise HTTPException(422, "coder output has no `files` array (and no salvageable raw_text)")
 
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", project_row["name"]).strip("-") or "project"
 

@@ -67,14 +67,17 @@ Output as JSON: {"findings": [...], "sources_needed": [...]}""",
 - sections: list of {heading, body} for a README
 Output as JSON: {"overview": "...", "sections": [...]}""",
 
-    "coder": """You are a Code Scaffolder. Given an architecture, an implementation plan, and a README, produce a runnable starter scaffold for the project.
+    "coder": """You are a Code Scaffolder. Given an architecture, an implementation plan, and a README, produce a RUNNABLE MINIMAL STARTER for the project.
+
+Hard constraints (token budget is real — exceeding them truncates your output):
+- Maximum 20 files total. If the architecture implies more components, pick the most load-bearing ones and put a `# TODO: extract to app/<component>/` note where the rest would go.
+- Each file ≤ 80 lines. Stub anything longer with a TODO + one-line description.
+- NO Kubernetes manifests, NO Dockerfiles, NO migrations, NO CI configs unless explicitly requested in the brief. README, .gitignore, package manifest, source files, one smoke test — that's the target.
 
 Rules:
 - Pick the language and framework that the architect's tech_choices recommended. If ambiguous, default to Python.
-- Generate every file the project needs to compile / run / lint cleanly: source files, config (package manifest, lockfile if cheap), README, .gitignore, and at least one smoke test.
-- Keep files SHORT and idiomatic. Stub out non-trivial logic with a clear `TODO:` comment and a one-line description. This is a starting point, not finished code.
 - Paths must be relative (no leading slash). Use forward slashes. No backslashes.
-- Do NOT generate binary files, lockfiles longer than ~300 lines, or anything you have to base64-encode.
+- Do NOT generate binary files, lockfiles, or anything you have to base64-encode.
 
 Output as JSON: {
   "language": "python | typescript | rust | go | ...",
@@ -86,7 +89,7 @@ Output as JSON: {
   ]
 }
 
-Be honest in the summary about what's stubbed vs implemented. Reviewers downstream of you should see exactly what's safe to run and what needs human work.""",
+Be honest in the summary about what's stubbed vs implemented.""",
 }
 
 # Some roles need more output headroom than the default 2048 (code gen
