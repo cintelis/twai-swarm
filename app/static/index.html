@@ -516,13 +516,56 @@
     }
     .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
     .error-msg { color: var(--red); font-size: 14px; margin-top: 12px; }
+
+    /* ── Token modal ─────────────────────────────────────── */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 24px;
+    }
+    .modal {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 28px 24px;
+      max-width: 420px;
+      width: 100%;
+    }
+    .modal h2 {
+      font-family: var(--font-head);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      margin-bottom: 6px;
+    }
+    .modal p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .modal input { margin-bottom: 8px; }
+    .modal-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
   </style>
 </head>
 <body>
   <div class="topbar">
     <a href="#/" class="topbar-logo">TW <span class="swarm">Swarm</span></a>
     <div class="topbar-actions">
+      <button id="signOutBtn" class="icon-btn" title="Sign out" style="display:none">⎋</button>
       <button id="themeBtn" class="icon-btn" title="Toggle theme">◐</button>
+    </div>
+  </div>
+
+  <div id="tokenModal" class="modal-backdrop" style="display:none">
+    <div class="modal">
+      <h2>Sign in</h2>
+      <p>This swarm requires an API token. Paste it below — it'll be saved locally in your browser.</p>
+      <input type="text" id="tokenInput" placeholder="Bearer token" autocomplete="off" />
+      <div id="tokenError" class="error-msg" style="margin: 4px 0 0;"></div>
+      <div class="modal-buttons">
+        <button id="tokenSubmit" class="btn btn-primary">Continue</button>
+      </div>
     </div>
   </div>
 
@@ -536,6 +579,78 @@ const API = '';   // same-origin
 const root = document.getElementById('root');
 const crumb = document.getElementById('crumb');
 let pollTimer = null;
+
+// ─── Auth ───────────────────────────────────────────────
+const TOKEN_KEY = 'tw-swarm-token';
+const tokenModal = document.getElementById('tokenModal');
+const tokenInput = document.getElementById('tokenInput');
+const tokenError = document.getElementById('tokenError');
+const tokenSubmit = document.getElementById('tokenSubmit');
+const signOutBtn = document.getElementById('signOutBtn');
+let authRequired = false;
+
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+function setToken(t) { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); }
+function showSignOutBtn() { signOutBtn.style.display = authRequired ? '' : 'none'; }
+
+async function apiFetch(path, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const tok = getToken();
+  if (tok) headers.set('Authorization', 'Bearer ' + tok);
+  const r = await fetch(API + path, { ...opts, headers });
+  if (r.status === 401) {
+    setToken('');
+    showTokenModal('Token rejected. Please sign in again.');
+    throw new Error('unauthorised');
+  }
+  return r;
+}
+
+function showTokenModal(message = '') {
+  tokenError.textContent = message;
+  tokenInput.value = '';
+  tokenModal.style.display = 'flex';
+  setTimeout(() => tokenInput.focus(), 50);
+}
+
+function hideTokenModal() { tokenModal.style.display = 'none'; }
+
+tokenSubmit.addEventListener('click', async () => {
+  const v = tokenInput.value.trim();
+  if (!v) return;
+  setToken(v);
+  // Validate by calling /auth/check; on 401, token cleared and modal stays
+  try {
+    const r = await apiFetch('/auth/check');
+    if (r.ok) {
+      hideTokenModal();
+      showSignOutBtn();
+      route();  // re-run the router to render the current view
+    }
+  } catch (_e) { /* apiFetch already handled 401 */ }
+});
+tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') tokenSubmit.click(); });
+
+signOutBtn.addEventListener('click', () => {
+  setToken('');
+  showTokenModal('Signed out. Enter your token to continue.');
+});
+
+async function bootAuth() {
+  // Ask the server whether auth is even on. If off, no modal, no header.
+  const r = await fetch(API + '/auth/status');
+  if (!r.ok) { authRequired = false; return; }
+  const data = await r.json();
+  authRequired = !!data.auth_required;
+  showSignOutBtn();
+  if (!authRequired) return;
+  // Auth on — validate any stored token; show modal if missing/invalid
+  if (!getToken()) { showTokenModal(); return; }
+  try {
+    const v = await apiFetch('/auth/check');
+    if (!v.ok) showTokenModal();
+  } catch (_e) { /* modal already shown */ }
+}
 
 // ─── Theme toggle (persisted) ───────────────────────────
 const themeBtn = document.getElementById('themeBtn');
@@ -556,7 +671,10 @@ function route() {
   else showSubmit();
 }
 window.addEventListener('hashchange', route);
-window.addEventListener('load', route);
+window.addEventListener('load', async () => {
+  await bootAuth();
+  route();
+});
 
 // ─── Submit view ────────────────────────────────────────
 function showSubmit() {
@@ -597,7 +715,7 @@ function showSubmit() {
         brief: document.getElementById('brief').value,
         auto_approve: document.getElementById('auto_approve').checked,
       };
-      const r = await fetch(API + '/projects', {
+      const r = await apiFetch('/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -623,7 +741,7 @@ async function showProject(workflowId) {
 
 async function refreshProject(workflowId) {
   try {
-    const r = await fetch(`${API}/projects/${workflowId}`);
+    const r = await apiFetch(`/projects/${workflowId}`);
     if (r.status === 404) {
       root.innerHTML = `<div class="card empty">Project not found: <code>${escapeHtml(workflowId)}</code></div>`;
       if (pollTimer) clearInterval(pollTimer);
@@ -693,7 +811,7 @@ function renderProject(data) {
       <div class="code-card">
         <div class="code-head">
           <div class="code-title">Generated scaffold ${out.language ? `<span class="meta">· ${escapeHtml(out.language)}</span>` : ''}</div>
-          <a href="${API}/projects/${escapeHtml(workflow_id)}/download" class="btn btn-primary" download>Download .zip</a>
+          <button class="btn btn-primary" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
         </div>
         ${out.summary ? `<div class="code-summary">${escapeHtml(out.summary)}</div>` : ''}
         <div class="file-tree">
@@ -765,6 +883,10 @@ function renderProject(data) {
     document.getElementById('rejectBtn').addEventListener('click', () => rejectProject(workflow_id));
   }
 
+  // Wire up scaffold download button
+  const dlBtn = root.querySelector('[data-download-id]');
+  if (dlBtn) dlBtn.addEventListener('click', () => downloadScaffold(dlBtn.dataset.downloadId, dlBtn));
+
   // Wire up task expand/collapse (only on rows that actually have output)
   for (const item of root.querySelectorAll('.task-item')) {
     const row = item.querySelector('.task-row');
@@ -817,9 +939,38 @@ function renderTaskDetail(t) {
   return html;
 }
 
+async function downloadScaffold(workflowId, btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Downloading…';
+  try {
+    const r = await apiFetch(`/projects/${workflowId}/download`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    // Filename comes from Content-Disposition; fallback to a sane default.
+    let filename = `${workflowId}-scaffold.zip`;
+    const disp = r.headers.get('Content-Disposition') || '';
+    const m = disp.match(/filename="([^"]+)"/);
+    if (m) filename = m[1];
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('Download failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 async function loadCostSummary(workflowId) {
   try {
-    const r = await fetch(`${API}/projects/${workflowId}/costs`);
+    const r = await apiFetch(`/projects/${workflowId}/costs`);
     if (!r.ok) {
       document.getElementById('costSummaryBody').innerHTML = `<span class="empty">Cost data unavailable.</span>`;
       return;
@@ -869,7 +1020,7 @@ async function loadCostSummary(workflowId) {
 
 async function approveProject(workflowId) {
   try {
-    const r = await fetch(`${API}/projects/${workflowId}/approve`, { method: 'POST' });
+    const r = await apiFetch(`/projects/${workflowId}/approve`, { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     await refreshProject(workflowId);
   } catch (err) {
@@ -880,7 +1031,7 @@ async function approveProject(workflowId) {
 async function rejectProject(workflowId) {
   const reason = prompt('Reject reason (optional):') || '';
   try {
-    const r = await fetch(`${API}/projects/${workflowId}/reject`, {
+    const r = await apiFetch(`/projects/${workflowId}/reject`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason }),

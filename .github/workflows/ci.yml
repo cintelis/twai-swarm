@@ -60,3 +60,36 @@ jobs:
 
       - name: Validate
         run: terraform validate
+
+  models:
+    # Pings every model in app.router.MODELS with a 1-token request. Catches
+    # SDK incompatibilities (httpx kwargs), stale model strings, and provider
+    # auth issues BEFORE they hit production retry loops.
+    #
+    # Requires repo secrets ANTHROPIC_API_KEY and XAI_API_KEY (the same values
+    # that live in AWS Secrets Manager). Skips silently if either is missing
+    # to avoid blocking PRs from forks.
+    name: Model smoke ping
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'  # don't run on PRs from forks (no secrets)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime deps
+        run: pip install -r requirements.txt
+
+      - name: Ping every model
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] || [ -z "$XAI_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY or XAI_API_KEY missing — skipping model smoke"
+            exit 0
+          fi
+          python scripts/smoke_models.py

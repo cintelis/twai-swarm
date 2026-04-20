@@ -16,24 +16,47 @@ import pathlib
 import re
 import uuid
 import zipfile
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from temporalio.client import Client
 
-from app import config, db
+from app import auth, config, db
 from app.workflows import ProjectWorkflow, ProjectInput
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
+# Per-IP rate limiter. Generous defaults for a single-team dev tool;
+# slowapi's in-memory store is fine for one container — tighten + use
+# Redis if we ever scale the API horizontally beyond two tasks.
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+
 app = FastAPI(title="Lean Agent Framework")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 _temporal: Client | None = None
 
 
 @app.on_event("startup")
 async def _validate_config() -> None:
     config.validate_runtime()
+
+
+@app.get("/auth/check", include_in_schema=False)
+async def auth_check(_: None = Depends(auth.require_auth)) -> dict:
+    """UI calls this on load to decide whether the stored token is still valid.
+    Returns 200 if (auth disabled) OR (valid token supplied), 401 otherwise."""
+    return {"ok": True, "auth_required": auth.auth_enabled()}
+
+
+@app.get("/auth/status", include_in_schema=False)
+async def auth_status() -> dict:
+    """Tells the UI whether to show the token-entry modal at all."""
+    return {"auth_required": auth.auth_enabled()}
 
 def _connect_kwargs():
     """Temporal Cloud uses TLS + API key; local dev uses plaintext."""
@@ -108,8 +131,9 @@ class CreateProjectResp(BaseModel):
 class RejectReq(BaseModel):
     reason: str = ""
 
-@app.post("/projects", response_model=CreateProjectResp)
-async def create_project(req: CreateProjectReq):
+@app.post("/projects", response_model=CreateProjectResp, dependencies=[Depends(auth.require_auth)])
+@limiter.limit("10/minute")
+async def create_project(request: Request, req: CreateProjectReq):
     client = await temporal()
     workflow_id = f"project-{uuid.uuid4()}"
     await client.start_workflow(
@@ -120,7 +144,7 @@ async def create_project(req: CreateProjectReq):
     )
     return CreateProjectResp(workflow_id=workflow_id)
 
-@app.post("/projects/{workflow_id}/approve")
+@app.post("/projects/{workflow_id}/approve", dependencies=[Depends(auth.require_auth)])
 async def approve_project(workflow_id: str):
     """Release the approval gate. Idempotent: signalling twice is fine."""
     client = await temporal()
@@ -128,7 +152,7 @@ async def approve_project(workflow_id: str):
     await handle.signal(ProjectWorkflow.approve)
     return {"status": "approved", "workflow_id": workflow_id}
 
-@app.post("/projects/{workflow_id}/reject")
+@app.post("/projects/{workflow_id}/reject", dependencies=[Depends(auth.require_auth)])
 async def reject_project(workflow_id: str, req: RejectReq):
     """Reject at the gate. Workflow short-circuits and returns."""
     client = await temporal()
@@ -136,7 +160,7 @@ async def reject_project(workflow_id: str, req: RejectReq):
     await handle.signal(ProjectWorkflow.reject, req.reason)
     return {"status": "rejected", "workflow_id": workflow_id, "reason": req.reason}
 
-@app.get("/projects/{workflow_id}/costs")
+@app.get("/projects/{workflow_id}/costs", dependencies=[Depends(auth.require_auth)])
 async def project_costs(workflow_id: str):
     """Spend breakdown for a project. Useful for router tuning over time."""
     pool = await db.get_pool()
@@ -166,7 +190,7 @@ async def project_costs(workflow_id: str):
         "breakdown": [dict(r) for r in rows],
     }
 
-@app.get("/projects/{workflow_id}/download")
+@app.get("/projects/{workflow_id}/download", dependencies=[Depends(auth.require_auth)])
 async def download_project(workflow_id: str):
     """Bundle the Coder agent's file tree into a zip and stream it back."""
     pool = await db.get_pool()
@@ -219,7 +243,7 @@ async def download_project(workflow_id: str):
     )
 
 
-@app.get("/projects/{workflow_id}")
+@app.get("/projects/{workflow_id}", dependencies=[Depends(auth.require_auth)])
 async def get_project(workflow_id: str):
     client = await temporal()
     handle = client.get_workflow_handle(workflow_id)

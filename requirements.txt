@@ -11,3 +11,4 @@ asyncpg==0.30.0
 pydantic==2.9.2
 python-dotenv==1.0.1
 aiohttp==3.10.11
+slowapi==0.1.9
