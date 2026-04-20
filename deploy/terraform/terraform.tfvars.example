@@ -20,5 +20,24 @@ temporal_api_key  = "tmprl_..."
 
 db_password = "generate-a-strong-password-here"
 
-# Leave empty to use default VPC; set for production
+# Leave empty to use default VPC; set for production (see prod-runbook.md)
 vpc_id = ""
+
+# ── HA / scaling knobs ─────────────────────────────────────────────
+# Defaults below match dev. Flip for prod when ready.
+#
+# db_instance_class        = "db.r6g.large"       # ~$200/mo, fits real load
+# db_allocated_storage     = 100                  # GB
+# db_multi_az              = true                 # roughly 2x DB cost
+# db_backup_retention_days = 7                    # max 35
+# db_deletion_protection   = true                 # also keeps a final snapshot
+#
+# api_min_tasks            = 2                    # always >=2 in prod for HA
+# api_max_tasks            = 20
+# api_cpu_target           = 60
+# api_cpu                  = 1024
+# api_memory               = 2048
+#
+# worker_cpu               = 2048
+# worker_memory            = 4096
+# worker_desired_count     = 2                    # for HA; or split per-queue

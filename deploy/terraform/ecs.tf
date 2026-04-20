@@ -71,8 +71,8 @@ resource "aws_ecs_task_definition" "worker" {
   family                   = "${local.name_prefix}-worker"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "1024"
-  memory                   = "2048"
+  cpu                      = tostring(var.worker_cpu)
+  memory                   = tostring(var.worker_memory)
   execution_role_arn       = aws_iam_role.exec.arn
   task_role_arn            = aws_iam_role.task.arn
 
@@ -129,7 +129,7 @@ resource "aws_ecs_service" "worker" {
   name            = "${local.name_prefix}-worker"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.worker.arn
-  desired_count   = 1
+  desired_count   = var.worker_desired_count
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -173,8 +173,8 @@ module "api_express" {
   name    = "${local.name_prefix}-api-v2"
   cluster = aws_ecs_cluster.main.name
 
-  cpu    = 512
-  memory = 1024
+  cpu    = var.api_cpu
+  memory = var.api_memory
 
   primary_container = {
     image          = "${aws_ecr_repository.app.repository_url}:${var.image_tag}"
@@ -209,9 +209,9 @@ module "api_express" {
 
   scaling_target = {
     auto_scaling_metric       = "AVERAGE_CPU"
-    auto_scaling_target_value = "70"
-    min_task_count            = 1
-    max_task_count            = 5
+    auto_scaling_target_value = tostring(var.api_cpu_target)
+    min_task_count            = var.api_min_tasks
+    max_task_count            = var.api_max_tasks
   }
 
   vpc_id = data.aws_vpc.target.id

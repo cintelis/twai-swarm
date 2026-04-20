@@ -35,19 +35,22 @@ resource "aws_db_instance" "pg" {
   identifier             = "${local.name_prefix}-pg"
   engine                 = "postgres"
   engine_version         = "16.13"
-  instance_class         = "db.t4g.micro"
-  allocated_storage      = 20
+  instance_class         = var.db_instance_class
+  allocated_storage      = var.db_allocated_storage
   storage_type           = "gp3"
   db_name                = "agentdb"
   username               = "postgres"
   password               = var.db_password
   db_subnet_group_name   = aws_db_subnet_group.pg.name
   vpc_security_group_ids = [aws_security_group.pg.id]
-  skip_final_snapshot    = true
   publicly_accessible    = false
   apply_immediately      = true
+  multi_az               = var.db_multi_az
 
-  # You'll want to flip these for anything non-demo.
-  backup_retention_period = 1
-  deletion_protection     = false
+  # Prod: flip db_deletion_protection=true and bump db_backup_retention_days.
+  # Skip_final_snapshot mirrors deletion_protection — if you guard the DB,
+  # also keep its goodbye snapshot.
+  backup_retention_period = var.db_backup_retention_days
+  deletion_protection     = var.db_deletion_protection
+  skip_final_snapshot     = !var.db_deletion_protection
 }
