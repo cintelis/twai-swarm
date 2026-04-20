@@ -1,8 +1,8 @@
 temporalio==1.8.0
-# Bumped from 0.39 to enable Anthropic web_search server-side tool
-# (web_search_20260209, available Sonnet 4.6 / Opus 4.7). 0.39's response
-# types didn't know server_tool_use / web_search_tool_result / citations.
-# 0.40+ also handles httpx 0.28's `mounts=` kwarg, removing the httpx pin.
+# anthropic>=0.40 handles httpx 0.28's `proxies` → `mounts` rename.
+# openai==1.54.3 does NOT — it still calls httpx.AsyncClient(proxies=...)
+# which crashes on httpx 0.28+. Hence the httpx pin below. Remove the pin
+# when bumping openai to >=1.55.
 anthropic>=0.40,<2.0
 openai==1.54.3
 fastapi==0.115.0
@@ -12,3 +12,4 @@ pydantic==2.9.2
 python-dotenv==1.0.1
 aiohttp==3.10.11
 slowapi==0.1.9
+httpx<0.28
