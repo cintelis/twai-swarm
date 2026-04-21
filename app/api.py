@@ -160,6 +160,48 @@ async def reject_project(workflow_id: str, req: RejectReq):
     await handle.signal(ProjectWorkflow.reject, req.reason)
     return {"status": "rejected", "workflow_id": workflow_id, "reason": req.reason}
 
+@app.get("/projects", dependencies=[Depends(auth.require_auth)])
+async def list_projects(limit: int = 50):
+    """Recent projects for the UI listing view.
+
+    Returns each project with enough metadata to render a card: workflow_id,
+    name, brief (truncated), created_at, and the current task counts +
+    aggregate cost. ORDER BY created_at DESC so newest is first.
+    """
+    pool = await db.get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.name, p.brief, p.workflow_id, p.status, p.created_at,
+               COUNT(t.id)                                             AS task_count,
+               COUNT(t.id) FILTER (WHERE t.status = 'done')            AS done_count,
+               COUNT(t.id) FILTER (WHERE t.status = 'failed')          AS failed_count,
+               COALESCE(SUM(t.cost_usd), 0)                            AS total_cost_usd
+        FROM projects p
+        LEFT JOIN tasks t ON t.project_id = p.id
+        GROUP BY p.id
+        ORDER BY p.created_at DESC
+        LIMIT $1
+        """,
+        max(1, min(limit, 200)),
+    )
+    return {
+        "projects": [
+            {
+                "workflow_id": r["workflow_id"],
+                "name": r["name"],
+                "brief": (r["brief"] or "")[:160] + ("…" if r["brief"] and len(r["brief"]) > 160 else ""),
+                "status": r["status"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "task_count": r["task_count"],
+                "done_count": r["done_count"],
+                "failed_count": r["failed_count"],
+                "total_cost_usd": float(r["total_cost_usd"] or 0),
+            }
+            for r in rows
+        ]
+    }
+
+
 @app.get("/projects/{workflow_id}/costs", dependencies=[Depends(auth.require_auth)])
 async def project_costs(workflow_id: str):
     """Spend breakdown for a project. Useful for router tuning over time."""

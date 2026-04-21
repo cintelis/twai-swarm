@@ -505,6 +505,202 @@
     }
     .approval-buttons { display: flex; gap: 8px; }
 
+    /* ── Landing page ──────────────────────────────────────── */
+    .hero {
+      margin-bottom: 28px;
+    }
+    .tagline {
+      font-family: var(--font-head);
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.6px;
+      margin-bottom: 12px;
+      line-height: 1.25;
+    }
+    .pitch {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+      max-width: 70ch;
+    }
+    .pipeline-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: step;
+    }
+    .pipeline-list li {
+      counter-increment: step;
+      background: var(--bg);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px 10px 38px;
+      position: relative;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .pipeline-list li::before {
+      content: counter(step);
+      position: absolute;
+      left: 12px;
+      top: 10px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--iris-strong);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .pipeline-list li strong {
+      display: block;
+      color: var(--text);
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 1px;
+    }
+    .pipeline-list li.gate {
+      border-color: var(--iris);
+      background: var(--selected);
+    }
+    .pipeline-list li.gate::before {
+      content: "⏸";
+      background: var(--iris);
+      font-size: 10px;
+    }
+    .outputs-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .outputs-list li {
+      padding: 4px 0;
+      color: var(--muted);
+      font-size: 14px;
+      position: relative;
+      padding-left: 20px;
+    }
+    .outputs-list li::before {
+      content: "→";
+      position: absolute;
+      left: 0;
+      color: var(--iris);
+      font-weight: 700;
+    }
+    .disclosure {
+      color: var(--muted2);
+      font-size: 13px;
+      font-style: italic;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      border-left: 2px solid var(--amber);
+    }
+
+    /* ── Example briefs ─────────────────────────────────────── */
+    .examples-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .example-btn {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color .15s, background .15s;
+    }
+    .example-btn:hover {
+      border-color: var(--iris);
+      background: var(--selected);
+    }
+    .example-btn .example-icon {
+      color: var(--iris);
+      margin-right: 6px;
+      font-weight: 700;
+    }
+
+    /* ── Projects list (landing page) ─────────────────────── */
+    .projects-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .project-card {
+      display: block;
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color .15s, background .15s;
+    }
+    .project-card:hover {
+      border-color: var(--iris);
+      background: var(--selected);
+    }
+    .project-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .project-card-name {
+      font-family: var(--font-head);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+    }
+    .project-card-brief {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+      margin-bottom: 6px;
+    }
+    .project-card-meta {
+      color: var(--muted2);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* ── Inline alert (replaces alert()) ─────────────────── */
+    .alert {
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      border: 0.5px solid;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .alert.alert-error {
+      background: rgba(248,113,113,0.08);
+      border-color: var(--red);
+      color: var(--red);
+    }
+    .alert.alert-info {
+      background: rgba(155,142,232,0.08);
+      border-color: var(--iris);
+      color: var(--iris);
+    }
+
     /* ── Misc ────────────────────────────────────────────── */
     code {
       font-family: var(--font-mono);
@@ -676,14 +872,67 @@ window.addEventListener('load', async () => {
   route();
 });
 
+// ─── Example briefs (clickable starters) ────────────────
+const EXAMPLE_BRIEFS = [
+  {
+    label: "Log tail anomaly CLI",
+    name: "logtail-anomaly-cli",
+    brief: "Build a single-binary CLI tool in idiomatic Rust called `logpeek` that tails a structured JSON log file (one object per line) and flags anomalies in real time. Detect (1) error-level spikes using a rolling 60-second window with a configurable z-score threshold, and (2) new error signatures not seen in the prior 10 minutes. Output flagged events to stderr with ANSI color; pass through normal lines unchanged to stdout so it composes with Unix pipes. Support `--window`, `--threshold`, and `--field` flags. Must handle files that rotate mid-stream and process at least 50k lines/sec on a laptop."
+  },
+  {
+    label: "Webhook replay service",
+    name: "webhook-replay-service",
+    brief: "Design and scaffold a small Python service (FastAPI + async SQLAlchemy) that sits in front of downstream webhook consumers and provides durable delivery with replay. Incoming POSTs are persisted, signed with HMAC-SHA256, and forwarded to a configured target URL with exponential backoff (max 6 attempts over ~1 hour). Expose `/events`, `/events/{id}/replay`, and `/events?status=failed` endpoints with cursor pagination. Acceptance: survive a 10-minute downstream outage without event loss, deliver in-order per source, and sustain 500 req/s on a single 2-vCPU container. Choose between Postgres LISTEN/NOTIFY and Redis Streams for the retry queue and justify the pick. Include Docker Compose and a pytest suite with a fake downstream."
+  },
+  {
+    label: "Programmatic SEO auditor",
+    name: "pseo-content-auditor",
+    brief: "Build a Python CLI + small FastAPI service that audits a programmatic-SEO site (think 5k-50k templated landing pages) for quality issues that hurt rankings in 2026. Given a sitemap URL, crawl a sampled subset and score each page on: thin content (word count + unique n-gram ratio vs. siblings), near-duplicate clusters (MinHash/LSH), title/meta/H1 template collisions, internal-link orphaning, and Core Web Vitals from CrUX where available. Emit a JSON report plus a Markdown executive summary grouped by issue severity. Respect robots.txt and rate-limit to 2 rps per host by default. Target users: in-house SEO leads at Series-A SaaS companies who need a defensible prioritized fix list, not a vanity score."
+  },
+];
+
 // ─── Submit view ────────────────────────────────────────
-function showSubmit() {
+async function showSubmit() {
   crumb.innerHTML = '';
   root.innerHTML = `
-    <h1>New project</h1>
-    <p class="brief-text" style="margin-bottom: 24px;">Describe what you'd like the agent swarm to plan, design, estimate, review, and document.</p>
+    <div class="hero">
+      <div class="tagline">From brief to buildable scaffold in one orchestrated pass.</div>
+      <div class="pitch">TW Swarm is a Cintelis demonstrator that routes a software project brief through eight specialist agents — running on Anthropic Claude and xAI Grok — to produce the artifacts a senior team would draft before touching an IDE. Drop in a one-paragraph brief; get back requirements, architecture, estimates, a review pass, docs, and a runnable scaffold.</div>
+    </div>
 
+    <div class="section-label">How it works</div>
     <div class="card">
+      <ol class="pipeline-list">
+        <li><strong>Business Analyst</strong>Extracts goals, users, and functional requirements.</li>
+        <li><strong>Researcher</strong>Surveys relevant tech, patterns, and prior art.</li>
+        <li><strong>Architect</strong>Proposes stack, components, and system design.</li>
+        <li class="gate"><strong>Human approval</strong>You review and gate before build work begins.</li>
+        <li><strong>Software Engineer</strong>Decomposes architecture into an implementation plan.</li>
+        <li><strong>Estimator</strong>Sizes effort, risk, and delivery timeline.</li>
+        <li><strong>Reviewer</strong>Audits the plan for gaps, conflicts, and smells.</li>
+        <li><strong>Documenter</strong>Produces README, setup, and developer-facing docs.</li>
+        <li><strong>Coder</strong>Emits a runnable scaffold aligned to the plan.</li>
+      </ol>
+    </div>
+
+    <div class="section-label">What you get</div>
+    <div class="card">
+      <ul class="outputs-list">
+        <li>Structured requirements document with user stories and acceptance criteria</li>
+        <li>Architecture write-up covering stack, components, and data flow</li>
+        <li>Implementation plan with task breakdown and effort estimates</li>
+        <li>Automated review report flagging risks and open questions</li>
+        <li>Developer documentation (README, setup, conventions)</li>
+        <li>Runnable code scaffold you can clone and extend</li>
+      </ul>
+      <div class="disclosure" style="margin-top: 14px;">The generated code is a starter scaffold meant to accelerate day one — not finished, production-ready software.</div>
+    </div>
+
+    <div class="section-label">Start a new project</div>
+    <div class="card">
+      <label>Try an example brief</label>
+      <div class="examples-grid" id="examplesGrid"></div>
+
       <form id="submitForm">
         <label for="name">Name</label>
         <input type="text" id="name" required placeholder="my-cli-tool" autocomplete="off" />
@@ -698,15 +947,35 @@ function showSubmit() {
 
         <button type="submit" id="submitBtn" class="btn btn-primary">Start workflow</button>
       </form>
-      <div id="submitError" class="error-msg"></div>
+      <div id="submitAlert"></div>
     </div>
+
+    <div class="section-label">Recent projects</div>
+    <div id="projectsListContainer"><div class="card empty">Loading…</div></div>
   `;
 
+  // Example brief buttons
+  const examplesGrid = document.getElementById('examplesGrid');
+  for (const ex of EXAMPLE_BRIEFS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'example-btn';
+    btn.innerHTML = `<span class="example-icon">▸</span>${escapeHtml(ex.label)}`;
+    btn.addEventListener('click', () => {
+      document.getElementById('name').value = ex.name;
+      document.getElementById('brief').value = ex.brief;
+      document.getElementById('submitAlert').innerHTML = '';
+      document.getElementById('brief').focus();
+    });
+    examplesGrid.appendChild(btn);
+  }
+
+  // Submit handler
   document.getElementById('submitForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const errorEl = document.getElementById('submitError');
+    const alertEl = document.getElementById('submitAlert');
     const btn = document.getElementById('submitBtn');
-    errorEl.textContent = '';
+    alertEl.innerHTML = '';
     btn.disabled = true;
     btn.textContent = 'Starting…';
     try {
@@ -724,11 +993,57 @@ function showSubmit() {
       const data = await r.json();
       location.hash = '#/p/' + data.workflow_id;
     } catch (err) {
-      errorEl.textContent = err.message;
+      alertEl.innerHTML = `<div class="alert alert-error">Couldn't start: ${escapeHtml(err.message)}</div>`;
       btn.disabled = false;
       btn.textContent = 'Start workflow';
     }
   });
+
+  // Lazy-load recent projects
+  loadRecentProjects();
+}
+
+async function loadRecentProjects() {
+  const container = document.getElementById('projectsListContainer');
+  if (!container) return;
+  try {
+    const r = await apiFetch('/projects?limit=20');
+    if (!r.ok) {
+      container.innerHTML = `<div class="card empty">Couldn't load recent projects.</div>`;
+      return;
+    }
+    const data = await r.json();
+    const projects = data.projects || [];
+    if (projects.length === 0) {
+      container.innerHTML = `<div class="card empty">No projects yet. Pick an example above or write your own brief.</div>`;
+      return;
+    }
+    let html = `<div class="projects-grid">`;
+    for (const p of projects) {
+      const cost = p.total_cost_usd ? `$${parseFloat(p.total_cost_usd).toFixed(3)}` : '';
+      const tasks = `${p.done_count || 0}/${p.task_count || 0} tasks`;
+      const when = p.created_at ? new Date(p.created_at).toLocaleString() : '';
+      html += `
+        <a class="project-card" href="#/p/${escapeHtml(p.workflow_id)}">
+          <div class="project-card-head">
+            <span class="project-card-name">${escapeHtml(p.name)}</span>
+            <span class="badge ${p.status}">${escapeHtml(p.status)}</span>
+          </div>
+          <div class="project-card-brief">${escapeHtml(p.brief || '')}</div>
+          <div class="project-card-meta">
+            <span>${when}</span>
+            <span>${tasks}</span>
+            ${cost ? `<span>${cost}</span>` : ''}
+            ${p.failed_count > 0 ? `<span style="color: var(--red)">${p.failed_count} failed</span>` : ''}
+          </div>
+        </a>
+      `;
+    }
+    html += `</div>`;
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = `<div class="card empty">Error loading: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 // ─── Status view ────────────────────────────────────────
@@ -971,7 +1286,17 @@ async function downloadScaffold(workflowId, btn) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
-    alert('Download failed: ' + err.message);
+    // Inline error next to the button
+    const card = btn.closest('.code-card');
+    if (card) {
+      let existing = card.querySelector('.alert');
+      if (existing) existing.remove();
+      const el = document.createElement('div');
+      el.className = 'alert alert-error';
+      el.style.marginTop = '10px';
+      el.textContent = 'Download failed: ' + err.message;
+      card.appendChild(el);
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
@@ -1028,13 +1353,25 @@ async function loadCostSummary(workflowId) {
   }
 }
 
+function showApprovalError(msg) {
+  const banner = document.querySelector('.approval-banner');
+  if (!banner) return;
+  let existing = banner.querySelector('.alert');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.className = 'alert alert-error';
+  el.style.marginTop = '10px';
+  el.textContent = msg;
+  banner.appendChild(el);
+}
+
 async function approveProject(workflowId) {
   try {
     const r = await apiFetch(`/projects/${workflowId}/approve`, { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     await refreshProject(workflowId);
   } catch (err) {
-    alert('Approve failed: ' + err.message);
+    showApprovalError('Approve failed: ' + err.message);
   }
 }
 
@@ -1049,7 +1386,7 @@ async function rejectProject(workflowId) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     await refreshProject(workflowId);
   } catch (err) {
-    alert('Reject failed: ' + err.message);
+    showApprovalError('Reject failed: ' + err.message);
   }
 }
 
