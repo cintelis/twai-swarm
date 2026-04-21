@@ -19,7 +19,7 @@ jobs:
           cache: pip
 
       - name: Install deps
-        run: pip install -r requirements.txt ruff
+        run: pip install -r requirements.txt ruff pytest pytest-asyncio
 
       - name: Ruff
         run: ruff check app/
@@ -30,6 +30,9 @@ jobs:
       - name: Import check (catches missing deps fast)
         run: |
           python -c "from app import api, worker, workflows, activities, router, db, config"
+
+      - name: Pytest (Sprint 6 agentic Coder unit tests)
+        run: pytest tests/ -q
 
   docker:
     name: Docker build

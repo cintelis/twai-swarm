@@ -1131,6 +1131,20 @@ function renderProject(data) {
             <button class="btn btn-primary" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
           </div>
       `;
+      // Agentic-coder status chip (iterations + verify outcome). Only shown
+      // when the agentic path produced the output — oneshot runs don't have
+      // these fields, which preserves the old UI.
+      if (typeof out.iterations === 'number') {
+        const verifyOk = out.verify_passed === true;
+        const chipColor = verifyOk ? 'var(--green)' : 'var(--amber)';
+        const chipLabel = verifyOk
+          ? `verify.sh ✓ passed · ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`
+          : `verify.sh ✗ exit ${out.verify_exit_code} · ${out.iterations} iteration${out.iterations === 1 ? '' : 's'}`;
+        html += `<div class="code-summary" style="color: ${chipColor};">${escapeHtml(chipLabel)}${out.template ? ` · template: ${escapeHtml(out.template)}` : ''}</div>`;
+        if (!verifyOk && out.verify_stderr_tail) {
+          html += `<details class="code-summary" style="margin-top:4px;"><summary>verify stderr tail</summary><pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:0.85em;">${escapeHtml(out.verify_stderr_tail)}</pre></details>`;
+        }
+      }
       if (isTruncated && !hasFiles) {
         html += `<div class="code-summary" style="color: var(--amber);">⚠ Output was truncated mid-generation (max_tokens exceeded). The download still works — we salvage every complete file from what the model did produce.</div>`;
       } else if (out.summary) {

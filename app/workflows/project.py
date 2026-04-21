@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         create_project_record,
         create_task_record,
         run_agent_activity,
+        run_coder_activity,
     )
     from app import config
 
@@ -229,17 +230,38 @@ class ProjectWorkflow:
             parent=review_result.task_id,
         )
 
-        # Phase 5: code scaffold
-        # Generates a runnable starter tree from the plan + docs. Output is
-        # consumed by GET /projects/{id}/download (zip).
-        await run_step(
-            "coder",
-            "Code scaffold",
-            "Generate a runnable starter scaffold for the project based on the architecture, "
-            "implementation plan, and README produced by the previous agents. Stub non-trivial "
-            "logic with TODO comments — the goal is a green-build skeleton, not finished code.",
-            parent=doc_result.task_id,
-            complexity=2,
+        # Phase 5: code scaffold (agentic — tool-using loop over Claude Opus 4.7)
+        # Picks a matching template, seeds a sandbox, then iterates tool calls
+        # until `verify.sh` passes. Falls back to the one-shot coder on error
+        # so a downloadable scaffold still lands in the DB. Output is consumed
+        # by GET /projects/{id}/download (zip).
+        coder_input = AgentTaskInput(
+            project_id=project_id,
+            role="coder",
+            title="Code scaffold",
+            description=(
+                "Customise the staged template (or bootstrap from scratch) so that the "
+                "scaffold's verify.sh passes. The brief is: " + inp.brief
+            ),
+            parent_task_id=doc_result.task_id,
+            complexity_hint=2,
+        )
+        coder_task_id = await workflow.execute_activity(
+            create_task_record,
+            coder_input,
+            task_queue=config.QUEUES["coder"],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        await workflow.execute_activity(
+            run_coder_activity,
+            args=[coder_task_id, coder_input, wf_id],
+            task_queue=config.QUEUES["coder"],
+            # Agentic loop does up to 6 model turns + verify runs — give it
+            # a generous envelope. 30 min upper bound is ruff+pytest runtime
+            # plus model latency.
+            start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(minutes=2),
+            retry_policy=LLM_RETRY_POLICY,
         )
 
         return ProjectOutput(

@@ -118,3 +118,113 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
 @activity.defn
 async def create_project_record(name: str, brief: str, workflow_id: str) -> str:
     return await db.create_project(name, brief, workflow_id)
+
+
+@activity.defn
+async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: str) -> AgentTaskResult:
+    """Run the agentic Coder: tool-using loop over Claude Opus 4.7 in a
+    per-workflow sandbox. Produces the same `{files: [...]}` shape as the
+    one-shot coder so /download keeps working.
+
+    On any exception, falls back to the one-shot coder so the workflow
+    still ships something. The fallback path is logged at ERROR.
+    """
+    from . import config
+    from .agents import coder_agentic
+
+    await db.update_task_running(task_id)
+    context = await db.get_ancestor_outputs(task_id)
+
+    # Pull architecture / SE plan / documenter output out of the context list.
+    def _find(role: str) -> dict | None:
+        for c in context:
+            if c.get("role") == role:
+                out = c.get("output")
+                return out if isinstance(out, dict) else None
+        return None
+
+    architecture = _find("architect")
+    se_plan = _find("se")
+    documenter = _find("documenter")
+
+    activity.heartbeat("coder starting")
+    hb_task = asyncio.create_task(_keep_alive(message="coder running"))
+
+    try:
+        if config.CODER_MODE == "oneshot":
+            # Explicit opt-out — use the old path directly.
+            result = await agents.run_agent(
+                role="coder",
+                task_description=input.description,
+                context=context,
+                complexity_hint=input.complexity_hint,
+            )
+        else:
+            try:
+                coder_out = await coder_agentic.run_agentic_coder(
+                    workflow_id=workflow_id,
+                    brief=input.description,
+                    architecture=architecture,
+                    se_plan=se_plan,
+                    documenter=documenter,
+                    heartbeat=activity.heartbeat,
+                )
+                # Repackage into the shape run_agent returns so the DB
+                # write + return dataclass below don't need a branch.
+                result = {
+                    "output": {k: v for k, v in coder_out.items() if not k.startswith("_")},
+                    "provider": coder_out["_provider"],
+                    "model": coder_out["_model"],
+                    "model_key": "anthropic/claude-opus-4-7",
+                    "route_reason": "coder hardcoded to Opus 4.7 (agentic)",
+                    "tokens_in": coder_out["_tokens_in"],
+                    "tokens_out": coder_out["_tokens_out"],
+                    "cost_usd": coder_out["_cost_usd"],
+                    "citations": [],
+                }
+            except Exception as e:
+                logger.error(
+                    "agentic coder failed (task_id=%s), falling back to oneshot: %s\n%s",
+                    task_id, e, traceback.format_exc(),
+                )
+                result = await agents.run_agent(
+                    role="coder",
+                    task_description=input.description,
+                    context=context,
+                    complexity_hint=input.complexity_hint,
+                )
+    except Exception as e:
+        logger.error(
+            "run_coder_activity failed (task_id=%s): %s\n%s",
+            task_id, e, traceback.format_exc(),
+        )
+        await db.fail_task(task_id, str(e))
+        raise
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+
+    output_to_persist = result["output"]
+    citations = result.get("citations") or []
+    if isinstance(output_to_persist, dict) and citations:
+        output_to_persist = {**output_to_persist, "_citations": citations}
+
+    await db.complete_task(
+        task_id,
+        output=output_to_persist,
+        provider=result["provider"],
+        model=result["model"],
+        tokens_in=result["tokens_in"],
+        tokens_out=result["tokens_out"],
+        cost_usd=result["cost_usd"],
+    )
+
+    return AgentTaskResult(
+        task_id=task_id,
+        output=result["output"],
+        model=result["model"],
+        tier=result["model_key"],
+    )

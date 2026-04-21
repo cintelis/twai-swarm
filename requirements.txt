@@ -4,7 +4,9 @@ temporalio==1.8.0
 # httpx.AsyncClient(proxies=...) → mounts rename that crashed on
 # httpx 0.28+. anthropic>=0.40 handles the same httpx rename.
 # With both SDKs bumped, the httpx<0.28 pin is no longer needed.
-anthropic>=0.40,<2.0
+# Sprint 6 agentic Coder needs `beta_async_tool` + `client.beta.messages.tool_runner`,
+# which landed after 0.40. 0.60 is the first release that ships both.
+anthropic>=0.60,<2.0
 openai>=1.60,<2.0
 fastapi==0.115.0
 uvicorn[standard]==0.32.0

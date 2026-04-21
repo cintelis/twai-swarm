@@ -21,9 +21,10 @@ from app.activities import (
     create_project_record,
     create_task_record,
     run_agent_activity,
+    run_coder_activity,
 )
 
-ACTIVITIES = [create_project_record, create_task_record, run_agent_activity]
+ACTIVITIES = [create_project_record, create_task_record, run_agent_activity, run_coder_activity]
 WORKFLOWS = [ProjectWorkflow]
 
 _state = {"ready": False, "workers_running": 0}

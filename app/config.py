@@ -41,3 +41,9 @@ QUEUES = {
     "documenter": "documenter-tasks",
     "coder": "coder-tasks",
 }
+
+# Coder mode: "agentic" uses the tool-runner loop (Sprint 6), "oneshot" falls
+# back to the original single-prompt JSON scaffold generator. Agentic is the
+# default; if it raises, the activity silently falls back to oneshot so the
+# workflow still produces something downloadable.
+CODER_MODE = os.getenv("CODER_MODE", "agentic").lower()
