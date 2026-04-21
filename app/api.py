@@ -160,13 +160,33 @@ async def reject_project(workflow_id: str, req: RejectReq):
     await handle.signal(ProjectWorkflow.reject, req.reason)
     return {"status": "rejected", "workflow_id": workflow_id, "reason": req.reason}
 
+async def _resolve_workflow_status(workflow_id: str) -> str | None:
+    """Ask Temporal for the authoritative workflow status.
+
+    Returns None if we can't talk to Temporal or the workflow doesn't exist —
+    callers fall back to whatever the DB says.
+    """
+    try:
+        client = await temporal()
+        handle = client.get_workflow_handle(workflow_id)
+        desc = await asyncio.wait_for(handle.describe(), timeout=2.0)
+        return desc.status.name  # RUNNING / COMPLETED / FAILED / CANCELED / TERMINATED / TIMED_OUT
+    except Exception:
+        return None
+
+
 @app.get("/projects", dependencies=[Depends(auth.require_auth)])
 async def list_projects(limit: int = 50):
     """Recent projects for the UI listing view.
 
-    Returns each project with enough metadata to render a card: workflow_id,
-    name, brief (truncated), created_at, and the current task counts +
-    aggregate cost. ORDER BY created_at DESC so newest is first.
+    The `projects.status` column is initialised to 'running' on workflow start
+    and isn't updated anywhere — Temporal owns the real workflow state. So
+    for anything the DB still says is 'running', we reconcile by querying
+    Temporal (concurrently, 2s timeout each) and return the real status.
+
+    Opportunistic write-back: rows that have transitioned to a terminal
+    Temporal state get their DB column updated so future list requests skip
+    the Temporal round-trip.
     """
     pool = await db.get_pool()
     rows = await pool.fetch(
@@ -184,13 +204,49 @@ async def list_projects(limit: int = 50):
         """,
         max(1, min(limit, 200)),
     )
+
+    # Reconcile 'running' rows against Temporal in parallel.
+    # Note: `projects.status` legacy is lowercase ('running'); Temporal returns
+    # uppercase status names (RUNNING, COMPLETED, ...). Normalise on output.
+    def _is_stale_running(db_status: str | None) -> bool:
+        return (db_status or "").lower() == "running"
+
+    stale_workflow_ids = [r["workflow_id"] for r in rows if _is_stale_running(r["status"])]
+    resolved: dict[str, str] = {}
+    if stale_workflow_ids:
+        results = await asyncio.gather(
+            *(_resolve_workflow_status(wid) for wid in stale_workflow_ids),
+            return_exceptions=True,
+        )
+        for wid, res in zip(stale_workflow_ids, results):
+            if isinstance(res, str):
+                resolved[wid] = res
+
+        # Write-back terminal states so future list requests skip this path.
+        terminals = {
+            wid: s for wid, s in resolved.items()
+            if s in ("COMPLETED", "FAILED", "CANCELED", "TERMINATED", "TIMED_OUT")
+        }
+        if terminals:
+            await pool.executemany(
+                "UPDATE projects SET status=$2 WHERE workflow_id=$1",
+                [(wid, s) for wid, s in terminals.items()],
+            )
+
+    def _final_status(r) -> str:
+        wid = r["workflow_id"]
+        if wid in resolved:
+            return resolved[wid]
+        # Normalise legacy lowercase DB values ('running') to the Temporal shape.
+        return (r["status"] or "UNKNOWN").upper()
+
     return {
         "projects": [
             {
                 "workflow_id": r["workflow_id"],
                 "name": r["name"],
                 "brief": (r["brief"] or "")[:160] + ("…" if r["brief"] and len(r["brief"]) > 160 else ""),
-                "status": r["status"],
+                "status": _final_status(r),
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "task_count": r["task_count"],
                 "done_count": r["done_count"],
