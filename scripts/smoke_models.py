@@ -47,9 +47,11 @@ async def ping(key: str, spec) -> tuple[str, bool, str]:
             model=spec.model,
             system="You answer with a single word.",
             user="Reply with the word OK and nothing else.",
-            # OpenAI Responses API requires max_output_tokens >= 16; other
-            # providers are happy with anything ≥1. 16 is the floor.
-            max_tokens=16,
+            # 512 leaves room for OpenAI reasoning models (gpt-5.4 with
+            # effort=high burns most of its budget on hidden thinking before
+            # the visible reply). Other providers cap to what they need;
+            # the budget is an upper bound, not a floor.
+            max_tokens=512,
         )
         text = (result.text or "").strip()
         ok = bool(text)
