@@ -29,6 +29,18 @@ resource "aws_security_group" "pg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  # The Express API service runs under module-managed auto-created SGs that
+  # Terraform can't reference cleanly here. Ingress rules for those SGs are
+  # added MANUALLY post-deploy so the API can reach Postgres on 5432
+  # — see lessons-learned.md § "RDS SG blocked new Express SG".
+  # Without this ignore, every plan tries to delete those manual rules and
+  # severs API → DB connectivity. Remove this once the Express SG IDs are
+  # surfaced as module outputs and we add proper aws_security_group_rule
+  # resources here.
+  lifecycle {
+    ignore_changes = [ingress]
+  }
 }
 
 resource "aws_db_instance" "pg" {
