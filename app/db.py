@@ -6,9 +6,17 @@ The tasks table IS the domain model at this stage.
 """
 import asyncpg
 import json
+import logging
 from typing import Optional
 from uuid import UUID
 from . import config
+
+logger = logging.getLogger(__name__)
+
+# Roles that benefit from kNN context augmentation (synthesise-from-priors
+# rather than research-from-scratch). Researcher / BA / Architect / Coder
+# get only the parent-walk because they're meant to drive the search themselves.
+_SYNTHESIS_ROLES = {"se", "estimator", "reviewer", "documenter"}
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -87,7 +95,8 @@ async def get_ancestor_outputs(task_id: str) -> list[dict]:
     """
     Walk up the task tree to collect all completed ancestor outputs.
     This is the cheap, no-embedding-needed version of context retrieval.
-    Use this first; add vector search only when this stops being enough.
+
+    Returned dicts include `task_id` so callers can dedupe against kNN matches.
     """
     pool = await get_pool()
     rows = await pool.fetch(
@@ -99,16 +108,142 @@ async def get_ancestor_outputs(task_id: str) -> list[dict]:
             SELECT t.id, t.parent_task_id, t.role, t.title, t.output, a.depth + 1
             FROM tasks t JOIN ancestors a ON t.id = a.parent_task_id
         )
-        SELECT role, title, output FROM ancestors
+        SELECT id, role, title, output FROM ancestors
         WHERE depth > 0 AND output IS NOT NULL
         ORDER BY depth ASC
         """,
         UUID(task_id),
     )
     return [
-        {"role": r["role"], "title": r["title"], "output": json.loads(r["output"])}
+        {
+            "task_id": str(r["id"]),
+            "role": r["role"],
+            "title": r["title"],
+            "output": json.loads(r["output"]),
+        }
         for r in rows
     ]
+
+
+async def upsert_task_embedding(task_id: str, content: str, embedding: list[float]) -> None:
+    """Store the embedding for a completed task. Upsert so re-embeds replace.
+
+    `embedding` is a 1536-dim float vector — matches the vector(1536) column.
+    `content` is the source text we embedded (kept so we can re-embed without
+    re-deriving the prompt from output JSON).
+    """
+    from app.embeddings import vector_literal
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO task_embeddings (task_id, content, embedding)
+        VALUES ($1, $2, $3::vector)
+        ON CONFLICT (task_id) DO UPDATE
+          SET content = EXCLUDED.content,
+              embedding = EXCLUDED.embedding,
+              created_at = now()
+        """,
+        UUID(task_id), content, vector_literal(embedding),
+    )
+
+
+async def get_similar_task_outputs(
+    project_id: str,
+    embedding: list[float],
+    exclude_task_ids: list[str],
+    limit: int = 3,
+    min_similarity: float = 0.30,
+) -> list[dict]:
+    """kNN over `task_embeddings`, scoped to one project, excluding given IDs.
+
+    `min_similarity` filters out matches that are nominally close in vector
+    space but semantically irrelevant — kNN always returns N rows even if
+    they're noise. 0.30 is a conservative floor; tighten if matches feel weak.
+    """
+    from app.embeddings import vector_literal
+    pool = await get_pool()
+    excludes = [UUID(tid) for tid in exclude_task_ids]
+    # asyncpg can't bind an empty list; guard.
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.role, t.title, t.output,
+               1 - (te.embedding <=> $1::vector) AS similarity
+        FROM task_embeddings te
+        JOIN tasks t ON t.id = te.task_id
+        WHERE t.project_id = $2
+          AND ($3::uuid[] = '{}' OR t.id <> ALL($3::uuid[]))
+          AND t.output IS NOT NULL
+          AND 1 - (te.embedding <=> $1::vector) >= $4
+        ORDER BY te.embedding <=> $1::vector
+        LIMIT $5
+        """,
+        vector_literal(embedding), UUID(project_id), excludes, min_similarity, limit,
+    )
+    return [
+        {
+            "task_id": str(r["id"]),
+            "role": r["role"],
+            "title": r["title"],
+            "output": json.loads(r["output"]),
+            "similarity": float(r["similarity"]),
+        }
+        for r in rows
+    ]
+
+
+async def get_context_for_task(task_id: str) -> list[dict]:
+    """Combined context: parent-walk ancestors + (for synthesis roles) kNN.
+
+    Always returns ancestors. For synthesis roles (SE / Estimator / Reviewer /
+    Documenter) it also pulls the top-3 most-similar prior outputs from the
+    same project, excluding direct ancestors. Each entry is tagged with
+    `_source` ("ancestor" or "similar") so the agent prompt can frame them
+    differently.
+
+    Falls back to ancestors-only on any embedding failure — kNN is additive,
+    not load-bearing.
+    """
+    ancestors = await get_ancestor_outputs(task_id)
+
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT project_id, role, title, description FROM tasks WHERE id=$1",
+        UUID(task_id),
+    )
+    if not row:
+        return ancestors
+
+    role = row["role"]
+    if role not in _SYNTHESIS_ROLES:
+        for a in ancestors:
+            a["_source"] = "ancestor"
+        return ancestors
+
+    # Build query embedding from this task's input. If embedding fails (no key,
+    # rate limit, etc.) we silently skip kNN and return ancestors as-is.
+    try:
+        from app.embeddings import embed_text, task_to_embedding_text
+        query_text = task_to_embedding_text(role, row["title"], {"description": row["description"]})
+        query_embedding = await embed_text(query_text)
+        ancestor_ids = [a["task_id"] for a in ancestors]
+        similar = await get_similar_task_outputs(
+            project_id=str(row["project_id"]),
+            embedding=query_embedding,
+            exclude_task_ids=ancestor_ids,
+        )
+    except Exception as e:
+        logger.warning(
+            "kNN context augmentation failed for task %s (role=%s): %s; using ancestors only",
+            task_id, role, e,
+        )
+        similar = []
+
+    for a in ancestors:
+        a["_source"] = "ancestor"
+    for s in similar:
+        s["_source"] = "similar"
+
+    return ancestors + similar
 
 async def get_project_tasks(project_id: str) -> list[dict]:
     pool = await get_pool()

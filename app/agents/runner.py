@@ -105,11 +105,32 @@ ROLE_MAX_TOKENS: dict[str, int] = {
 }
 
 def _format_context(context: list[dict]) -> str:
+    """Format the context list for the prompt.
+
+    `_source` (ancestor | similar) and `similarity` are added by
+    db.get_context_for_task. We split the rendered context into two sections
+    so downstream agents can weight ancestor outputs (direct upstream of this
+    task in the workflow) higher than similar matches (kNN-retrieved priors).
+    """
     if not context:
         return "No prior context."
+
+    ancestors = [c for c in context if c.get("_source") != "similar"]
+    similar = [c for c in context if c.get("_source") == "similar"]
+
     parts = []
-    for c in context:
-        parts.append(f"## {c['role'].upper()} — {c['title']}\n{json.dumps(c['output'], indent=2)}")
+    if ancestors:
+        parts.append("# Direct upstream context (ancestors in this workflow)\n")
+        for c in ancestors:
+            parts.append(f"## {c['role'].upper()} — {c['title']}\n{json.dumps(c['output'], indent=2)}")
+
+    if similar:
+        parts.append("\n# Similar prior outputs (kNN over past project tasks · advisory only)\n")
+        for c in similar:
+            sim = c.get("similarity")
+            sim_label = f" · similarity={sim:.2f}" if isinstance(sim, (int, float)) else ""
+            parts.append(f"## {c['role'].upper()} — {c['title']}{sim_label}\n{json.dumps(c['output'], indent=2)}")
+
     return "\n\n".join(parts)
 
 # Provider dispatch. Add a new provider by adding one entry here.

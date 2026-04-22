@@ -13,6 +13,29 @@ from temporalio import activity
 
 from . import db, agents
 
+
+async def _embed_task_output(
+    task_id: str,
+    role: str,
+    title: str,
+    output: dict,
+) -> None:
+    """Embed and store a completed task's output for later kNN retrieval.
+
+    Best-effort: any failure (no OpenAI key, rate limit, network) logs and
+    swallows. Embeddings are additive — losing one doesn't break workflows.
+    """
+    try:
+        from app.embeddings import embed_text, task_to_embedding_text
+        content = task_to_embedding_text(role, title, output)
+        embedding = await embed_text(content)
+        await db.upsert_task_embedding(task_id, content, embedding)
+    except Exception as e:
+        logger.warning(
+            "embedding failed for task %s (role=%s): %s; skipping",
+            task_id, role, e,
+        )
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +85,11 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
     """Run one agent. Heartbeats keep Temporal from marking long LLM calls as stuck."""
     await db.update_task_running(task_id)
 
-    context = await db.get_ancestor_outputs(task_id)
+    # get_context_for_task = parent-walk ancestors + (for synthesis roles)
+    # kNN over similar prior task outputs in the same project. Each entry
+    # is tagged with _source = "ancestor" | "similar" so the prompt can
+    # frame them differently. Falls back to ancestors-only on embedding failure.
+    context = await db.get_context_for_task(task_id)
 
     # Fire an initial heartbeat, then hand it off to a background task that
     # keeps pinging Temporal every 20s while we're awaiting the LLM.
@@ -107,6 +134,10 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
         tokens_out=result["tokens_out"],
         cost_usd=result["cost_usd"],
     )
+
+    # Embed the task output for downstream kNN retrieval. Best-effort —
+    # logged and swallowed on failure so embedding cost doesn't fail the workflow.
+    await _embed_task_output(task_id, input.role, input.title, result["output"])
 
     return AgentTaskResult(
         task_id=task_id,
@@ -221,6 +252,11 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
         tokens_out=result["tokens_out"],
         cost_usd=result["cost_usd"],
     )
+
+    # Embed the Coder output too — useful as kNN context for future projects'
+    # SE/Reviewer/Documenter ("we've coded something like this before").
+    # The embedding text strips the files[] array (see task_to_embedding_text).
+    await _embed_task_output(task_id, input.role, input.title, result["output"])
 
     return AgentTaskResult(
         task_id=task_id,
