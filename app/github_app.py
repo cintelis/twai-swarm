@@ -164,6 +164,78 @@ async def list_installation_repos(installation_id: int) -> list[dict]:
     return repos
 
 
+async def repo_exists(installation_id: int, owner: str, name: str) -> bool:
+    """True iff the repo is visible to the installation's token.
+
+    Used to branch between "push to existing" and "create then push" paths.
+    A 404 here means either the repo doesn't exist OR the App hasn't been
+    granted access to it — both cases are handled the same way by the caller
+    (either create it or the push step will fail loudly).
+    """
+    token = await get_installation_token(installation_id)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{owner}/{name}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": USER_AGENT,
+            },
+        )
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
+        return False
+    raise GitHubAppError(
+        f"repo existence check failed: {resp.status_code} {resp.text[:200]}"
+    )
+
+
+async def create_org_repo(
+    installation_id: int,
+    org: str,
+    name: str,
+    description: str = "",
+    private: bool = True,
+) -> dict:
+    """Create a repo in the given org via the App. Requires the App's
+    organization permission `Administration: Write`.
+
+    `auto_init=true` creates an initial empty commit so the repo has a
+    default branch — the push code path relies on HEAD already existing.
+    Without it, `GET /git/ref/heads/<default>` would 404.
+
+    Returns the full repo JSON from GitHub (owner, name, default_branch,
+    clone_url, html_url, etc.).
+    """
+    token = await get_installation_token(installation_id)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{GITHUB_API}/orgs/{org}/repos",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": USER_AGENT,
+            },
+            json={
+                "name": name,
+                "description": description or f"Scaffold from 365Soft Labs Swarm: {name}",
+                "private": private,
+                "auto_init": True,
+                "has_issues": True,
+                "has_projects": False,
+                "has_wiki": False,
+            },
+        )
+    if resp.status_code != 201:
+        raise GitHubAppError(
+            f"create repo failed: {resp.status_code} {resp.text[:200]}"
+        )
+    return resp.json()
+
+
 @dataclass
 class PushResult:
     branch: str
@@ -171,6 +243,7 @@ class PushResult:
     pr_url: Optional[str]
     pr_number: Optional[int]
     files_pushed: int
+    repo_created: bool = False   # True iff we created the repo on this push
 
 
 async def push_files_as_branch(

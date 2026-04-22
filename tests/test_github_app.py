@@ -124,3 +124,86 @@ async def test_token_cache_expiry_re_mints(monkeypatch):
 
     t = await github_app.get_installation_token(99)
     assert t == "ghs_new"
+
+
+def _fake_token_client(monkeypatch, get_resp=None, post_resp=None):
+    """Helper: stub httpx.AsyncClient with fixed get/post responses + skip
+    the JWT mint by pre-seeding the token cache."""
+    from app import github_app
+    github_app._token_cache[7777] = github_app._CachedToken(
+        token="ghs_test", expires_at=time.time() + 600,
+    )
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        get = AsyncMock(return_value=get_resp)
+        post = AsyncMock(return_value=post_resp)
+
+    monkeypatch.setattr(github_app.httpx, "AsyncClient", _FakeClient)
+    return _FakeClient
+
+
+@pytest.mark.asyncio
+async def test_repo_exists_true_on_200(monkeypatch):
+    from app import github_app
+    from types import SimpleNamespace
+    _fake_token_client(monkeypatch, get_resp=SimpleNamespace(status_code=200, text="", json=lambda: {}))
+    assert await github_app.repo_exists(7777, "Cintelis-Ai", "swarm-test") is True
+
+
+@pytest.mark.asyncio
+async def test_repo_exists_false_on_404(monkeypatch):
+    from app import github_app
+    from types import SimpleNamespace
+    _fake_token_client(monkeypatch, get_resp=SimpleNamespace(status_code=404, text="not found", json=lambda: {}))
+    assert await github_app.repo_exists(7777, "Cintelis-Ai", "doesnt-exist") is False
+
+
+@pytest.mark.asyncio
+async def test_repo_exists_raises_on_other_status(monkeypatch):
+    from app import github_app
+    from types import SimpleNamespace
+    _fake_token_client(monkeypatch, get_resp=SimpleNamespace(status_code=500, text="oops", json=lambda: {}))
+    with pytest.raises(github_app.GitHubAppError, match="500"):
+        await github_app.repo_exists(7777, "Cintelis-Ai", "boom")
+
+
+@pytest.mark.asyncio
+async def test_create_org_repo_success(monkeypatch):
+    from app import github_app
+    from types import SimpleNamespace
+    fake_repo = {
+        "name": "swarm-new",
+        "full_name": "Cintelis-Ai/swarm-new",
+        "default_branch": "main",
+        "html_url": "https://github.com/Cintelis-Ai/swarm-new",
+    }
+    _fake_token_client(
+        monkeypatch,
+        post_resp=SimpleNamespace(status_code=201, json=lambda: fake_repo, text="ok"),
+    )
+    result = await github_app.create_org_repo(
+        installation_id=7777,
+        org="Cintelis-Ai",
+        name="swarm-new",
+        description="test",
+        private=True,
+    )
+    assert result["full_name"] == "Cintelis-Ai/swarm-new"
+    assert result["default_branch"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_create_org_repo_failure(monkeypatch):
+    from app import github_app
+    from types import SimpleNamespace
+    _fake_token_client(
+        monkeypatch,
+        post_resp=SimpleNamespace(status_code=403, json=lambda: {}, text="Resource not accessible by integration"),
+    )
+    with pytest.raises(github_app.GitHubAppError, match="403"):
+        await github_app.create_org_repo(
+            installation_id=7777, org="Cintelis-Ai", name="swarm-x",
+        )

@@ -1373,34 +1373,44 @@ async function openGitHubPushDialog(workflowId, btn) {
       installationId = installations[idx].installation_id;
     }
 
-    // 3. List repos the installation can push to.
-    btn.textContent = 'Loading repos…';
-    const reposResp = await apiFetch(`/github/installations/${installationId}/repos`);
-    if (!reposResp.ok) throw new Error(`repos HTTP ${reposResp.status}`);
-    const { repos } = await reposResp.json();
-    if (!repos || repos.length === 0) {
-      showStatus('No repos accessible to that installation. Re-install the App and grant repo access.', true);
+    // 3. Ask for the target repo as `owner/repo`. Default derived from
+    //    the project name + workflow id suffix; pre-filled with the
+    //    installation account so the user just hits Enter for the common
+    //    case (push to a brand-new repo in the installed org).
+    const installAccount = installations.find(i => i.installation_id === installationId)?.account_login || '';
+    // Pull the project name off the page if available; fallback to wf prefix.
+    const projectNameEl = document.querySelector('.project-card-name, h1');
+    const rawName = projectNameEl ? projectNameEl.textContent.trim() : workflowId.slice(0, 12);
+    const safeRepoName = rawName.toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 60) || 'swarm-scaffold';
+    const suggested = `${installAccount}/${safeRepoName}-${workflowId.slice(0, 6)}`;
+    const target = prompt(
+      `Push to which repo?\n\nFormat: owner/repo-name\n\nIf the repo doesn't exist, it'll be created (private) under the installed org.`,
+      suggested,
+    );
+    if (!target) return;
+    const m = target.match(/^([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
+    if (!m) {
+      showStatus('Invalid format. Use <code>owner/repo-name</code>.', true);
       return;
     }
+    const [, repoOwner, repoName] = m;
 
-    // 4. Pick repo (prompt for now — replace with a proper select when we have time).
-    const repoNames = repos.map((r, idx) => `${idx + 1}) ${r.full_name}`).join('\n');
-    const repoPick = prompt(`Pick a repo:\n${repoNames}\n\nEnter number:`, '1');
-    if (!repoPick) return;
-    const repoIdx = parseInt(repoPick, 10) - 1;
-    if (isNaN(repoIdx) || repoIdx < 0 || repoIdx >= repos.length) return;
-    const chosenRepo = repos[repoIdx];
-
-    // 5. Push.
+    // 4. Push (auto-create if missing).
     btn.textContent = 'Pushing…';
     const pushResp = await apiFetch(`/projects/${workflowId}/github-push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         installation_id: installationId,
-        repo_owner: chosenRepo.owner,
-        repo_name: chosenRepo.name,
+        repo_owner: repoOwner,
+        repo_name: repoName,
         open_pr: true,
+        create_if_missing: true,
+        repo_private: true,
       }),
     });
     if (!pushResp.ok) {
@@ -1409,7 +1419,8 @@ async function openGitHubPushDialog(workflowId, btn) {
     }
     const result = await pushResp.json();
     const repoLink = `https://github.com/${result.repo}/tree/${result.branch}`;
-    let msg = `Pushed ${result.files_pushed} files to <a href="${escapeHtml(repoLink)}" target="_blank" rel="noopener">${escapeHtml(result.repo)}</a> · branch <code>${escapeHtml(result.branch)}</code>`;
+    const createdLabel = result.repo_created ? ' (newly created)' : '';
+    let msg = `Pushed ${result.files_pushed} files to <a href="${escapeHtml(repoLink)}" target="_blank" rel="noopener">${escapeHtml(result.repo)}</a>${createdLabel} · branch <code>${escapeHtml(result.branch)}</code>`;
     if (result.pr_url) {
       msg += ` · <a href="${escapeHtml(result.pr_url)}" target="_blank" rel="noopener">PR #${result.pr_number}</a>`;
     }

@@ -462,6 +462,13 @@ class GitHubPushReq(BaseModel):
     repo_name: str
     branch: str | None = None         # auto-generated if None
     open_pr: bool = True
+    # When the repo doesn't exist and the installation is on an Organization,
+    # create the repo (Administration: Write permission required on the App).
+    # User-type installations can't auto-create; the push fails with a clear
+    # error in that case.
+    create_if_missing: bool = True
+    repo_private: bool = True
+    repo_description: str | None = None
 
 
 @app.get("/github/install-url", dependencies=[Depends(auth.require_auth)])
@@ -563,6 +570,51 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
     if not install:
         raise HTTPException(404, "installation not found")
 
+    # ── Create repo on-demand if missing ──────────────────────────────
+    # Check existence first so we can branch between create-then-push and
+    # just-push. The check also tolerates "no access" returning as 404 —
+    # if creation then fails, we surface a clean error.
+    repo_was_created = False
+    try:
+        exists = await github_app.repo_exists(
+            req.installation_id, req.repo_owner, req.repo_name,
+        )
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"repo existence check failed: {e}")
+
+    if not exists:
+        if not req.create_if_missing:
+            raise HTTPException(
+                404,
+                f"repo {req.repo_owner}/{req.repo_name} does not exist (and create_if_missing=false)",
+            )
+        if install["account_type"] != "Organization":
+            # GitHub Apps can't create repos under a User account via their
+            # installation token — that requires a user OAuth token.
+            raise HTTPException(
+                400,
+                f"cannot auto-create {req.repo_owner}/{req.repo_name}: installation is on a "
+                f"User account (not Organization). Create the repo manually on GitHub and retry.",
+            )
+        # Ensure the target org matches the installation's account.
+        if req.repo_owner.lower() != install["account_login"].lower():
+            raise HTTPException(
+                400,
+                f"repo owner {req.repo_owner!r} does not match installation account "
+                f"{install['account_login']!r} — auto-create only supported for the installed org",
+            )
+        try:
+            await github_app.create_org_repo(
+                installation_id=req.installation_id,
+                org=req.repo_owner,
+                name=req.repo_name,
+                description=req.repo_description or "",
+                private=req.repo_private,
+            )
+            repo_was_created = True
+        except github_app.GitHubAppError as e:
+            raise HTTPException(502, f"repo creation failed: {e}")
+
     branch = req.branch or f"swarm/{workflow_id[:12]}-{int(_time.time())}"
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", project_row["name"]).strip("-") or "project"
     commit_msg = f"Initial scaffold from twai-swarm: {safe_name}\n\nWorkflow: {workflow_id}"
@@ -601,6 +653,7 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
     return {
         "push_id": push_id,
         "repo": f"{req.repo_owner}/{req.repo_name}",
+        "repo_created": repo_was_created,
         "branch": result.branch,
         "commit_sha": result.commit_sha,
         "pr_url": result.pr_url,
