@@ -22,6 +22,14 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 # because a deployment with fallback disabled is a legitimate config.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# GitHub App credentials. Optional at runtime — endpoints raise 503 when unset.
+# GITHUB_APP_ID is the numeric App ID shown on the app's settings page.
+# GITHUB_APP_PRIVATE_KEY is the full .pem contents (PKCS#1 or PKCS#8 RSA key).
+# GITHUB_APP_INSTALL_URL is the public install URL displayed in the UI.
+GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
+GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")
+GITHUB_APP_INSTALL_URL = os.getenv("GITHUB_APP_INSTALL_URL")
+
 def validate_runtime() -> None:
     """Fail fast if a runtime-required env var is missing.
 

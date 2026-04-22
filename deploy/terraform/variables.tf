@@ -45,6 +45,33 @@ variable "openai_api_key" {
   default     = ""
 }
 
+# ─── GitHub App credentials ───────────────────────────────────────────────
+# Register the App at github.com/settings/apps/new (or org-level), then paste:
+#   - Numeric App ID (shown on the app's settings page)
+#   - The full .pem private key contents
+#   - The public install URL (https://github.com/apps/<slug>/installations/new)
+# Leave all three empty to disable the GitHub push feature; the API endpoints
+# return 503 in that case.
+
+variable "github_app_id" {
+  description = "GitHub App ID (numeric). Empty disables the GitHub push feature."
+  type        = string
+  default     = ""
+}
+
+variable "github_app_private_key" {
+  description = "GitHub App private key (.pem contents). Sensitive."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "github_app_install_url" {
+  description = "Public install URL for the App. UI Connect button opens this."
+  type        = string
+  default     = ""
+}
+
 variable "temporal_api_key" {
   description = "Temporal Cloud API key (replaces mTLS cert/key auth)"
   type        = string

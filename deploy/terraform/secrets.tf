@@ -47,6 +47,29 @@ resource "aws_secretsmanager_secret_version" "openai" {
   secret_string = var.openai_api_key != "" ? var.openai_api_key : "UNSET"
 }
 
+# GitHub App credentials. Same UNSET-placeholder pattern as openai so ECS task
+# defs can reference the secrets unconditionally and the app layer treats the
+# placeholder as "feature disabled".
+resource "aws_secretsmanager_secret" "github_app_id" {
+  name                    = "${local.name_prefix}/github-app-id"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "github_app_id" {
+  secret_id     = aws_secretsmanager_secret.github_app_id.id
+  secret_string = var.github_app_id != "" ? var.github_app_id : "UNSET"
+}
+
+resource "aws_secretsmanager_secret" "github_app_private_key" {
+  name                    = "${local.name_prefix}/github-app-private-key"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "github_app_private_key" {
+  secret_id     = aws_secretsmanager_secret.github_app_private_key.id
+  secret_string = var.github_app_private_key != "" ? var.github_app_private_key : "UNSET"
+}
+
+# Install URL is non-sensitive; pass via env var rather than SM. See ecs.tf.
+
 resource "aws_secretsmanager_secret" "temporal_api_key" {
   name                    = "${local.name_prefix}/temporal-api-key"
   recovery_window_in_days = 0

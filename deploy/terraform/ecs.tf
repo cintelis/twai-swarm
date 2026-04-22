@@ -93,12 +93,16 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "TEMPORAL_TLS", value = "true" },
         # Empty = handle all queues. Narrow this on specialised worker services.
         { name = "TEMPORAL_QUEUES", value = "" },
+        # GitHub App install URL is public — env var, not SM secret.
+        { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
       ]
 
       secrets = [
         { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic.arn },
         { name = "XAI_API_KEY", valueFrom = aws_secretsmanager_secret.xai.arn },
         { name = "OPENAI_API_KEY", valueFrom = aws_secretsmanager_secret.openai.arn },
+        { name = "GITHUB_APP_ID", valueFrom = aws_secretsmanager_secret.github_app_id.arn },
+        { name = "GITHUB_APP_PRIVATE_KEY", valueFrom = aws_secretsmanager_secret.github_app_private_key.arn },
         { name = "TEMPORAL_API_KEY", valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
         { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
       ]
@@ -185,12 +189,15 @@ module "api_express" {
       { name = "TEMPORAL_HOST", value = var.temporal_host },
       { name = "TEMPORAL_NAMESPACE", value = var.temporal_namespace },
       { name = "TEMPORAL_TLS", value = "true" },
+      { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
     ]
 
     secret = [
       { name = "ANTHROPIC_API_KEY", value_from = aws_secretsmanager_secret.anthropic.arn },
       { name = "XAI_API_KEY", value_from = aws_secretsmanager_secret.xai.arn },
       { name = "OPENAI_API_KEY", value_from = aws_secretsmanager_secret.openai.arn },
+      { name = "GITHUB_APP_ID", value_from = aws_secretsmanager_secret.github_app_id.arn },
+      { name = "GITHUB_APP_PRIVATE_KEY", value_from = aws_secretsmanager_secret.github_app_private_key.arn },
       { name = "TEMPORAL_API_KEY", value_from = aws_secretsmanager_secret.temporal_api_key.arn },
       { name = "PG_DSN", value_from = aws_secretsmanager_secret.pg_dsn.arn },
     ]

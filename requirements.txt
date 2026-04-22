@@ -15,3 +15,6 @@ pydantic==2.9.2
 python-dotenv==1.0.1
 aiohttp==3.10.11
 slowapi==0.1.9
+# GitHub App: PyJWT[crypto] signs the app JWT (RS256) used to mint installation
+# tokens. The crypto extra pulls in the `cryptography` package needed for RSA.
+pyjwt[crypto]>=2.8,<3.0

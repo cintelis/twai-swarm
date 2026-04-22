@@ -245,6 +245,100 @@ async def get_context_for_task(task_id: str) -> list[dict]:
 
     return ancestors + similar
 
+async def upsert_github_installation(
+    installation_id: int,
+    account_login: str,
+    account_type: str,
+    tenant_id: str = "default",
+) -> None:
+    """Record a GitHub App install. Upsert so re-installs replace the row."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO github_installations (installation_id, account_login, account_type, tenant_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (installation_id) DO UPDATE
+          SET account_login = EXCLUDED.account_login,
+              account_type  = EXCLUDED.account_type,
+              tenant_id     = EXCLUDED.tenant_id,
+              updated_at    = now()
+        """,
+        installation_id, account_login, account_type, tenant_id,
+    )
+
+
+async def get_github_installations(tenant_id: str = "default") -> list[dict]:
+    """Every GitHub installation for the given tenant, newest first."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT installation_id, account_login, account_type, tenant_id, created_at
+        FROM github_installations
+        WHERE tenant_id = $1
+        ORDER BY updated_at DESC
+        """,
+        tenant_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_github_installation(installation_id: int) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT installation_id, account_login, account_type, tenant_id FROM github_installations WHERE installation_id=$1",
+        installation_id,
+    )
+    return dict(row) if row else None
+
+
+async def record_github_push(
+    project_id: str,
+    installation_id: int,
+    repo_owner: str,
+    repo_name: str,
+    branch: str,
+    commit_sha: Optional[str],
+    pr_url: Optional[str],
+    pr_number: Optional[int],
+    files_pushed: int,
+    tenant_id: str = "default",
+) -> str:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO github_pushes
+          (project_id, installation_id, tenant_id, repo_owner, repo_name,
+           branch, commit_sha, pr_url, pr_number, files_pushed)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        """,
+        UUID(project_id), installation_id, tenant_id,
+        repo_owner, repo_name, branch, commit_sha, pr_url, pr_number, files_pushed,
+    )
+    return str(row["id"])
+
+
+async def list_github_pushes_for_project(project_id: str) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, repo_owner, repo_name, branch, commit_sha, pr_url, pr_number,
+               files_pushed, pushed_at
+        FROM github_pushes
+        WHERE project_id = $1
+        ORDER BY pushed_at DESC
+        """,
+        UUID(project_id),
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = str(d["id"])
+        d["pushed_at"] = d["pushed_at"].isoformat() if d["pushed_at"] else None
+        out.append(d)
+    return out
+
+
 async def get_project_tasks(project_id: str) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(

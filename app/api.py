@@ -451,6 +451,174 @@ async def get_project(workflow_id: str):
     }
 
 
+# ─── GitHub App ──────────────────────────────────────────
+# v1: single-tenant — all installs go under tenant_id='default' (the schema's
+# default). Greenfield will resolve tenant_id from JWT claims via auth middleware
+# without changing the storage layer.
+
+class GitHubPushReq(BaseModel):
+    installation_id: int
+    repo_owner: str
+    repo_name: str
+    branch: str | None = None         # auto-generated if None
+    open_pr: bool = True
+
+
+@app.get("/github/install-url", dependencies=[Depends(auth.require_auth)])
+async def github_install_url():
+    """The public install URL — UI 'Connect GitHub' button opens this."""
+    if not config.GITHUB_APP_INSTALL_URL:
+        raise HTTPException(503, "GITHUB_APP_INSTALL_URL is not configured")
+    return {"install_url": config.GITHUB_APP_INSTALL_URL}
+
+
+@app.get("/github/callback", include_in_schema=False)
+async def github_callback(installation_id: int, setup_action: str = "install"):
+    """GitHub redirects here after the user installs the App.
+
+    No auth on this endpoint (GitHub is the caller, not a UI client). We fetch
+    the install metadata from GitHub and persist it. The redirect target then
+    lands the user back in the SPA where they can pick a repo to push to.
+    """
+    from app import github_app
+    if setup_action not in ("install", "update"):
+        raise HTTPException(400, f"unexpected setup_action: {setup_action}")
+    try:
+        meta = await github_app.fetch_installation_metadata(installation_id)
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"GitHub install lookup failed: {e}")
+
+    await db.upsert_github_installation(
+        installation_id=meta["installation_id"],
+        account_login=meta["account_login"],
+        account_type=meta["account_type"],
+    )
+    # Bounce back into the UI; the SPA polls /github/installations on load.
+    return RedirectResponse(url="/ui/#/github/connected", status_code=302)
+
+
+@app.get("/github/installations", dependencies=[Depends(auth.require_auth)])
+async def github_list_installations():
+    rows = await db.get_github_installations()
+    return {"installations": [
+        {
+            "installation_id": r["installation_id"],
+            "account_login": r["account_login"],
+            "account_type": r["account_type"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]}
+
+
+@app.get("/github/installations/{installation_id}/repos", dependencies=[Depends(auth.require_auth)])
+async def github_list_repos(installation_id: int):
+    from app import github_app
+    install = await db.get_github_installation(installation_id)
+    if not install:
+        raise HTTPException(404, "installation not found")
+    try:
+        repos = await github_app.list_installation_repos(installation_id)
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"GitHub repo list failed: {e}")
+    return {"repos": repos}
+
+
+@app.post("/projects/{workflow_id}/github-push", dependencies=[Depends(auth.require_auth)])
+async def github_push(workflow_id: str, req: GitHubPushReq):
+    """Push the project's coder scaffold to a GitHub repo as a new branch (+ PR)."""
+    from app import github_app
+    import time as _time
+    pool = await db.get_pool()
+    project_row = await pool.fetchrow(
+        "SELECT id, name FROM projects WHERE workflow_id=$1", workflow_id
+    )
+    if not project_row:
+        raise HTTPException(404, "project not found")
+
+    # Reuse the same coder-output extraction the /download endpoint uses,
+    # including the truncated-output salvage path.
+    coder_row = await pool.fetchrow(
+        """
+        SELECT output FROM tasks
+        WHERE project_id=$1 AND role='coder' AND status='done'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        project_row["id"],
+    )
+    if not coder_row or not coder_row["output"]:
+        raise HTTPException(404, "no coder output yet — workflow may still be running")
+
+    import json as _json
+    output = _json.loads(coder_row["output"])
+    files = output.get("files") if isinstance(output, dict) else None
+    if not isinstance(files, list) or not files:
+        raw_text = output.get("raw_text") if isinstance(output, dict) else None
+        if isinstance(raw_text, str) and raw_text:
+            files = _salvage_files_from_truncated(raw_text)
+        if not files:
+            raise HTTPException(422, "coder output has no files to push")
+
+    install = await db.get_github_installation(req.installation_id)
+    if not install:
+        raise HTTPException(404, "installation not found")
+
+    branch = req.branch or f"swarm/{workflow_id[:12]}-{int(_time.time())}"
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", project_row["name"]).strip("-") or "project"
+    commit_msg = f"Initial scaffold from twai-swarm: {safe_name}\n\nWorkflow: {workflow_id}"
+
+    try:
+        result = await github_app.push_files_as_branch(
+            installation_id=req.installation_id,
+            repo_owner=req.repo_owner,
+            repo_name=req.repo_name,
+            branch=branch,
+            files=[
+                {"path": (f.get("path") or "").lstrip("/").replace("\\", "/"),
+                 "content": f.get("content") or ""}
+                for f in files
+                if f.get("path") and ".." not in (f.get("path") or "").split("/")
+            ],
+            commit_message=commit_msg,
+            open_pr=req.open_pr,
+            pr_title=f"twai-swarm scaffold: {safe_name}",
+            pr_body=f"Generated by the twai-swarm agentic Coder.\n\n**Workflow:** `{workflow_id}`",
+        )
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"push failed: {e}")
+
+    push_id = await db.record_github_push(
+        project_id=str(project_row["id"]),
+        installation_id=req.installation_id,
+        repo_owner=req.repo_owner,
+        repo_name=req.repo_name,
+        branch=result.branch,
+        commit_sha=result.commit_sha,
+        pr_url=result.pr_url,
+        pr_number=result.pr_number,
+        files_pushed=result.files_pushed,
+    )
+    return {
+        "push_id": push_id,
+        "repo": f"{req.repo_owner}/{req.repo_name}",
+        "branch": result.branch,
+        "commit_sha": result.commit_sha,
+        "pr_url": result.pr_url,
+        "pr_number": result.pr_number,
+        "files_pushed": result.files_pushed,
+    }
+
+
+@app.get("/projects/{workflow_id}/github-pushes", dependencies=[Depends(auth.require_auth)])
+async def github_pushes_for_project(workflow_id: str):
+    pool = await db.get_pool()
+    row = await pool.fetchrow("SELECT id FROM projects WHERE workflow_id=$1", workflow_id)
+    if not row:
+        raise HTTPException(404, "project not found")
+    pushes = await db.list_github_pushes_for_project(str(row["id"]))
+    return {"pushes": pushes}
+
+
 # ─── UI ─────────────────────────────────────────────────
 # Mount AFTER all API routes so they win on the path resolver.
 @app.get("/", include_in_schema=False)

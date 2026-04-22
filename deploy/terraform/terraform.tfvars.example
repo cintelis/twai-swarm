@@ -20,6 +20,14 @@ xai_api_key       = "xai-..."
 openai_api_key    = "sk-proj-..."
 temporal_api_key  = "tmprl_..."
 
+# Optional: GitHub App for the Coder's "Push to GitHub" feature. Leave all
+# three blank to disable. Register the App at github.com/settings/apps/new
+# (org-level recommended for reuse across customers/greenfield).
+# See: _agent-instructions/twai-swarm/github-app-setup.md
+github_app_id          = ""
+github_app_private_key = "" # full .pem contents — paste between triple-quoted string in real tfvars
+github_app_install_url = "" # https://github.com/apps/<your-app-slug>/installations/new
+
 db_password = "generate-a-strong-password-here"
 
 # Leave empty to use default VPC; set for production (see prod-runbook.md)

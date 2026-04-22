@@ -71,6 +71,41 @@ CREATE TABLE IF NOT EXISTS task_embeddings (
 
 CREATE INDEX IF NOT EXISTS idx_task_embeddings_vec ON task_embeddings
     USING hnsw (embedding vector_cosine_ops);
+
+-- GitHub App installations. One row per tenant×GitHub-account-they-installed-on.
+-- tenant_id is forward-compat: today everyone is 'default'; greenfield's tenant
+-- middleware will set this from JWT claims. Don't drop the column when migrating.
+CREATE TABLE IF NOT EXISTS github_installations (
+    installation_id BIGINT PRIMARY KEY,
+    account_login   TEXT NOT NULL,         -- 'cintelis' or 'acme-corp'
+    account_type    TEXT NOT NULL,         -- 'Organization' or 'User'
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_installations_tenant
+    ON github_installations(tenant_id);
+
+-- Push history per project. Lets the UI show "this scaffold was pushed to X
+-- on date Y" without re-querying GitHub on every page render.
+CREATE TABLE IF NOT EXISTS github_pushes (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    installation_id BIGINT NOT NULL REFERENCES github_installations(installation_id),
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
+    repo_owner      TEXT NOT NULL,
+    repo_name       TEXT NOT NULL,
+    branch          TEXT NOT NULL,
+    commit_sha      TEXT,
+    pr_url          TEXT,
+    pr_number       INT,
+    files_pushed    INT,
+    pushed_at       TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_pushes_project
+    ON github_pushes(project_id, pushed_at DESC);
 """
 
 async def main() -> int:

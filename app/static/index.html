@@ -1128,8 +1128,12 @@ function renderProject(data) {
         <div class="code-card">
           <div class="code-head">
             <div class="code-title">Generated scaffold ${out.language ? `<span class="meta">· ${escapeHtml(out.language)}</span>` : ''}</div>
-            <button class="btn btn-primary" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
+            <div style="display:flex;gap:8px;">
+              <button class="btn" data-download-id="${escapeHtml(workflow_id)}">Download .zip</button>
+              <button class="btn btn-primary" data-github-push-id="${escapeHtml(workflow_id)}">Push to GitHub</button>
+            </div>
           </div>
+          <div id="ghPushStatus-${escapeHtml(workflow_id)}" style="display:none;"></div>
       `;
       // Agentic-coder status chip (iterations + verify outcome). Only shown
       // when the agentic path produced the output — oneshot runs don't have
@@ -1226,6 +1230,10 @@ function renderProject(data) {
   const dlBtn = root.querySelector('[data-download-id]');
   if (dlBtn) dlBtn.addEventListener('click', () => downloadScaffold(dlBtn.dataset.downloadId, dlBtn));
 
+  // Wire up GitHub push button
+  const ghBtn = root.querySelector('[data-github-push-id]');
+  if (ghBtn) ghBtn.addEventListener('click', () => openGitHubPushDialog(ghBtn.dataset.githubPushId, ghBtn));
+
   // Wire up task expand/collapse (only on rows that actually have output)
   for (const item of root.querySelectorAll('.task-item')) {
     const row = item.querySelector('.task-row');
@@ -1311,6 +1319,103 @@ async function downloadScaffold(workflowId, btn) {
       el.textContent = 'Download failed: ' + err.message;
       card.appendChild(el);
     }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function openGitHubPushDialog(workflowId, btn) {
+  const orig = btn.textContent;
+  const statusEl = document.getElementById(`ghPushStatus-${workflowId}`);
+  const showStatus = (html, isError) => {
+    if (!statusEl) return;
+    statusEl.style.display = 'block';
+    statusEl.style.marginTop = '10px';
+    statusEl.innerHTML = `<div class="alert ${isError ? 'alert-error' : ''}">${html}</div>`;
+  };
+
+  btn.disabled = true;
+  btn.textContent = 'Loading installations…';
+  try {
+    // 1. List installations the user has connected.
+    const r = await apiFetch('/github/installations');
+    if (!r.ok) throw new Error(`installations HTTP ${r.status}`);
+    const { installations } = await r.json();
+
+    if (!installations || installations.length === 0) {
+      // Offer the install flow.
+      const u = await apiFetch('/github/install-url');
+      if (!u.ok) {
+        showStatus('GitHub App not configured on this server (set GITHUB_APP_ID + private key).', true);
+        return;
+      }
+      const { install_url } = await u.json();
+      showStatus(
+        `No GitHub accounts connected. <a href="${escapeHtml(install_url)}" target="_blank" rel="noopener">Install the Cintelis Swarm app</a>, then come back and click Push to GitHub again.`,
+        false,
+      );
+      return;
+    }
+
+    // 2. Pick installation (auto-pick if only one).
+    let installationId;
+    if (installations.length === 1) {
+      installationId = installations[0].installation_id;
+    } else {
+      const choices = installations.map((i, idx) =>
+        `${idx + 1}) ${i.account_login} (${i.account_type})`,
+      ).join('\n');
+      const pick = prompt(`Pick a GitHub installation:\n${choices}\n\nEnter number:`, '1');
+      if (!pick) return;
+      const idx = parseInt(pick, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= installations.length) return;
+      installationId = installations[idx].installation_id;
+    }
+
+    // 3. List repos the installation can push to.
+    btn.textContent = 'Loading repos…';
+    const reposResp = await apiFetch(`/github/installations/${installationId}/repos`);
+    if (!reposResp.ok) throw new Error(`repos HTTP ${reposResp.status}`);
+    const { repos } = await reposResp.json();
+    if (!repos || repos.length === 0) {
+      showStatus('No repos accessible to that installation. Re-install the App and grant repo access.', true);
+      return;
+    }
+
+    // 4. Pick repo (prompt for now — replace with a proper select when we have time).
+    const repoNames = repos.map((r, idx) => `${idx + 1}) ${r.full_name}`).join('\n');
+    const repoPick = prompt(`Pick a repo:\n${repoNames}\n\nEnter number:`, '1');
+    if (!repoPick) return;
+    const repoIdx = parseInt(repoPick, 10) - 1;
+    if (isNaN(repoIdx) || repoIdx < 0 || repoIdx >= repos.length) return;
+    const chosenRepo = repos[repoIdx];
+
+    // 5. Push.
+    btn.textContent = 'Pushing…';
+    const pushResp = await apiFetch(`/projects/${workflowId}/github-push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        installation_id: installationId,
+        repo_owner: chosenRepo.owner,
+        repo_name: chosenRepo.name,
+        open_pr: true,
+      }),
+    });
+    if (!pushResp.ok) {
+      const text = await pushResp.text();
+      throw new Error(`push HTTP ${pushResp.status}: ${text.slice(0, 200)}`);
+    }
+    const result = await pushResp.json();
+    const repoLink = `https://github.com/${result.repo}/tree/${result.branch}`;
+    let msg = `Pushed ${result.files_pushed} files to <a href="${escapeHtml(repoLink)}" target="_blank" rel="noopener">${escapeHtml(result.repo)}</a> · branch <code>${escapeHtml(result.branch)}</code>`;
+    if (result.pr_url) {
+      msg += ` · <a href="${escapeHtml(result.pr_url)}" target="_blank" rel="noopener">PR #${result.pr_number}</a>`;
+    }
+    showStatus(msg, false);
+  } catch (err) {
+    showStatus('Push failed: ' + escapeHtml(err.message), true);
   } finally {
     btn.disabled = false;
     btn.textContent = orig;

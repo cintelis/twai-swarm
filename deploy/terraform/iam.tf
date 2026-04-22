@@ -34,6 +34,8 @@ data "aws_iam_policy_document" "secrets_access" {
       aws_secretsmanager_secret.anthropic.arn,
       aws_secretsmanager_secret.xai.arn,
       aws_secretsmanager_secret.openai.arn,
+      aws_secretsmanager_secret.github_app_id.arn,
+      aws_secretsmanager_secret.github_app_private_key.arn,
       aws_secretsmanager_secret.temporal_api_key.arn,
       aws_secretsmanager_secret.pg_dsn.arn,
     ]
