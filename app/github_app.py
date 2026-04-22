@@ -12,6 +12,11 @@ Two-step auth, both via PyJWT + GitHub REST:
 We cache installation tokens for ~55 minutes to amortise the JWT mint + token
 exchange cost. Cache key = installation_id.
 
+Every API call goes through `_authed_request`, which auto-evicts the cached
+token + re-mints once on 401. Heals the "uninstall + re-install at the same
+installation_id" scenario where our cached token has been revoked but we
+don't know it yet.
+
 Push approach: we use the Git Data API (blobs + tree + commit + ref) rather
 than the Contents API. Contents API is one-file-per-call and chatty; the Git
 Data API lets us push N files in a single tree + commit + ref-update sequence.
@@ -72,11 +77,18 @@ def _generate_app_jwt() -> str:
     return pyjwt.encode(payload, config.GITHUB_APP_PRIVATE_KEY, algorithm="RS256")
 
 
-async def get_installation_token(installation_id: int) -> str:
-    """Return a cached installation access token, minting if necessary."""
-    cached = _token_cache.get(installation_id)
-    if cached and cached.expires_at > time.time() + 60:    # 1-min safety margin
-        return cached.token
+async def get_installation_token(installation_id: int, force_refresh: bool = False) -> str:
+    """Return a cached installation access token, minting if necessary.
+
+    `force_refresh=True` skips the cache and mints fresh — used by the
+    401-retry path in `_authed_request` when our cached token has been
+    revoked (e.g., the App was uninstalled and re-installed at the same
+    installation_id).
+    """
+    if not force_refresh:
+        cached = _token_cache.get(installation_id)
+        if cached and cached.expires_at > time.time() + 60:    # 1-min safety margin
+            return cached.token
 
     app_jwt = _generate_app_jwt()
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -102,12 +114,68 @@ async def get_installation_token(installation_id: int) -> str:
     return token
 
 
+async def _authed_request(
+    installation_id: int,
+    method: str,
+    path: str,
+    *,
+    json: dict | list | None = None,
+    params: dict | None = None,
+    timeout: float = 30.0,
+) -> httpx.Response:
+    """Perform an authenticated GitHub REST request with cache+retry.
+
+    Flow:
+      1. Get the cached installation token (or mint one).
+      2. Make the request.
+      3. If GitHub returns 401, the cached token has been revoked — evict
+         the cache entry, re-mint, retry once.
+      4. Return the (possibly retried) response.
+
+    `path` is the GitHub-relative URL (e.g. "/repos/foo/bar"); the function
+    joins with `GITHUB_API` so callers don't repeat the base URL.
+
+    The retry only fires for 401. Other failure modes (403, 404, 5xx) bubble
+    up as the response object — caller decides whether they're errors.
+    """
+    url = f"{GITHUB_API}{path}"
+
+    async def _do(force_refresh: bool) -> httpx.Response:
+        token = await get_installation_token(installation_id, force_refresh=force_refresh)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": USER_AGENT,
+                },
+                json=json,
+                params=params,
+            )
+
+    resp = await _do(force_refresh=False)
+    if resp.status_code == 401:
+        logger.info(
+            "installation %d returned 401 with cached token — evicting cache and retrying with fresh mint",
+            installation_id,
+        )
+        _token_cache.pop(installation_id, None)
+        resp = await _do(force_refresh=True)
+    return resp
+
+
 async def fetch_installation_metadata(installation_id: int) -> dict:
     """Read the install's account_login, account_type, and granted permissions.
 
     Used by the callback (to persist a friendly name alongside the install ID)
     and by the permission-preflight check (to surface a clear error before
     we hit GitHub with a call that'll 403).
+
+    Uses the App JWT directly (not an installation token) since this is an
+    App-level endpoint. Doesn't go through `_authed_request`.
     """
     app_jwt = _generate_app_jwt()
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -162,37 +230,30 @@ def missing_permissions(granted: dict) -> list[str]:
 
 async def list_installation_repos(installation_id: int) -> list[dict]:
     """List repositories this installation can access."""
-    token = await get_installation_token(installation_id)
     repos: list[dict] = []
     page = 1
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while True:
-            resp = await client.get(
-                f"{GITHUB_API}/installation/repositories",
-                params={"per_page": 100, "page": page},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "User-Agent": USER_AGENT,
-                },
+    while True:
+        resp = await _authed_request(
+            installation_id, "GET", "/installation/repositories",
+            params={"per_page": 100, "page": page},
+        )
+        if resp.status_code != 200:
+            raise GitHubAppError(
+                f"list repos failed: {resp.status_code} {resp.text[:200]}"
             )
-            if resp.status_code != 200:
-                raise GitHubAppError(
-                    f"list repos failed: {resp.status_code} {resp.text[:200]}"
-                )
-            body = resp.json()
-            for r in body.get("repositories", []):
-                repos.append({
-                    "full_name": r["full_name"],
-                    "owner": r["owner"]["login"],
-                    "name": r["name"],
-                    "default_branch": r["default_branch"],
-                    "private": r["private"],
-                })
-            if len(body.get("repositories", [])) < 100:
-                break
-            page += 1
+        body = resp.json()
+        chunk = body.get("repositories", [])
+        for r in chunk:
+            repos.append({
+                "full_name": r["full_name"],
+                "owner": r["owner"]["login"],
+                "name": r["name"],
+                "default_branch": r["default_branch"],
+                "private": r["private"],
+            })
+        if len(chunk) < 100:
+            break
+        page += 1
     return repos
 
 
@@ -204,17 +265,7 @@ async def repo_exists(installation_id: int, owner: str, name: str) -> bool:
     granted access to it — both cases are handled the same way by the caller
     (either create it or the push step will fail loudly).
     """
-    token = await get_installation_token(installation_id)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            f"{GITHUB_API}/repos/{owner}/{name}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": USER_AGENT,
-            },
-        )
+    resp = await _authed_request(installation_id, "GET", f"/repos/{owner}/{name}")
     if resp.status_code == 200:
         return True
     if resp.status_code == 404:
@@ -241,26 +292,18 @@ async def create_org_repo(
     Returns the full repo JSON from GitHub (owner, name, default_branch,
     clone_url, html_url, etc.).
     """
-    token = await get_installation_token(installation_id)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{GITHUB_API}/orgs/{org}/repos",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": USER_AGENT,
-            },
-            json={
-                "name": name,
-                "description": description or f"Scaffold from 365Soft Labs Swarm: {name}",
-                "private": private,
-                "auto_init": True,
-                "has_issues": True,
-                "has_projects": False,
-                "has_wiki": False,
-            },
-        )
+    resp = await _authed_request(
+        installation_id, "POST", f"/orgs/{org}/repos",
+        json={
+            "name": name,
+            "description": description or f"Scaffold from 365Soft Labs Swarm: {name}",
+            "private": private,
+            "auto_init": True,
+            "has_issues": True,
+            "has_projects": False,
+            "has_wiki": False,
+        },
+    )
     if resp.status_code != 201:
         raise GitHubAppError(
             f"create repo failed: {resp.status_code} {resp.text[:200]}"
@@ -292,124 +335,122 @@ async def push_files_as_branch(
     """Push `files` ([{path, content}]) as a new branch off the repo's default
     branch. Optionally open a PR.
 
-    Steps (all via Git Data API):
+    Steps (all via Git Data API, every call goes through `_authed_request`
+    so a revoked cached token gets auto-recovered on the first 401):
       1. Resolve default branch + its head SHA.
-      2. Create a blob per file.
+      2. Create a blob per file (parallelised via asyncio.gather).
       3. Build a tree referencing all blobs (base = default-branch tree).
       4. Create a commit with that tree + parent = default-branch head.
       5. Create the new branch ref pointing at the new commit.
+         (If branch already exists: fall back to PATCH ref with force=true.)
       6. (Optional) open a PR from the new branch to the default branch.
+         (PR creation failure is logged but non-fatal — branch is pushed.)
     """
     if not files:
         raise GitHubAppError("no files to push")
 
-    token = await get_installation_token(installation_id)
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": USER_AGENT,
-    }
-    base = f"{GITHUB_API}/repos/{repo_owner}/{repo_name}"
+    base = f"/repos/{repo_owner}/{repo_name}"
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        # 1. Default branch + base commit
-        repo_resp = await client.get(base, headers=headers)
-        if repo_resp.status_code != 200:
-            raise GitHubAppError(f"get repo failed: {repo_resp.status_code} {repo_resp.text[:200]}")
-        default_branch = repo_resp.json()["default_branch"]
+    # 1. Default branch + base commit
+    repo_resp = await _authed_request(installation_id, "GET", base)
+    if repo_resp.status_code != 200:
+        raise GitHubAppError(f"get repo failed: {repo_resp.status_code} {repo_resp.text[:200]}")
+    default_branch = repo_resp.json()["default_branch"]
 
-        ref_resp = await client.get(f"{base}/git/ref/heads/{default_branch}", headers=headers)
-        if ref_resp.status_code != 200:
-            raise GitHubAppError(f"get default ref failed: {ref_resp.status_code} {ref_resp.text[:200]}")
-        base_sha = ref_resp.json()["object"]["sha"]
+    ref_resp = await _authed_request(installation_id, "GET", f"{base}/git/ref/heads/{default_branch}")
+    if ref_resp.status_code != 200:
+        raise GitHubAppError(f"get default ref failed: {ref_resp.status_code} {ref_resp.text[:200]}")
+    base_sha = ref_resp.json()["object"]["sha"]
 
-        commit_resp = await client.get(f"{base}/git/commits/{base_sha}", headers=headers)
-        if commit_resp.status_code != 200:
-            raise GitHubAppError(f"get base commit failed: {commit_resp.status_code} {commit_resp.text[:200]}")
-        base_tree_sha = commit_resp.json()["tree"]["sha"]
+    commit_resp = await _authed_request(installation_id, "GET", f"{base}/git/commits/{base_sha}")
+    if commit_resp.status_code != 200:
+        raise GitHubAppError(f"get base commit failed: {commit_resp.status_code} {commit_resp.text[:200]}")
+    base_tree_sha = commit_resp.json()["tree"]["sha"]
 
-        # 2. One blob per file (parallelised — typical scaffold is 10-20 files)
-        async def _create_blob(path: str, content: str) -> dict:
-            r = await client.post(
-                f"{base}/git/blobs",
-                headers=headers,
-                json={
-                    "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-                    "encoding": "base64",
-                },
+    # 2. One blob per file (parallel — typical scaffold is 10-20 files)
+    async def _create_blob(path: str, content: str) -> dict:
+        r = await _authed_request(
+            installation_id, "POST", f"{base}/git/blobs",
+            json={
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "encoding": "base64",
+            },
+        )
+        if r.status_code != 201:
+            raise GitHubAppError(
+                f"create blob {path} failed: {r.status_code} {r.text[:200]}"
             )
-            if r.status_code != 201:
-                raise GitHubAppError(
-                    f"create blob {path} failed: {r.status_code} {r.text[:200]}"
-                )
-            return {"path": path, "sha": r.json()["sha"]}
+        return {"path": path, "sha": r.json()["sha"]}
 
-        blob_results = await asyncio.gather(*(
-            _create_blob(f["path"], f.get("content", "")) for f in files
-        ))
+    blob_results = await asyncio.gather(*(
+        _create_blob(f["path"], f.get("content", "")) for f in files
+    ))
 
-        # 3. Tree
-        tree_payload = {
+    # 3. Tree
+    tree_resp = await _authed_request(
+        installation_id, "POST", f"{base}/git/trees",
+        json={
             "base_tree": base_tree_sha,
             "tree": [
                 {"path": b["path"], "mode": "100644", "type": "blob", "sha": b["sha"]}
                 for b in blob_results
             ],
-        }
-        tree_resp = await client.post(f"{base}/git/trees", headers=headers, json=tree_payload)
-        if tree_resp.status_code != 201:
-            raise GitHubAppError(f"create tree failed: {tree_resp.status_code} {tree_resp.text[:200]}")
-        tree_sha = tree_resp.json()["sha"]
+        },
+    )
+    if tree_resp.status_code != 201:
+        raise GitHubAppError(f"create tree failed: {tree_resp.status_code} {tree_resp.text[:200]}")
+    tree_sha = tree_resp.json()["sha"]
 
-        # 4. Commit
-        commit_payload = {
+    # 4. Commit
+    c_resp = await _authed_request(
+        installation_id, "POST", f"{base}/git/commits",
+        json={
             "message": commit_message,
             "tree": tree_sha,
             "parents": [base_sha],
-        }
-        c_resp = await client.post(f"{base}/git/commits", headers=headers, json=commit_payload)
-        if c_resp.status_code != 201:
-            raise GitHubAppError(f"create commit failed: {c_resp.status_code} {c_resp.text[:200]}")
-        new_commit_sha = c_resp.json()["sha"]
+        },
+    )
+    if c_resp.status_code != 201:
+        raise GitHubAppError(f"create commit failed: {c_resp.status_code} {c_resp.text[:200]}")
+    new_commit_sha = c_resp.json()["sha"]
 
-        # 5. Branch ref
-        ref_payload = {"ref": f"refs/heads/{branch}", "sha": new_commit_sha}
-        r = await client.post(f"{base}/git/refs", headers=headers, json=ref_payload)
-        if r.status_code not in (201, 422):
-            raise GitHubAppError(f"create ref failed: {r.status_code} {r.text[:200]}")
-        if r.status_code == 422:
-            # Branch already exists — fast-forward it instead of failing.
-            r = await client.patch(
-                f"{base}/git/refs/heads/{branch}",
-                headers=headers,
-                json={"sha": new_commit_sha, "force": True},
-            )
-            if r.status_code != 200:
-                raise GitHubAppError(f"update ref failed: {r.status_code} {r.text[:200]}")
+    # 5. Branch ref — try create, fall back to force-update on 422.
+    r = await _authed_request(
+        installation_id, "POST", f"{base}/git/refs",
+        json={"ref": f"refs/heads/{branch}", "sha": new_commit_sha},
+    )
+    if r.status_code not in (201, 422):
+        raise GitHubAppError(f"create ref failed: {r.status_code} {r.text[:200]}")
+    if r.status_code == 422:
+        r = await _authed_request(
+            installation_id, "PATCH", f"{base}/git/refs/heads/{branch}",
+            json={"sha": new_commit_sha, "force": True},
+        )
+        if r.status_code != 200:
+            raise GitHubAppError(f"update ref failed: {r.status_code} {r.text[:200]}")
 
-        # 6. Optional PR
-        pr_url: Optional[str] = None
-        pr_number: Optional[int] = None
-        if open_pr:
-            pr_payload = {
+    # 6. Optional PR
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    if open_pr:
+        pr_resp = await _authed_request(
+            installation_id, "POST", f"{base}/pulls",
+            json={
                 "title": pr_title or f"Scaffold from twai-swarm: {branch}",
                 "head": branch,
                 "base": default_branch,
                 "body": pr_body or "Generated by the twai-swarm agentic Coder.",
-            }
-            pr_resp = await client.post(f"{base}/pulls", headers=headers, json=pr_payload)
-            if pr_resp.status_code == 201:
-                pj = pr_resp.json()
-                pr_url = pj["html_url"]
-                pr_number = int(pj["number"])
-            else:
-                # PR creation failure isn't fatal — branch is pushed; user can open
-                # the PR manually. Log + continue.
-                logger.warning(
-                    "PR open failed (branch %s pushed OK): %s %s",
-                    branch, pr_resp.status_code, pr_resp.text[:200],
-                )
+            },
+        )
+        if pr_resp.status_code == 201:
+            pj = pr_resp.json()
+            pr_url = pj["html_url"]
+            pr_number = int(pj["number"])
+        else:
+            logger.warning(
+                "PR open failed (branch %s pushed OK): %s %s",
+                branch, pr_resp.status_code, pr_resp.text[:200],
+            )
 
     return PushResult(
         branch=branch,
