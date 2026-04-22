@@ -583,14 +583,66 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
     if not install:
         raise HTTPException(404, "installation not found")
 
-    # ── Permission preflight ──────────────────────────────────────────
-    # Catch "org owner hasn't accepted new permissions" BEFORE we burn a
-    # GitHub call. Returns a 400 with a direct link to the accept page.
+    # ── Verify install is still alive on GitHub ──────────────────────
+    # If you uninstalled the App, our DB row is stale. Auto-clean it and
+    # surface a 410 the UI can use to prompt re-install.
     try:
         meta = await github_app.fetch_installation_metadata(req.installation_id)
     except github_app.GitHubAppError as e:
+        if "404" in str(e):
+            await db.delete_github_installation(req.installation_id)
+            github_app._token_cache.pop(req.installation_id, None)
+            raise HTTPException(
+                410,
+                f"Installation {req.installation_id} no longer exists on GitHub "
+                f"(it was uninstalled). DB row cleaned up — re-install the App and try again.",
+            )
         raise HTTPException(502, f"installation metadata fetch failed: {e}")
-    missing = github_app.missing_permissions(meta.get("permissions", {}))
+
+    # ── Does the target repo already exist? ──────────────────────────
+    # Determines what permissions we'll need: pushing to an existing repo
+    # only needs base perms; creating a new org repo also needs
+    # organization_administration. Doing this BEFORE the preflight means
+    # User-account installs (which can never have org perms) work fine
+    # for pushes to existing repos.
+    try:
+        exists = await github_app.repo_exists(
+            req.installation_id, req.repo_owner, req.repo_name,
+        )
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"repo existence check failed: {e}")
+
+    needs_repo_create = False
+    if not exists:
+        if not req.create_if_missing:
+            raise HTTPException(
+                404,
+                f"repo {req.repo_owner}/{req.repo_name} does not exist (and create_if_missing=false)",
+            )
+        if install["account_type"] != "Organization":
+            raise HTTPException(
+                400,
+                f"cannot auto-create {req.repo_owner}/{req.repo_name}: installation is on a "
+                f"User account (not Organization). GitHub Apps can't create repos under "
+                f"user accounts; create the repo manually on GitHub and retry.",
+            )
+        if req.repo_owner.lower() != install["account_login"].lower():
+            raise HTTPException(
+                400,
+                f"repo owner {req.repo_owner!r} does not match installation account "
+                f"{install['account_login']!r} — auto-create only supported for the installed org",
+            )
+        needs_repo_create = True
+
+    # ── Permission preflight (operation-aware) ───────────────────────
+    # Push-to-existing needs only BASE_PERMISSIONS. Create-then-push needs
+    # organization_administration on top of those. Surfacing the precise
+    # missing perm with a deep link beats the cryptic GitHub 403.
+    required = (
+        github_app.ORG_CREATE_PERMISSIONS if needs_repo_create
+        else github_app.BASE_PERMISSIONS
+    )
+    missing = github_app.missing_permissions(meta.get("permissions", {}), required)
     if missing:
         install_url_for_accept = (
             f"https://github.com/organizations/{meta['account_login']}/settings/installations/{req.installation_id}"
@@ -603,39 +655,9 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
             f"Go to {install_url_for_accept} and click 'Accept new permissions' to fix.",
         )
 
-    # ── Create repo on-demand if missing ──────────────────────────────
-    # Check existence first so we can branch between create-then-push and
-    # just-push. The check also tolerates "no access" returning as 404 —
-    # if creation then fails, we surface a clean error.
+    # ── Create repo if needed ────────────────────────────────────────
     repo_was_created = False
-    try:
-        exists = await github_app.repo_exists(
-            req.installation_id, req.repo_owner, req.repo_name,
-        )
-    except github_app.GitHubAppError as e:
-        raise HTTPException(502, f"repo existence check failed: {e}")
-
-    if not exists:
-        if not req.create_if_missing:
-            raise HTTPException(
-                404,
-                f"repo {req.repo_owner}/{req.repo_name} does not exist (and create_if_missing=false)",
-            )
-        if install["account_type"] != "Organization":
-            # GitHub Apps can't create repos under a User account via their
-            # installation token — that requires a user OAuth token.
-            raise HTTPException(
-                400,
-                f"cannot auto-create {req.repo_owner}/{req.repo_name}: installation is on a "
-                f"User account (not Organization). Create the repo manually on GitHub and retry.",
-            )
-        # Ensure the target org matches the installation's account.
-        if req.repo_owner.lower() != install["account_login"].lower():
-            raise HTTPException(
-                400,
-                f"repo owner {req.repo_owner!r} does not match installation account "
-                f"{install['account_login']!r} — auto-create only supported for the installed org",
-            )
+    if needs_repo_create:
         try:
             await github_app.create_org_repo(
                 installation_id=req.installation_id,

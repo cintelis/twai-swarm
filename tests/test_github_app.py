@@ -282,6 +282,29 @@ async def test_authed_request_no_retry_when_first_call_succeeds(monkeypatch):
     assert cls.post.await_count == 0   # mint not called (cache hit)
 
 
+def test_missing_permissions_uses_base_by_default():
+    """Default required set is BASE_PERMISSIONS — no org admin needed."""
+    from app import github_app
+    granted = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+    assert github_app.missing_permissions(granted) == []
+
+
+def test_missing_permissions_org_create_requires_admin():
+    """Same grant fails when ORG_CREATE_PERMISSIONS is required."""
+    from app import github_app
+    granted = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+    missing = github_app.missing_permissions(granted, github_app.ORG_CREATE_PERMISSIONS)
+    assert any("organization_administration" in m for m in missing)
+
+
+def test_missing_permissions_reports_insufficient_level():
+    """Granted with `read` when `write` is needed → reported as insufficient."""
+    from app import github_app
+    granted = {"contents": "read", "pull_requests": "write", "metadata": "read"}
+    missing = github_app.missing_permissions(granted)
+    assert any("contents" in m and "have read" in m for m in missing)
+
+
 @pytest.mark.asyncio
 async def test_authed_request_does_not_retry_on_403(monkeypatch):
     """403 (permission denied) is permanent — bubble up, don't retry."""

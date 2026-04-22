@@ -201,30 +201,40 @@ async def fetch_installation_metadata(installation_id: int) -> dict:
     }
 
 
-# What we need for "Push to GitHub" with auto-create-repo to work end-to-end.
-# Organization_administration:write is the one that commonly fails because
-# the org owner hasn't accepted the new permission on the existing install.
-REQUIRED_PERMISSIONS = {
+# Permissions the App needs at the repo-write level. Required for every push.
+BASE_PERMISSIONS = {
     "contents": "write",
     "pull_requests": "write",
     "metadata": "read",
+}
+
+# Additional permission needed ONLY when we're going to create a new org repo.
+# Pushing to an existing repo doesn't need this. User-account installs can
+# never have it (GitHub doesn't grant org permissions outside orgs).
+ORG_CREATE_PERMISSIONS = {
+    **BASE_PERMISSIONS,
     "organization_administration": "write",
 }
 
 _LEVEL_RANK = {"read": 1, "write": 2, "admin": 3}
 
 
-def missing_permissions(granted: dict) -> list[str]:
-    """Return a human-readable list of permissions that don't satisfy the
-    required set. Empty list = the install has everything we need."""
+def missing_permissions(granted: dict, required: dict | None = None) -> list[str]:
+    """Return a human-readable list of permissions that don't satisfy `required`.
+
+    Defaults to BASE_PERMISSIONS (push-to-existing-repo). Pass
+    ORG_CREATE_PERMISSIONS when the operation will create a new org repo.
+    """
+    if required is None:
+        required = BASE_PERMISSIONS
     missing: list[str] = []
-    for perm, required in REQUIRED_PERMISSIONS.items():
+    for perm, level in required.items():
         current = granted.get(perm)
         if current is None:
-            missing.append(f"{perm}: need {required}, not granted")
+            missing.append(f"{perm}: need {level}, not granted")
             continue
-        if _LEVEL_RANK.get(current, 0) < _LEVEL_RANK.get(required, 0):
-            missing.append(f"{perm}: need {required}, have {current}")
+        if _LEVEL_RANK.get(current, 0) < _LEVEL_RANK.get(level, 0):
+            missing.append(f"{perm}: need {level}, have {current}")
     return missing
 
 
