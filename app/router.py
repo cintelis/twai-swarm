@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 Role = Literal["ba", "architect", "se", "estimator", "reviewer", "researcher", "documenter", "coder"]
-Provider = Literal["anthropic", "xai"]
+Provider = Literal["anthropic", "xai", "openai"]
 Tier = Literal["fast", "mid", "flagship"]
 
 @dataclass(frozen=True)
@@ -43,6 +43,24 @@ MODELS: dict[str, ModelSpec] = {
     # via the Responses API. Same per-token pricing as the flagship; the
     # extra cost is tool invocations ($5 / 1k calls).
     "grok-research": ModelSpec("xai", "grok-4.20-reasoning", "flagship", 2.00, 6.00),
+
+    # OpenAI — fallback only. Per OpenAI's "Default model for most coding tasks"
+    # guidance, gpt-5.4 is the right default for both general + coding work.
+    # Pricing here is a placeholder until we confirm gpt-5.4's official rates;
+    # cost telemetry stays roughly accurate as long as input+output orders of
+    # magnitude are right. Update from platform.openai.com/docs/pricing.
+    "gpt54": ModelSpec("openai", "gpt-5.4", "flagship", 5.00, 20.00),
+}
+
+# Fallback chain: when a primary provider raises a transient error, the
+# runner walks this list to find a working substitute. Empty list = no
+# fallback, raise upstream. Coder is intentionally NOT extended — the
+# agentic loop uses Anthropic-SDK-specific helpers (beta_async_tool +
+# tool_runner) and falls back to the in-process oneshot coder instead.
+FALLBACK_CHAIN: dict[Provider, list[str]] = {
+    "anthropic": ["gpt54"],
+    "xai":       ["gpt54"],
+    "openai":    [],   # already the fallback target; nowhere further to go
 }
 
 # Default model key per role. Mix providers freely.

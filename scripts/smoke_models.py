@@ -27,12 +27,13 @@ os.environ.setdefault("TEMPORAL_TLS", "false")
 os.environ.setdefault("TEMPORAL_HOST", "localhost:7233")
 os.environ.setdefault("TEMPORAL_NAMESPACE", "default")
 
-from app.providers import anthropic_provider, xai_provider  # noqa: E402
+from app.providers import anthropic_provider, openai_provider, xai_provider  # noqa: E402
 from app.router import MODELS  # noqa: E402
 
 PROVIDERS = {
     "anthropic": anthropic_provider.complete,
     "xai":       xai_provider.complete,
+    "openai":    openai_provider.complete,
 }
 
 
@@ -62,8 +63,17 @@ async def main() -> int:
     if not os.getenv("XAI_API_KEY"):
         print("XAI_API_KEY is not set", file=sys.stderr)
         return 2
+    # OpenAI is optional (fallback-only). Skip its models when the key is
+    # unset rather than failing the smoke — matches app/config.py's posture.
+    openai_key_present = bool(os.getenv("OPENAI_API_KEY"))
+    models_to_ping = {
+        k: s for k, s in MODELS.items()
+        if s.provider != "openai" or openai_key_present
+    }
+    if not openai_key_present:
+        print("  (skipping OpenAI models: OPENAI_API_KEY not set)\n")
 
-    results = await asyncio.gather(*(ping(k, s) for k, s in MODELS.items()))
+    results = await asyncio.gather(*(ping(k, s) for k, s in models_to_ping.items()))
     failures = [(k, m) for k, ok, m in results if not ok]
 
     for k, ok, msg in results:

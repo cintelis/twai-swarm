@@ -5,8 +5,11 @@ Each agent is a pure function: (task_input, context) -> dict.
 No Temporal imports here -- agents are testable in isolation.
 """
 import json
+import logging
 from app import router
-from app.providers import anthropic_provider, xai_provider, ProviderResult
+from app.providers import anthropic_provider, openai_provider, xai_provider, ProviderResult
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPTS = {
     "ba": """You are a Business Analyst agent. Given a project brief, produce a structured analysis that explicitly separates what the brief actually says from what you are inferring.
@@ -113,7 +116,35 @@ def _format_context(context: list[dict]) -> str:
 _PROVIDERS = {
     "anthropic": anthropic_provider.complete,
     "xai":       xai_provider.complete,
+    "openai":    openai_provider.complete,
 }
+
+
+def _is_transient(err: Exception) -> bool:
+    """True if `err` is the kind of failure that should trigger a fallback.
+
+    Transient = 5xx, 429 rate-limit, timeouts, connection errors. Auth and
+    bad-request errors are NOT transient — they're config bugs and we want
+    them to fail loudly rather than silently fall through to OpenAI.
+    """
+    name = err.__class__.__name__
+    transient_names = {
+        # OpenAI / xAI SDK
+        "APITimeoutError", "APIConnectionError", "RateLimitError",
+        "InternalServerError", "APIStatusError",
+        # Anthropic SDK
+        "APIStatusError", "APIConnectionError", "RateLimitError",
+        "InternalServerError",
+        # asyncio / httpx primitives
+        "TimeoutError", "ReadTimeout", "ConnectTimeout", "ConnectError",
+    }
+    if name in transient_names:
+        return True
+    # Status-code sniff for SDK errors that surface .status_code.
+    status = getattr(err, "status_code", None)
+    if isinstance(status, int) and (status >= 500 or status == 429):
+        return True
+    return False
 
 # Per-role grounding tools. Empty/missing = no tools (cheaper path).
 # xAI server-side tools live behind the Responses API (handled in xai_provider).
@@ -138,6 +169,80 @@ async def _complete(
         raise ValueError(f"Unknown provider: {provider}")
     return await fn(model, system, user, max_tokens, tools)
 
+
+async def _complete_with_fallback(
+    decision: router.RouteDecision,
+    system: str,
+    user: str,
+    max_tokens: int,
+    tools: list[dict] | None,
+) -> tuple[ProviderResult, router.RouteDecision]:
+    """Call the routed provider; on transient failure, walk router.FALLBACK_CHAIN.
+
+    Returns (result, effective_decision). The effective decision reflects the
+    provider that actually answered — important so cost accounting and the UI
+    show "we fell back to OpenAI" instead of pretending the primary won.
+    Tool spec is passed through unchanged; provider adapters translate
+    foreign tool types at their boundary (see openai_provider._translate_tools).
+    """
+    primary_error: Exception | None = None
+    try:
+        result = await _complete(
+            provider=decision.provider,
+            model=decision.model,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            tools=tools,
+        )
+        return result, decision
+    except Exception as e:
+        if not _is_transient(e):
+            raise
+        primary_error = e
+        logger.warning(
+            "primary provider %s/%s raised transient %s; trying fallback chain",
+            decision.provider, decision.model, e.__class__.__name__,
+        )
+
+    for fallback_key in router.FALLBACK_CHAIN.get(decision.provider, []):
+        spec = router.MODELS.get(fallback_key)
+        if spec is None:
+            continue
+        fallback_decision = router.RouteDecision(
+            key=fallback_key,
+            spec=spec,
+            reason=f"fallback from {decision.key} ({primary_error.__class__.__name__})",
+        )
+        try:
+            result = await _complete(
+                provider=fallback_decision.provider,
+                model=fallback_decision.model,
+                system=system,
+                user=user,
+                max_tokens=max_tokens,
+                tools=tools,
+            )
+            logger.info(
+                "fallback succeeded: %s/%s answered after %s/%s failed",
+                fallback_decision.provider, fallback_decision.model,
+                decision.provider, decision.model,
+            )
+            return result, fallback_decision
+        except Exception as e:
+            if not _is_transient(e):
+                raise
+            logger.warning(
+                "fallback %s/%s also raised transient %s; continuing chain",
+                fallback_decision.provider, fallback_decision.model,
+                e.__class__.__name__,
+            )
+
+    # Exhausted the chain — re-raise the original failure so the activity's
+    # retry policy + Temporal history capture the real cause.
+    assert primary_error is not None
+    raise primary_error
+
 async def run_agent(
     role: str,
     task_description: str,
@@ -155,9 +260,8 @@ Prior context from upstream agents:
 
 Respond with ONLY the JSON object specified in your system prompt. No preamble, no markdown fences."""
 
-    result = await _complete(
-        provider=decision.provider,
-        model=decision.model,
+    result, effective = await _complete_with_fallback(
+        decision=decision,
         system=system,
         user=user_msg,
         max_tokens=ROLE_MAX_TOKENS.get(role, 2048),
@@ -177,14 +281,15 @@ Respond with ONLY the JSON object specified in your system prompt. No preamble, 
     except json.JSONDecodeError:
         output = {"raw_text": text, "parse_error": True}
 
-    cost = router.estimate_cost_usd(decision.spec, result.tokens_in, result.tokens_out)
+    # Cost is attributed to whoever actually answered, not the routed primary.
+    cost = router.estimate_cost_usd(effective.spec, result.tokens_in, result.tokens_out)
 
     return {
         "output": output,
-        "provider": decision.provider,
-        "model": decision.model,
-        "model_key": decision.key,
-        "route_reason": decision.reason,
+        "provider": effective.provider,
+        "model": effective.model,
+        "model_key": effective.key,
+        "route_reason": effective.reason,
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
         "cost_usd": round(cost, 6),

@@ -38,6 +38,13 @@ variable "xai_api_key" {
   sensitive   = true
 }
 
+variable "openai_api_key" {
+  description = "OpenAI API key. Powers the gpt-5.4 fallback provider (app/providers/openai_provider.py). Leave empty to disable fallback."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "temporal_api_key" {
   description = "Temporal Cloud API key (replaces mTLS cert/key auth)"
   type        = string

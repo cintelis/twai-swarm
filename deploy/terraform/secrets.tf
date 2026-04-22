@@ -34,6 +34,19 @@ resource "aws_secretsmanager_secret_version" "xai" {
   secret_string = var.xai_api_key
 }
 
+# OpenAI fallback provider. Optional: if var.openai_api_key is empty we still
+# create the secret (with a placeholder string) so ECS task defs can reference
+# it unconditionally. Fallback is disabled at the app layer when the value is
+# the placeholder — see app/config.py + router.FALLBACK_CHAIN.
+resource "aws_secretsmanager_secret" "openai" {
+  name                    = "${local.name_prefix}/openai-api-key"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "openai" {
+  secret_id     = aws_secretsmanager_secret.openai.id
+  secret_string = var.openai_api_key != "" ? var.openai_api_key : "UNSET"
+}
+
 resource "aws_secretsmanager_secret" "temporal_api_key" {
   name                    = "${local.name_prefix}/temporal-api-key"
   recovery_window_in_days = 0

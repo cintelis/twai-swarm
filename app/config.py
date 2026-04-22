@@ -16,6 +16,11 @@ PG_DSN = os.getenv("PG_DSN", "postgresql://postgres:postgres@localhost:5432/agen
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
+# OpenAI credentials power the fallback provider (see router.FALLBACK_CHAIN).
+# Optional at runtime: if unset, fallback attempts raise and the primary
+# failure propagates as before. We don't enforce it in validate_runtime
+# because a deployment with fallback disabled is a legitimate config.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def validate_runtime() -> None:
     """Fail fast if a runtime-required env var is missing.

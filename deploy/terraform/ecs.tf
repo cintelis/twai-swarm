@@ -98,6 +98,7 @@ resource "aws_ecs_task_definition" "worker" {
       secrets = [
         { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic.arn },
         { name = "XAI_API_KEY", valueFrom = aws_secretsmanager_secret.xai.arn },
+        { name = "OPENAI_API_KEY", valueFrom = aws_secretsmanager_secret.openai.arn },
         { name = "TEMPORAL_API_KEY", valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
         { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
       ]
@@ -189,6 +190,7 @@ module "api_express" {
     secret = [
       { name = "ANTHROPIC_API_KEY", value_from = aws_secretsmanager_secret.anthropic.arn },
       { name = "XAI_API_KEY", value_from = aws_secretsmanager_secret.xai.arn },
+      { name = "OPENAI_API_KEY", value_from = aws_secretsmanager_secret.openai.arn },
       { name = "TEMPORAL_API_KEY", value_from = aws_secretsmanager_secret.temporal_api_key.arn },
       { name = "PG_DSN", value_from = aws_secretsmanager_secret.pg_dsn.arn },
     ]
