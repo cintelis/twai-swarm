@@ -583,6 +583,26 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
     if not install:
         raise HTTPException(404, "installation not found")
 
+    # ── Permission preflight ──────────────────────────────────────────
+    # Catch "org owner hasn't accepted new permissions" BEFORE we burn a
+    # GitHub call. Returns a 400 with a direct link to the accept page.
+    try:
+        meta = await github_app.fetch_installation_metadata(req.installation_id)
+    except github_app.GitHubAppError as e:
+        raise HTTPException(502, f"installation metadata fetch failed: {e}")
+    missing = github_app.missing_permissions(meta.get("permissions", {}))
+    if missing:
+        install_url_for_accept = (
+            f"https://github.com/organizations/{meta['account_login']}/settings/installations/{req.installation_id}"
+            if meta["account_type"] == "Organization"
+            else f"https://github.com/settings/installations/{req.installation_id}"
+        )
+        raise HTTPException(
+            400,
+            f"Installation is missing required permissions: {', '.join(missing)}. "
+            f"Go to {install_url_for_accept} and click 'Accept new permissions' to fix.",
+        )
+
     # ── Create repo on-demand if missing ──────────────────────────────
     # Check existence first so we can branch between create-then-push and
     # just-push. The check also tolerates "no access" returning as 404 —

@@ -103,8 +103,12 @@ async def get_installation_token(installation_id: int) -> str:
 
 
 async def fetch_installation_metadata(installation_id: int) -> dict:
-    """Read the install's account_login + account_type. Used by the callback
-    so we can persist a friendly name alongside the install ID."""
+    """Read the install's account_login, account_type, and granted permissions.
+
+    Used by the callback (to persist a friendly name alongside the install ID)
+    and by the permission-preflight check (to surface a clear error before
+    we hit GitHub with a call that'll 403).
+    """
     app_jwt = _generate_app_jwt()
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(
@@ -125,7 +129,35 @@ async def fetch_installation_metadata(installation_id: int) -> dict:
         "installation_id": int(body["id"]),
         "account_login": body["account"]["login"],
         "account_type": body["account"]["type"],   # 'Organization' or 'User'
+        "permissions": body.get("permissions", {}), # {perm_name: "read" | "write"}
     }
+
+
+# What we need for "Push to GitHub" with auto-create-repo to work end-to-end.
+# Organization_administration:write is the one that commonly fails because
+# the org owner hasn't accepted the new permission on the existing install.
+REQUIRED_PERMISSIONS = {
+    "contents": "write",
+    "pull_requests": "write",
+    "metadata": "read",
+    "organization_administration": "write",
+}
+
+_LEVEL_RANK = {"read": 1, "write": 2, "admin": 3}
+
+
+def missing_permissions(granted: dict) -> list[str]:
+    """Return a human-readable list of permissions that don't satisfy the
+    required set. Empty list = the install has everything we need."""
+    missing: list[str] = []
+    for perm, required in REQUIRED_PERMISSIONS.items():
+        current = granted.get(perm)
+        if current is None:
+            missing.append(f"{perm}: need {required}, not granted")
+            continue
+        if _LEVEL_RANK.get(current, 0) < _LEVEL_RANK.get(required, 0):
+            missing.append(f"{perm}: need {required}, have {current}")
+    return missing
 
 
 async def list_installation_repos(installation_id: int) -> list[dict]:
