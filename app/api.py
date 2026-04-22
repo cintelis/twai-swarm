@@ -518,6 +518,19 @@ async def github_list_installations():
     ]}
 
 
+@app.delete("/github/installations/{installation_id}", dependencies=[Depends(auth.require_auth)])
+async def github_delete_installation(installation_id: int):
+    """Drop a stale install row. Use when an App was uninstalled on GitHub
+    and the DB row is now pointing at a dead installation_id (causes
+    token-mint 404s on subsequent pushes).
+    """
+    from app import github_app
+    deleted = await db.delete_github_installation(installation_id)
+    # Also clear any cached token for this installation.
+    github_app._token_cache.pop(installation_id, None)
+    return {"deleted": deleted, "installation_id": installation_id}
+
+
 @app.get("/github/installations/{installation_id}/repos", dependencies=[Depends(auth.require_auth)])
 async def github_list_repos(installation_id: int):
     from app import github_app

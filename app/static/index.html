@@ -1415,6 +1415,28 @@ async function openGitHubPushDialog(workflowId, btn) {
     });
     if (!pushResp.ok) {
       const text = await pushResp.text();
+      // If the failure is because our cached installation_id is dead on
+      // GitHub's side (most commonly: the App was uninstalled), offer to
+      // forget it so a fresh install flow can start. The error surfaces as
+      // either "installation token mint failed: 404" (exists check path) or
+      // "Resource not accessible" (token works but lacks perms).
+      const looksLikeDeadInstall = /installation token mint failed: 404/i.test(text);
+      if (looksLikeDeadInstall) {
+        const forget = confirm(
+          `This GitHub installation no longer exists on GitHub (it was uninstalled).\n\n` +
+          `Forget it on our side so you can re-install? Click OK to delete, then re-install the App.`,
+        );
+        if (forget) {
+          await apiFetch(`/github/installations/${installationId}`, { method: 'DELETE' });
+          const u = await apiFetch('/github/install-url');
+          const { install_url } = await u.json();
+          showStatus(
+            `Installation forgotten. <a href="${escapeHtml(install_url)}" target="_blank" rel="noopener">Re-install the App</a>, then click Push to GitHub again.`,
+            false,
+          );
+          return;
+        }
+      }
       throw new Error(`push HTTP ${pushResp.status}: ${text.slice(0, 200)}`);
     }
     const result = await pushResp.json();

@@ -318,6 +318,20 @@ async def record_github_push(
     return str(row["id"])
 
 
+async def delete_github_installation(installation_id: int) -> int:
+    """Drop a stale install row. Returns 1 if deleted, 0 if nothing matched."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM github_installations WHERE installation_id=$1",
+        installation_id,
+    )
+    # asyncpg returns strings like "DELETE 1" — parse the count.
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 async def list_github_pushes_for_project(project_id: str) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(
