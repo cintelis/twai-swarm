@@ -16,6 +16,8 @@ temporal_namespace = "quickstart-twai-swarm.m8cb4"
 # Paste secrets directly:
 anthropic_api_key = "sk-ant-..."
 xai_api_key       = "xai-..."
+# Optional: OpenAI gpt-5.4 fallback provider. Leave as "" to disable fallback.
+openai_api_key    = "sk-proj-..."
 temporal_api_key  = "tmprl_..."
 
 db_password = "generate-a-strong-password-here"

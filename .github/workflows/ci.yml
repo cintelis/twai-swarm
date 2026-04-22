@@ -90,6 +90,9 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # Optional — smoke_models.py skips OpenAI models when unset rather
+          # than failing the job, matching the app-layer fallback posture.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ] || [ -z "$XAI_API_KEY" ]; then
             echo "::warning::ANTHROPIC_API_KEY or XAI_API_KEY missing — skipping model smoke"
