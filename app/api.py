@@ -709,6 +709,7 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
         "push_id": push_id,
         "repo": f"{req.repo_owner}/{req.repo_name}",
         "repo_created": repo_was_created,
+        "repo_initialised": result.repo_initialised,
         "branch": result.branch,
         "commit_sha": result.commit_sha,
         "pr_url": result.pr_url,

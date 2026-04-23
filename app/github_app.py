@@ -329,6 +329,8 @@ class PushResult:
     pr_number: Optional[int]
     files_pushed: int
     repo_created: bool = False   # True iff we created the repo on this push
+    repo_initialised: bool = False   # True iff the repo was empty and we pushed
+                                     # to the default branch as the first commit
 
 
 async def push_files_as_branch(
@@ -361,21 +363,33 @@ async def push_files_as_branch(
 
     base = f"/repos/{repo_owner}/{repo_name}"
 
-    # 1. Default branch + base commit
+    # 1. Default branch + base commit. Empty repos (no initial commit yet)
+    # return 409 on /git/ref/heads/<default> and have no parent commit to
+    # work from — we handle that by creating an orphan commit on the
+    # default branch directly, skipping the PR step.
     repo_resp = await _authed_request(installation_id, "GET", base)
     if repo_resp.status_code != 200:
         raise GitHubAppError(f"get repo failed: {repo_resp.status_code} {repo_resp.text[:200]}")
     default_branch = repo_resp.json()["default_branch"]
 
     ref_resp = await _authed_request(installation_id, "GET", f"{base}/git/ref/heads/{default_branch}")
-    if ref_resp.status_code != 200:
-        raise GitHubAppError(f"get default ref failed: {ref_resp.status_code} {ref_resp.text[:200]}")
-    base_sha = ref_resp.json()["object"]["sha"]
 
-    commit_resp = await _authed_request(installation_id, "GET", f"{base}/git/commits/{base_sha}")
-    if commit_resp.status_code != 200:
-        raise GitHubAppError(f"get base commit failed: {commit_resp.status_code} {commit_resp.text[:200]}")
-    base_tree_sha = commit_resp.json()["tree"]["sha"]
+    is_empty_repo = ref_resp.status_code == 409
+    base_sha: Optional[str] = None
+    base_tree_sha: Optional[str] = None
+    if not is_empty_repo:
+        if ref_resp.status_code != 200:
+            raise GitHubAppError(f"get default ref failed: {ref_resp.status_code} {ref_resp.text[:200]}")
+        base_sha = ref_resp.json()["object"]["sha"]
+        commit_resp = await _authed_request(installation_id, "GET", f"{base}/git/commits/{base_sha}")
+        if commit_resp.status_code != 200:
+            raise GitHubAppError(f"get base commit failed: {commit_resp.status_code} {commit_resp.text[:200]}")
+        base_tree_sha = commit_resp.json()["tree"]["sha"]
+    else:
+        logger.info(
+            "repo %s/%s is empty — pushing to default branch %r as initial commit",
+            repo_owner, repo_name, default_branch,
+        )
 
     # 2. One blob per file (parallel — typical scaffold is 10-20 files)
     async def _create_blob(path: str, content: str) -> dict:
@@ -396,58 +410,67 @@ async def push_files_as_branch(
         _create_blob(f["path"], f.get("content", "")) for f in files
     ))
 
-    # 3. Tree
+    # 3. Tree — `base_tree` is omitted on empty repos (no parent tree).
+    tree_payload: dict = {
+        "tree": [
+            {"path": b["path"], "mode": "100644", "type": "blob", "sha": b["sha"]}
+            for b in blob_results
+        ],
+    }
+    if base_tree_sha:
+        tree_payload["base_tree"] = base_tree_sha
     tree_resp = await _authed_request(
-        installation_id, "POST", f"{base}/git/trees",
-        json={
-            "base_tree": base_tree_sha,
-            "tree": [
-                {"path": b["path"], "mode": "100644", "type": "blob", "sha": b["sha"]}
-                for b in blob_results
-            ],
-        },
+        installation_id, "POST", f"{base}/git/trees", json=tree_payload,
     )
     if tree_resp.status_code != 201:
         raise GitHubAppError(f"create tree failed: {tree_resp.status_code} {tree_resp.text[:200]}")
     tree_sha = tree_resp.json()["sha"]
 
-    # 4. Commit
+    # 4. Commit — orphan commit (parents=[]) when repo is empty.
+    commit_payload: dict = {
+        "message": commit_message,
+        "tree": tree_sha,
+        "parents": [base_sha] if base_sha else [],
+    }
     c_resp = await _authed_request(
-        installation_id, "POST", f"{base}/git/commits",
-        json={
-            "message": commit_message,
-            "tree": tree_sha,
-            "parents": [base_sha],
-        },
+        installation_id, "POST", f"{base}/git/commits", json=commit_payload,
     )
     if c_resp.status_code != 201:
         raise GitHubAppError(f"create commit failed: {c_resp.status_code} {c_resp.text[:200]}")
     new_commit_sha = c_resp.json()["sha"]
 
-    # 5. Branch ref — try create, fall back to force-update on 422.
+    # 5. Decide where to push the ref.
+    # - Empty repo: push to default branch (it doesn't exist yet; this
+    #   creates it AND initialises the repo).
+    # - Existing repo: push to the requested feature branch.
+    target_branch = default_branch if is_empty_repo else branch
+
     r = await _authed_request(
         installation_id, "POST", f"{base}/git/refs",
-        json={"ref": f"refs/heads/{branch}", "sha": new_commit_sha},
+        json={"ref": f"refs/heads/{target_branch}", "sha": new_commit_sha},
     )
     if r.status_code not in (201, 422):
         raise GitHubAppError(f"create ref failed: {r.status_code} {r.text[:200]}")
     if r.status_code == 422:
+        # Branch already exists — fast-forward. (Only possible for non-empty
+        # repos; empty repos have no refs to collide with.)
         r = await _authed_request(
-            installation_id, "PATCH", f"{base}/git/refs/heads/{branch}",
+            installation_id, "PATCH", f"{base}/git/refs/heads/{target_branch}",
             json={"sha": new_commit_sha, "force": True},
         )
         if r.status_code != 200:
             raise GitHubAppError(f"update ref failed: {r.status_code} {r.text[:200]}")
 
-    # 6. Optional PR
+    # 6. Optional PR — skip on empty repos (no base branch with content
+    # to PR against; the push IS the initialisation).
     pr_url: Optional[str] = None
     pr_number: Optional[int] = None
-    if open_pr:
+    if open_pr and not is_empty_repo:
         pr_resp = await _authed_request(
             installation_id, "POST", f"{base}/pulls",
             json={
-                "title": pr_title or f"Scaffold from twai-swarm: {branch}",
-                "head": branch,
+                "title": pr_title or f"Scaffold from twai-swarm: {target_branch}",
+                "head": target_branch,
                 "base": default_branch,
                 "body": pr_body or "Generated by the twai-swarm agentic Coder.",
             },
@@ -459,13 +482,14 @@ async def push_files_as_branch(
         else:
             logger.warning(
                 "PR open failed (branch %s pushed OK): %s %s",
-                branch, pr_resp.status_code, pr_resp.text[:200],
+                target_branch, pr_resp.status_code, pr_resp.text[:200],
             )
 
     return PushResult(
-        branch=branch,
+        branch=target_branch,
         commit_sha=new_commit_sha,
         pr_url=pr_url,
         pr_number=pr_number,
         files_pushed=len(files),
+        repo_initialised=is_empty_repo,
     )

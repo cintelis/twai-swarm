@@ -1437,10 +1437,14 @@ async function openGitHubPushDialog(workflowId, btn) {
     }
     const result = await pushResp.json();
     const repoLink = `https://github.com/${result.repo}/tree/${result.branch}`;
-    const createdLabel = result.repo_created ? ' (newly created)' : '';
-    let msg = `Pushed ${result.files_pushed} files to <a href="${escapeHtml(repoLink)}" target="_blank" rel="noopener">${escapeHtml(result.repo)}</a>${createdLabel} · branch <code>${escapeHtml(result.branch)}</code>`;
+    let label = '';
+    if (result.repo_created) label = ' (newly created)';
+    else if (result.repo_initialised) label = ' (initialised — repo was empty)';
+    let msg = `Pushed ${result.files_pushed} files to <a href="${escapeHtml(repoLink)}" target="_blank" rel="noopener">${escapeHtml(result.repo)}</a>${label} · branch <code>${escapeHtml(result.branch)}</code>`;
     if (result.pr_url) {
       msg += ` · <a href="${escapeHtml(result.pr_url)}" target="_blank" rel="noopener">PR #${result.pr_number}</a>`;
+    } else if (result.repo_initialised) {
+      msg += ' · no PR (initial commit landed on default branch directly)';
     }
     showStatus(msg, false);
   } catch (err) {
