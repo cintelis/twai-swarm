@@ -742,6 +742,57 @@
     .modal p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
     .modal input { margin-bottom: 8px; }
     .modal-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+    /* ── GitHub repo picker modal ──────────────────────────── */
+    .gh-picker { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
+    .gh-picker-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+    .gh-picker-panel {
+      position: relative; width: 92%; max-width: 560px; max-height: 82vh;
+      display: flex; flex-direction: column;
+      background: var(--surface); border: 0.5px solid var(--surface2);
+      border-radius: var(--radius); padding: 22px;
+    }
+    .gh-picker-panel h2 {
+      font-family: var(--font-head); font-size: 18px; font-weight: 700; margin-bottom: 4px;
+    }
+    .gh-picker-install { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+    .gh-picker-filter {
+      width: 100%; padding: 8px 10px; margin-bottom: 10px;
+      background: var(--surface2); border: 0.5px solid var(--surface2);
+      border-radius: 6px; color: var(--text); font-size: 13px;
+    }
+    .gh-picker-repos {
+      flex: 1; overflow-y: auto; max-height: 340px;
+      border: 0.5px solid var(--surface2); border-radius: 6px;
+      background: var(--bg); margin-bottom: 12px;
+    }
+    .gh-picker-repo {
+      padding: 9px 12px; cursor: pointer; display: flex; justify-content: space-between;
+      align-items: center; border-bottom: 0.5px solid var(--surface2);
+      font-size: 13px;
+    }
+    .gh-picker-repo:last-child { border-bottom: none; }
+    .gh-picker-repo:hover { background: var(--surface2); }
+    .gh-picker-repo.selected {
+      background: rgba(155,142,232,0.16);
+      color: var(--iris);
+      border-left: 2px solid var(--iris);
+      padding-left: 10px;
+    }
+    .gh-picker-repo .meta { color: var(--muted); font-size: 11px; }
+    .gh-picker-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 13px; }
+    .gh-picker-divider {
+      text-align: center; color: var(--muted); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 1px; margin: 4px 0 8px;
+    }
+    .gh-picker-create-toggle { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); cursor: pointer; }
+    .gh-picker-create-fields { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+    .gh-picker-create-fields input[type="text"] {
+      flex: 1; padding: 7px 10px; background: var(--surface2);
+      border: 0.5px solid var(--surface2); border-radius: 6px; color: var(--text); font-size: 13px;
+    }
+    .gh-picker-create-fields label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+    .gh-picker-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
   </style>
 </head>
 <body>
@@ -1325,6 +1376,139 @@ async function downloadScaffold(workflowId, btn) {
   }
 }
 
+/**
+ * Modal repo picker. Returns a Promise that resolves to:
+ *   { repo_owner, repo_name, create_if_missing, repo_private }
+ * or null if the user cancelled.
+ */
+function showGitHubRepoPicker({ install, repos, defaultNewName }) {
+  return new Promise(resolve => {
+    const modal = document.createElement('div');
+    modal.className = 'gh-picker';
+    modal.innerHTML = `
+      <div class="gh-picker-backdrop"></div>
+      <div class="gh-picker-panel">
+        <h2>Push to GitHub</h2>
+        <div class="gh-picker-install">
+          Installation: <strong>${escapeHtml(install.account_login)}</strong>
+          <span class="meta">(${escapeHtml(install.account_type)})</span>
+        </div>
+        <input type="text" class="gh-picker-filter" placeholder="Filter repos…" autofocus>
+        <div class="gh-picker-repos"></div>
+        <div class="gh-picker-divider">or</div>
+        <label class="gh-picker-create-toggle">
+          <input type="checkbox" class="gh-picker-create-check">
+          Create a new repo instead
+        </label>
+        <div class="gh-picker-create-fields" style="display:none;">
+          <input type="text" class="gh-picker-create-name" placeholder="new-repo-name">
+          <label><input type="checkbox" class="gh-picker-create-private" checked> Private</label>
+        </div>
+        <div class="gh-picker-actions">
+          <button class="btn gh-picker-cancel">Cancel</button>
+          <button class="btn btn-primary gh-picker-confirm" disabled>Push</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    const reposEl = modal.querySelector('.gh-picker-repos');
+    const filterEl = modal.querySelector('.gh-picker-filter');
+    const createCheck = modal.querySelector('.gh-picker-create-check');
+    const createFields = modal.querySelector('.gh-picker-create-fields');
+    const createName = modal.querySelector('.gh-picker-create-name');
+    const createPrivate = modal.querySelector('.gh-picker-create-private');
+    const confirmBtn = modal.querySelector('.gh-picker-confirm');
+    const cancelBtn = modal.querySelector('.gh-picker-cancel');
+    const backdrop = modal.querySelector('.gh-picker-backdrop');
+
+    let selectedRepo = null;
+
+    function renderRepos(filter) {
+      const f = (filter || '').toLowerCase();
+      const matching = repos.filter(r => r.full_name.toLowerCase().includes(f));
+      if (matching.length === 0) {
+        reposEl.innerHTML = `<div class="gh-picker-empty">${repos.length === 0 ? 'No repos accessible to this installation.' : 'No repos match.'}</div>`;
+        return;
+      }
+      reposEl.innerHTML = matching.map(r => `
+        <div class="gh-picker-repo" data-owner="${escapeHtml(r.owner)}" data-name="${escapeHtml(r.name)}">
+          <span>${escapeHtml(r.full_name)}</span>
+          <span class="meta">${r.private ? 'private' : 'public'} · default: ${escapeHtml(r.default_branch)}</span>
+        </div>
+      `).join('');
+      for (const el of reposEl.querySelectorAll('.gh-picker-repo')) {
+        el.addEventListener('click', () => {
+          for (const s of reposEl.querySelectorAll('.gh-picker-repo.selected')) s.classList.remove('selected');
+          el.classList.add('selected');
+          selectedRepo = { repo_owner: el.dataset.owner, repo_name: el.dataset.name };
+          // Selecting a repo cancels the "create new" mode.
+          if (createCheck.checked) {
+            createCheck.checked = false;
+            createFields.style.display = 'none';
+          }
+          confirmBtn.disabled = false;
+        });
+      }
+    }
+
+    renderRepos('');
+    filterEl.addEventListener('input', e => renderRepos(e.target.value));
+
+    createCheck.addEventListener('change', () => {
+      if (createCheck.checked) {
+        createFields.style.display = 'flex';
+        // Clear repo selection when switching to create mode.
+        for (const s of reposEl.querySelectorAll('.gh-picker-repo.selected')) s.classList.remove('selected');
+        selectedRepo = null;
+        createName.value = createName.value || defaultNewName;
+        createName.focus();
+        confirmBtn.disabled = !createName.value.trim();
+      } else {
+        createFields.style.display = 'none';
+        confirmBtn.disabled = true;
+      }
+    });
+
+    createName.addEventListener('input', () => {
+      if (createCheck.checked) confirmBtn.disabled = !createName.value.trim();
+    });
+
+    function close(result) {
+      document.body.removeChild(modal);
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') close(null);
+    }
+    document.addEventListener('keydown', onKey);
+
+    cancelBtn.addEventListener('click', () => close(null));
+    backdrop.addEventListener('click', () => close(null));
+    confirmBtn.addEventListener('click', () => {
+      if (createCheck.checked) {
+        const name = createName.value.trim();
+        if (!name) return;
+        close({
+          repo_owner: install.account_login,
+          repo_name: name,
+          create_if_missing: true,
+          repo_private: createPrivate.checked,
+        });
+      } else if (selectedRepo) {
+        close({
+          repo_owner: selectedRepo.repo_owner,
+          repo_name: selectedRepo.repo_name,
+          create_if_missing: false,
+          repo_private: true,   // ignored when pushing to existing repo
+        });
+      }
+    });
+  });
+}
+
+
 async function openGitHubPushDialog(workflowId, btn) {
   const orig = btn.textContent;
   const statusEl = document.getElementById(`ghPushStatus-${workflowId}`);
@@ -1373,12 +1557,17 @@ async function openGitHubPushDialog(workflowId, btn) {
       installationId = installations[idx].installation_id;
     }
 
-    // 3. Ask for the target repo as `owner/repo`. Default derived from
-    //    the project name + workflow id suffix; pre-filled with the
-    //    installation account so the user just hits Enter for the common
-    //    case (push to a brand-new repo in the installed org).
-    const installAccount = installations.find(i => i.installation_id === installationId)?.account_login || '';
-    // Pull the project name off the page if available; fallback to wf prefix.
+    // 3. Fetch repos for this installation so the picker can show them.
+    btn.textContent = 'Loading repos…';
+    const reposResp = await apiFetch(`/github/installations/${installationId}/repos`);
+    if (!reposResp.ok) {
+      const text = await reposResp.text();
+      throw new Error(`repos HTTP ${reposResp.status}: ${text.slice(0, 200)}`);
+    }
+    const { repos } = await reposResp.json();
+
+    // 4. Show the picker modal. Default repo name derived from project name.
+    const install = installations.find(i => i.installation_id === installationId);
     const projectNameEl = document.querySelector('.project-card-name, h1');
     const rawName = projectNameEl ? projectNameEl.textContent.trim() : workflowId.slice(0, 12);
     const safeRepoName = rawName.toLowerCase()
@@ -1386,31 +1575,24 @@ async function openGitHubPushDialog(workflowId, btn) {
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '')
       .slice(0, 60) || 'swarm-scaffold';
-    const suggested = `${installAccount}/${safeRepoName}-${workflowId.slice(0, 6)}`;
-    const target = prompt(
-      `Push to which repo?\n\nFormat: owner/repo-name\n\nIf the repo doesn't exist, it'll be created (private) under the installed org.`,
-      suggested,
-    );
-    if (!target) return;
-    const m = target.match(/^([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
-    if (!m) {
-      showStatus('Invalid format. Use <code>owner/repo-name</code>.', true);
-      return;
-    }
-    const [, repoOwner, repoName] = m;
+    const defaultNewName = `${safeRepoName}-${workflowId.slice(0, 6)}`;
+    const selection = await showGitHubRepoPicker({ install, repos, defaultNewName });
+    btn.textContent = orig;
+    if (!selection) return;   // user cancelled
 
-    // 4. Push (auto-create if missing).
+    // 5. Push (either to selected existing repo or auto-create the new one).
+    btn.disabled = true;
     btn.textContent = 'Pushing…';
     const pushResp = await apiFetch(`/projects/${workflowId}/github-push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         installation_id: installationId,
-        repo_owner: repoOwner,
-        repo_name: repoName,
+        repo_owner: selection.repo_owner,
+        repo_name: selection.repo_name,
         open_pr: true,
-        create_if_missing: true,
-        repo_private: true,
+        create_if_missing: selection.create_if_missing,
+        repo_private: selection.repo_private,
       }),
     });
     if (!pushResp.ok) {
