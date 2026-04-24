@@ -108,6 +108,58 @@ CREATE INDEX IF NOT EXISTS idx_github_pushes_project
     ON github_pushes(project_id, pushed_at DESC);
 """
 
+async def _setup_langfuse_db(admin_conn: asyncpg.Connection) -> None:
+    """Create the `langfuse` database + `langfuse_app` user if they don't exist.
+
+    Runs against the admin connection (default `postgres` database). Idempotent:
+    uses `IF NOT EXISTS` / `CREATE USER IF NOT EXISTS` patterns. Safe to run
+    on every bootstrap; does nothing when the setup is already complete.
+
+    Requires LANGFUSE_DB_PASSWORD env var (set by ECS from SM). Skips silently
+    if unset — supports local dev without Langfuse.
+    """
+    password = os.environ.get("LANGFUSE_DB_PASSWORD")
+    if not password:
+        print("[bootstrap] LANGFUSE_DB_PASSWORD unset — skipping Langfuse DB setup")
+        return
+
+    # Check if user exists
+    user_exists = await admin_conn.fetchval(
+        "SELECT 1 FROM pg_roles WHERE rolname='langfuse_app'"
+    )
+    if not user_exists:
+        # CREATE USER doesn't support $1 parameter binding for passwords; safely
+        # quote the password using pg's literal quoting. The password comes from
+        # SM (32 chars, no special chars because random_password.special=false).
+        safe_pw = password.replace("'", "''")
+        await admin_conn.execute(
+            f"CREATE USER langfuse_app WITH PASSWORD '{safe_pw}'"
+        )
+        print("[bootstrap] created langfuse_app user")
+
+    # CREATE DATABASE can't run inside a transaction; asyncpg runs each execute
+    # in its own implicit txn unless we say otherwise. This should work via
+    # asyncpg's direct query path.
+    db_exists = await admin_conn.fetchval(
+        "SELECT 1 FROM pg_database WHERE datname='langfuse'"
+    )
+    if not db_exists:
+        await admin_conn.execute(
+            "CREATE DATABASE langfuse OWNER langfuse_app"
+        )
+        print("[bootstrap] created langfuse database")
+    else:
+        # If the DB already exists but was owned by postgres (first-time race
+        # or manual creation), re-assign ownership so migrations succeed.
+        await admin_conn.execute("ALTER DATABASE langfuse OWNER TO langfuse_app")
+
+    # Grant the app user full perms on the database.
+    await admin_conn.execute(
+        "GRANT ALL PRIVILEGES ON DATABASE langfuse TO langfuse_app"
+    )
+    print("[bootstrap] ✅ Langfuse DB ready")
+
+
 async def main() -> int:
     print("[bootstrap] connecting to DB...")
     try:
@@ -129,6 +181,21 @@ async def main() -> int:
         # Confirm pgvector is actually installed
         ext = await conn.fetchrow("SELECT extversion FROM pg_extension WHERE extname='vector'")
         print(f"[bootstrap] pgvector version: {ext['extversion'] if ext else 'NOT INSTALLED'}")
+
+        # Langfuse DB setup — runs against the admin connection (default
+        # `postgres` database, where CREATE DATABASE is allowed).
+        # Derive admin DSN by swapping the database name in PG_DSN.
+        admin_dsn = PG_DSN.rsplit("/", 1)[0] + "/postgres"
+        try:
+            admin_conn = await asyncpg.connect(admin_dsn)
+            try:
+                await _setup_langfuse_db(admin_conn)
+            finally:
+                await admin_conn.close()
+        except Exception as e:
+            # Don't fail the whole bootstrap if Langfuse setup has issues —
+            # the swarm's own schema is already applied above.
+            print(f"[bootstrap] Langfuse DB setup failed (non-fatal): {e}", file=sys.stderr)
 
         print("[bootstrap] ✅ done")
         return 0

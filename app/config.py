@@ -30,6 +30,13 @@ GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")
 GITHUB_APP_INSTALL_URL = os.getenv("GITHUB_APP_INSTALL_URL")
 
+# Langfuse self-hosted LLM observability. All three must be set for tracing
+# to be active; observability.py no-ops cleanly when any is missing or equals
+# the "UNSET" placeholder Terraform writes before the first project is created.
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
+
 def validate_runtime() -> None:
     """Fail fast if a runtime-required env var is missing.
 

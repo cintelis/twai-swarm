@@ -72,6 +72,38 @@ variable "github_app_install_url" {
   default     = ""
 }
 
+# ─── Langfuse self-hosted ─────────────────────────────────────────────────
+# Langfuse is deployed as a separate ECS Express service against a new
+# database in the existing RDS. Two-step bootstrap:
+#   1. terraform apply → creates service with placeholder keys
+#   2. Sign up + create a project on the Langfuse UI → copy public/secret keys
+#   3. Set them in tfvars below → terraform apply again
+
+variable "langfuse_public_url" {
+  description = "Langfuse's own on.aws URL (set AFTER first apply). Used as NEXTAUTH_URL."
+  type        = string
+  default     = ""
+}
+
+variable "langfuse_public_key" {
+  description = "Langfuse project public key (starts pk-lf-). Leave empty on first apply; populate after UI signup."
+  type        = string
+  default     = ""
+}
+
+variable "langfuse_secret_key" {
+  description = "Langfuse project secret key (starts sk-lf-). Leave empty on first apply; populate after UI signup."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "langfuse_disable_signup" {
+  description = "Flip to true after creating the first admin user so strangers can't register."
+  type        = bool
+  default     = false
+}
+
 variable "temporal_api_key" {
   description = "Temporal Cloud API key (replaces mTLS cert/key auth)"
   type        = string

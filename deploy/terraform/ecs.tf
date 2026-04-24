@@ -95,6 +95,8 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "TEMPORAL_QUEUES", value = "" },
         # GitHub App install URL is public — env var, not SM secret.
         { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
+        # Langfuse host is public (the UI URL). Keys come via SM below.
+        { name = "LANGFUSE_HOST", value = var.langfuse_public_url },
       ]
 
       secrets = [
@@ -105,6 +107,12 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "GITHUB_APP_PRIVATE_KEY", valueFrom = aws_secretsmanager_secret.github_app_private_key.arn },
         { name = "TEMPORAL_API_KEY", valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
         { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+        # Langfuse project keys — UNSET until first-run admin creates a project.
+        # observability.py no-ops gracefully when either is "UNSET".
+        { name = "LANGFUSE_PUBLIC_KEY", valueFrom = aws_secretsmanager_secret.langfuse_public_key.arn },
+        { name = "LANGFUSE_SECRET_KEY", valueFrom = aws_secretsmanager_secret.langfuse_secret_key.arn },
+        # The bootstrap task also needs the langfuse DB password to CREATE USER.
+        { name = "LANGFUSE_DB_PASSWORD", valueFrom = aws_secretsmanager_secret.langfuse_db_password.arn },
       ]
 
       healthCheck = {
@@ -190,6 +198,7 @@ module "api_express" {
       { name = "TEMPORAL_NAMESPACE", value = var.temporal_namespace },
       { name = "TEMPORAL_TLS", value = "true" },
       { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
+      { name = "LANGFUSE_HOST", value = var.langfuse_public_url },
     ]
 
     secret = [
@@ -200,6 +209,8 @@ module "api_express" {
       { name = "GITHUB_APP_PRIVATE_KEY", value_from = aws_secretsmanager_secret.github_app_private_key.arn },
       { name = "TEMPORAL_API_KEY", value_from = aws_secretsmanager_secret.temporal_api_key.arn },
       { name = "PG_DSN", value_from = aws_secretsmanager_secret.pg_dsn.arn },
+      { name = "LANGFUSE_PUBLIC_KEY", value_from = aws_secretsmanager_secret.langfuse_public_key.arn },
+      { name = "LANGFUSE_SECRET_KEY", value_from = aws_secretsmanager_secret.langfuse_secret_key.arn },
     ]
   }
 

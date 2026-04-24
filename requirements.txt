@@ -18,3 +18,9 @@ slowapi==0.1.9
 # GitHub App: PyJWT[crypto] signs the app JWT (RS256) used to mint installation
 # tokens. The crypto extra pulls in the `cryptography` package needed for RSA.
 pyjwt[crypto]>=2.8,<3.0
+# Langfuse SDK for LLM observability. Used by app/observability.py to emit
+# traces on every provider call. No-ops gracefully when LANGFUSE_HOST is
+# unset (local dev, or before the self-hosted instance is initialised).
+# Pin to v2 to match the self-hosted server image; v3 SDK has breaking API
+# changes that won't work against a v2 server.
+langfuse>=2.40,<3.0

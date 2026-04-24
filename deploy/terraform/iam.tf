@@ -38,6 +38,14 @@ data "aws_iam_policy_document" "secrets_access" {
       aws_secretsmanager_secret.github_app_private_key.arn,
       aws_secretsmanager_secret.temporal_api_key.arn,
       aws_secretsmanager_secret.pg_dsn.arn,
+      # Langfuse self-hosted — service reads its own DB + next-auth secrets;
+      # worker + API read the project keys to emit traces.
+      aws_secretsmanager_secret.langfuse_db_url.arn,
+      aws_secretsmanager_secret.langfuse_db_password.arn,
+      aws_secretsmanager_secret.langfuse_nextauth_secret.arn,
+      aws_secretsmanager_secret.langfuse_salt.arn,
+      aws_secretsmanager_secret.langfuse_public_key.arn,
+      aws_secretsmanager_secret.langfuse_secret_key.arn,
     ]
   }
 }

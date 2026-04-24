@@ -26,6 +26,9 @@ resource "aws_ecs_task_definition" "db_bootstrap" {
 
       secrets = [
         { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
+        # Bootstrap also creates the `langfuse` database + `langfuse_app` user
+        # if this password is present (skips silently otherwise).
+        { name = "LANGFUSE_DB_PASSWORD", valueFrom = aws_secretsmanager_secret.langfuse_db_password.arn },
       ]
 
       logConfiguration = {

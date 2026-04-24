@@ -11,7 +11,7 @@ Why Responses API (not Chat Completions):
   citation-extraction shape is consistent across providers.
 """
 from openai import AsyncOpenAI
-from app import config
+from app import config, observability
 from . import ProviderResult
 
 _client: AsyncOpenAI | None = None
@@ -67,31 +67,43 @@ async def complete(
     if translated:
         kwargs["tools"] = translated
 
-    resp = await client.responses.create(**kwargs)
+    with observability.generation(
+        name=f"openai.{model}",
+        model=model,
+        provider="openai",
+        system=system,
+        user=user,
+        tools=translated,
+    ) as gen:
+        resp = await client.responses.create(**kwargs)
 
-    text = (resp.output_text or "").strip()
-    if not text:
-        raise RuntimeError(
-            f"OpenAI Responses returned empty content (model={model}, status={getattr(resp, 'status', None)})"
+        text = (resp.output_text or "").strip()
+        if not text:
+            raise RuntimeError(
+                f"OpenAI Responses returned empty content (model={model}, status={getattr(resp, 'status', None)})"
+            )
+
+        # Citation extraction mirrors xai_provider — annotations on output text
+        # items carry the URL when web_search fired.
+        citations: list[dict] = []
+        for item in getattr(resp, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                for ann in getattr(content, "annotations", []) or []:
+                    url = getattr(ann, "url", None)
+                    if url:
+                        citations.append({
+                            "url": url,
+                            "title": getattr(ann, "title", None),
+                        })
+
+        gen.end(
+            output=text,
+            usage={"input": resp.usage.input_tokens, "output": resp.usage.output_tokens},
         )
-
-    # Citation extraction mirrors xai_provider — annotations on output text
-    # items carry the URL when web_search fired.
-    citations: list[dict] = []
-    for item in getattr(resp, "output", []) or []:
-        for content in getattr(item, "content", []) or []:
-            for ann in getattr(content, "annotations", []) or []:
-                url = getattr(ann, "url", None)
-                if url:
-                    citations.append({
-                        "url": url,
-                        "title": getattr(ann, "title", None),
-                    })
-
-    return ProviderResult(
-        text=text,
-        tokens_in=resp.usage.input_tokens,
-        tokens_out=resp.usage.output_tokens,
-        finish_reason=getattr(resp, "status", None),
-        citations=citations or None,
-    )
+        return ProviderResult(
+            text=text,
+            tokens_in=resp.usage.input_tokens,
+            tokens_out=resp.usage.output_tokens,
+            finish_reason=getattr(resp, "status", None),
+            citations=citations or None,
+        )
