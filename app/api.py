@@ -479,6 +479,44 @@ async def github_install_url():
     return {"install_url": config.GITHUB_APP_INSTALL_URL}
 
 
+@app.post("/github/webhook", include_in_schema=False)
+async def github_webhook(request: Request):
+    """Receives GitHub App webhook events.
+
+    No bearer-token auth — GitHub signs the payload with HMAC-SHA256 using
+    the configured webhook secret; we verify that instead.
+
+    Returns 503 if the webhook secret isn't configured (or still UNSET).
+    Returns 401 on signature mismatch. Returns 200 with a small JSON body
+    on every successful event (even "ignored" ones) so GitHub stops retrying.
+    """
+    import json as _json
+    from app import github_app, github_webhook as webhook_mod
+
+    if not config.GITHUB_APP_WEBHOOK_SECRET or config.GITHUB_APP_WEBHOOK_SECRET == "UNSET":
+        raise HTTPException(503, "GITHUB_APP_WEBHOOK_SECRET not configured")
+
+    body = await request.body()
+    sig_header = request.headers.get("X-Hub-Signature-256")
+    event_type = request.headers.get("X-GitHub-Event", "")
+
+    try:
+        webhook_mod.verify_signature(config.GITHUB_APP_WEBHOOK_SECRET, body, sig_header)
+    except webhook_mod.WebhookVerificationError as e:
+        raise HTTPException(401, f"webhook verification failed: {e}")
+
+    try:
+        payload = _json.loads(body)
+    except _json.JSONDecodeError:
+        raise HTTPException(400, "invalid JSON body")
+
+    return await webhook_mod.handle_event(
+        event_type, payload,
+        db_module=db,
+        github_app_module=github_app,
+    )
+
+
 @app.get("/github/callback", include_in_schema=False)
 async def github_callback(installation_id: int, setup_action: str = "install"):
     """GitHub redirects here after the user installs the App.

@@ -68,6 +68,17 @@ resource "aws_secretsmanager_secret_version" "github_app_private_key" {
   secret_string = var.github_app_private_key != "" ? var.github_app_private_key : "UNSET"
 }
 
+# Webhook HMAC shared secret. Must match the value pasted into the App's
+# Webhook Secret field on github.com — otherwise every event returns 401.
+resource "aws_secretsmanager_secret" "github_app_webhook_secret" {
+  name                    = "${local.name_prefix}/github-app-webhook-secret"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "github_app_webhook_secret" {
+  secret_id     = aws_secretsmanager_secret.github_app_webhook_secret.id
+  secret_string = var.github_app_webhook_secret != "" ? var.github_app_webhook_secret : "UNSET"
+}
+
 # Install URL is non-sensitive; pass via env var rather than SM. See ecs.tf.
 
 resource "aws_secretsmanager_secret" "temporal_api_key" {

@@ -207,6 +207,8 @@ module "api_express" {
       { name = "OPENAI_API_KEY", value_from = aws_secretsmanager_secret.openai.arn },
       { name = "GITHUB_APP_ID", value_from = aws_secretsmanager_secret.github_app_id.arn },
       { name = "GITHUB_APP_PRIVATE_KEY", value_from = aws_secretsmanager_secret.github_app_private_key.arn },
+      # Webhook HMAC secret — only the API needs this (worker doesn't handle webhooks).
+      { name = "GITHUB_APP_WEBHOOK_SECRET", value_from = aws_secretsmanager_secret.github_app_webhook_secret.arn },
       { name = "TEMPORAL_API_KEY", value_from = aws_secretsmanager_secret.temporal_api_key.arn },
       { name = "PG_DSN", value_from = aws_secretsmanager_secret.pg_dsn.arn },
       { name = "LANGFUSE_PUBLIC_KEY", value_from = aws_secretsmanager_secret.langfuse_public_key.arn },

@@ -24,9 +24,13 @@ temporal_api_key  = "tmprl_..."
 # three blank to disable. Register the App at github.com/settings/apps/new
 # (org-level recommended for reuse across customers/greenfield).
 # See: _agent-instructions/twai-swarm/github-app-setup.md
-github_app_id          = ""
-github_app_private_key = "" # full .pem contents — paste between triple-quoted string in real tfvars
-github_app_install_url = "" # https://github.com/apps/<your-app-slug>/installations/new
+github_app_id            = ""
+github_app_private_key   = "" # full .pem contents — paste between triple-quoted string in real tfvars
+github_app_install_url   = "" # https://github.com/apps/<your-app-slug>/installations/new
+# Webhook shared secret. Generate via `openssl rand -hex 32` and paste the
+# SAME value both here AND into the App's Webhook Secret field on github.com.
+# Mismatched secret => every webhook returns 401.
+github_app_webhook_secret = ""
 
 # ── Langfuse (self-hosted LLM observability) ─────────────────────────────
 # Two-step bootstrap:

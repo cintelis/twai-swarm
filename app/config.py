@@ -29,6 +29,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")
 GITHUB_APP_INSTALL_URL = os.getenv("GITHUB_APP_INSTALL_URL")
+# Shared secret configured BOTH here (via SM) and on the App's Webhook page
+# on github.com. POST /github/webhook uses it to verify HMAC signatures on
+# every incoming event. Unset => endpoint returns 503.
+GITHUB_APP_WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET")
 
 # Langfuse self-hosted LLM observability. All three must be set for tracing
 # to be active; observability.py no-ops cleanly when any is missing or equals

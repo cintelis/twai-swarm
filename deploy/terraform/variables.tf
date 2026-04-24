@@ -72,6 +72,13 @@ variable "github_app_install_url" {
   default     = ""
 }
 
+variable "github_app_webhook_secret" {
+  description = "Shared secret used to HMAC-sign webhook payloads. Paste this SAME value into the App's Webhook Secret field on github.com. Generate via `openssl rand -hex 32`."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 # ─── Langfuse self-hosted ─────────────────────────────────────────────────
 # Langfuse is deployed as a separate ECS Express service against a new
 # database in the existing RDS. Two-step bootstrap:
