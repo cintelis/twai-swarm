@@ -106,6 +106,11 @@ locals {
         { name = "LANGFUSE_PUBLIC_KEY", valueFrom = aws_secretsmanager_secret.langfuse_public_key.arn },
         { name = "LANGFUSE_SECRET_KEY", valueFrom = aws_secretsmanager_secret.langfuse_secret_key.arn },
         { name = "LANGFUSE_DB_PASSWORD", valueFrom = aws_secretsmanager_secret.langfuse_db_password.arn },
+        # Neo4j — repo-knowledge graph store. URL resolves via CloudMap;
+        # password is the raw value (no "neo4j/" prefix — that's added on
+        # the Neo4j server side, not here).
+        { name = "NEO4J_URL", valueFrom = aws_secretsmanager_secret.neo4j_url.arn },
+        { name = "NEO4J_PASSWORD", valueFrom = aws_secretsmanager_secret.neo4j_password.arn },
       ]
 
       healthCheck = {

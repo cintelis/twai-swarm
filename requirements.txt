@@ -35,3 +35,10 @@ opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
 opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
 opentelemetry-instrumentation-asyncpg>=0.48b0,<1.0
 opentelemetry-instrumentation-httpx>=0.48b0,<1.0
+
+# Sprint 10a — repo indexer: tree-sitter for language-agnostic ASTs +
+# Neo4j Bolt driver. tree-sitter-python ships precompiled wheels so no
+# Rust toolchain in the worker image. Add tree-sitter-typescript in 10b.
+tree-sitter>=0.23,<0.26
+tree-sitter-python>=0.23,<0.26
+neo4j>=5.25,<7.0
