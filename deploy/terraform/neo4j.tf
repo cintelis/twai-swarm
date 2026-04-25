@@ -65,16 +65,12 @@ resource "aws_service_discovery_service" "neo4j" {
   name = "neo4j"
 
   dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
+    namespace_id   = aws_service_discovery_private_dns_namespace.internal.id
     routing_policy = "MULTIVALUE"
     dns_records {
       ttl  = 10
       type = "A"
     }
-  }
-
-  health_check_custom_config {
-    failure_threshold = 1
   }
 }
 
@@ -155,8 +151,8 @@ resource "aws_ecs_task_definition" "neo4j" {
         # Keep the heap modest; Fargate kills the task if we overshoot the
         # task-level memory limit.
         { name = "NEO4J_server_memory_heap_initial__size", value = "1G" },
-        { name = "NEO4J_server_memory_heap_max__size",     value = "1G" },
-        { name = "NEO4J_server_memory_pagecache_size",     value = "1G" },
+        { name = "NEO4J_server_memory_heap_max__size", value = "1G" },
+        { name = "NEO4J_server_memory_pagecache_size", value = "1G" },
         # Accept the LICENSE so the container starts non-interactively.
         { name = "NEO4J_ACCEPT_LICENSE_AGREEMENT", value = "yes" },
       ]
@@ -202,8 +198,8 @@ resource "aws_ecs_service" "neo4j" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = data.aws_subnets.target.ids
-    security_groups  = [aws_security_group.neo4j.id]
+    subnets         = data.aws_subnets.target.ids
+    security_groups = [aws_security_group.neo4j.id]
     # Public IP only for ECR pulls + dockerhub pulls. The SG denies inbound
     # from anywhere outside the worker SG, so this isn't a real exposure.
     assign_public_ip = true
