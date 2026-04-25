@@ -31,8 +31,8 @@ from .template_matcher import TemplateChoice, pick_template
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 6          # hard cap — cheap escape valve
-MAX_TOKENS_PER_TURN = 8000  # per model response; tool-runner sums these up
+MAX_ITERATIONS = 15           # hard cap — cheap escape valve
+MAX_TOKENS_PER_TURN = 16384   # per model response; tool-runner sums these up
 CODER_MODEL = "claude-opus-4-7"
 
 CODER_SYSTEM_PROMPT = """You are an agentic Coder. Your job is to produce a runnable starter project that passes `verify.sh` with exit code 0.
@@ -41,20 +41,23 @@ You have these tools in a sandboxed workspace:
 - list_files — see what's already there (the workspace may be pre-seeded from a template)
 - read_file(path) — inspect any file
 - write_file(path, content) — create or overwrite
-- run_verify — run the scaffold's verify.sh; exit 0 means you're done
+- run_verify(stage="all") — run the verify pipeline; stage can be "lint", "typecheck", "smoke", "test", or "all" (default). Exit 0 on stage="all" means you're done.
+- bash_exec(command, timeout_seconds=60) — run any shell command (pip install, npm test, ls, grep, etc.). Env is scrubbed of secrets. Use for things the other tools don't cover.
 
 Workflow:
 1. ALWAYS start by calling list_files to see what's there.
 2. If the workspace was seeded from a template, read the template's README and the primary files called out in the customisation guide.
 3. Customise the template to match the brief: rename the project, replace the example entities with the domain ones, update tests accordingly.
-4. Call run_verify often — after each meaningful change. Read the stderr tail carefully; it tells you exactly what to fix.
-5. When verify passes (exit_code 0), STOP calling tools and return a short final summary. Do not keep editing.
+4. Iterate fast with focused stages: `run_verify(stage="lint")` after a syntax change, `stage="typecheck"` after a signature change, `stage="test"` when ready. Use `stage="all"` to confirm done.
+5. Use bash_exec for everything else — installing a new dep (`pip install httpx`), running a single test (`pytest tests/test_x.py::test_y -v`), checking a tree (`ls -la app/`), grepping (`grep -rn TODO .`).
+6. When `run_verify(stage="all")` passes, STOP calling tools and return a short final summary. Do not keep editing.
 
 Hard rules:
 - Preserve every file the template's customisation_guide.preserve list calls out unless you have a strong reason.
 - Do NOT delete the verify.sh at the workspace root — it's how success is measured.
 - Keep changes minimal — you're customising, not rewriting.
 - If verify fails the same way twice in a row, try a different approach instead of retrying the same edit.
+- bash_exec runs in a scrubbed env. Don't try to read secrets from the environment — they're not there.
 """
 
 
@@ -240,6 +243,7 @@ async def run_agentic_coder(
             "read_file": stats["read_file_calls"],
             "write_file": stats["write_file_calls"],
             "run_verify": stats["run_verify_calls"],
+            "bash_exec": stats["bash_exec_calls"],
         },
         "files": files,
         "_tokens_in": total_input_tokens,

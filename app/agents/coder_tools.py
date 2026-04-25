@@ -1,14 +1,14 @@
 """
-Coder tools — the four things the model can do inside the sandbox.
+Coder tools — the things the model can do inside the sandbox.
 
-All four are thin wrappers over `Sandbox`. They return **strings** because
+All tools are thin wrappers over `Sandbox`. They return **strings** because
 the Anthropic tool-use API serialises tool_result content as text; any
 structured shape gets JSON-encoded into a string.
 
-Factory pattern: `build_tools(sandbox)` returns four `@beta_async_tool`
-instances that close over `sandbox`. We need the factory because the tool
-runner's decorator introspects the function signature to build a schema —
-so the sandbox can't be a parameter, it has to be captured.
+Factory pattern: `build_tools(sandbox)` returns `@beta_async_tool` instances
+that close over `sandbox`. We need the factory because the tool runner's
+decorator introspects the function signature to build a schema — so the
+sandbox can't be a parameter, it has to be captured.
 """
 from __future__ import annotations
 
@@ -25,6 +25,10 @@ from .coder_sandbox import Sandbox, SandboxError
 VERIFY_TIMEOUT_SECONDS = 300
 # Keep the tail bounded so one chatty verify run doesn't blow the context.
 VERIFY_LOG_TAIL_BYTES = 8 * 1024
+
+# Stages templates may expose via `verify.sh <stage>`. Coder picks one to
+# narrow feedback during iteration; "all" runs the full pipeline.
+VERIFY_STAGES = ("lint", "typecheck", "smoke", "test", "all")
 
 
 def _tail(text: str, limit: int = VERIFY_LOG_TAIL_BYTES) -> str:
@@ -46,10 +50,12 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
         "read_file_calls": 0,
         "write_file_calls": 0,
         "run_verify_calls": 0,
+        "bash_exec_calls": 0,
         "bytes_written": 0,
         "last_verify_exit": None,
         "last_verify_stdout": "",
         "last_verify_stderr": "",
+        "last_verify_stage": None,
     }
 
     @beta_async_tool
@@ -106,36 +112,48 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
         return f"wrote {n} bytes to {path}"
 
     @beta_async_tool
-    async def run_verify() -> str:
+    async def run_verify(stage: str = "all") -> str:
         """Run the scaffold's `verify.sh` and return its output.
 
-        The verify script is the definition of "done" for this scaffold — it
-        installs dev deps, lints, and runs tests. Call this after every
-        meaningful edit. Returns exit code + tailed stdout/stderr so you can
-        see what broke.
+        The verify script is the definition of "done" for this scaffold. It
+        runs in stages so you can iterate fast: lint a syntax fix without
+        waiting for the full test suite. The full pipeline (`stage="all"`)
+        is the gate — exit 0 there means you're done.
 
-        On exit 0, you're done — stop editing and return a final summary.
+        Args:
+            stage: One of "lint" (style/syntax), "typecheck" (mypy/tsc),
+                "smoke" (entry-point sanity check), "test" (unit tests),
+                "all" (full pipeline — the actual definition of done).
+                Defaults to "all".
+
+        Returns JSON with exit_code, stdout_tail, stderr_tail, stage.
+        Templates that don't implement per-stage routing fall back to running
+        verify.sh with no args — same as stage="all".
         """
+        stage = (stage or "all").strip().lower()
+        if stage not in VERIFY_STAGES:
+            return f"error: stage must be one of {VERIFY_STAGES}, got {stage!r}"
+
         stats["run_verify_calls"] += 1
         verify_path = sandbox.root / "verify.sh"
         if not verify_path.exists():
-            # Fallback: templates keep verify.sh at the template root (alongside
-            # scaffold/), so we may need to fetch it. Callers copy both in; if
-            # this trips, the template matcher forgot to stage verify.sh.
             msg = "error: verify.sh not found in workspace — cannot verify"
             stats["last_verify_exit"] = -1
             stats["last_verify_stderr"] = msg
             return msg
 
-        # Make sure verify.sh is executable (Windows-origin copies lose +x).
         try:
             verify_path.chmod(0o755)
         except OSError:
             pass
 
+        # Pass the stage as an arg. Templates that don't honour it just run
+        # the full pipeline either way — backwards-compatible.
+        cmd = ["bash", "verify.sh", stage] if stage != "all" else ["bash", "verify.sh"]
+
         def _run() -> tuple[int, str, str]:
             proc = subprocess.run(
-                ["bash", "verify.sh"],
+                cmd,
                 cwd=str(sandbox.root),
                 capture_output=True,
                 text=True,
@@ -148,10 +166,9 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
         except subprocess.TimeoutExpired:
             stats["last_verify_exit"] = -2
             stats["last_verify_stderr"] = f"timed out after {VERIFY_TIMEOUT_SECONDS}s"
-            return f"error: verify.sh timed out after {VERIFY_TIMEOUT_SECONDS}s"
+            stats["last_verify_stage"] = stage
+            return f"error: verify.sh ({stage}) timed out after {VERIFY_TIMEOUT_SECONDS}s"
         except FileNotFoundError:
-            # `bash` not on PATH — should never happen in the container, does
-            # on dev boxes without bash in PATH.
             stats["last_verify_exit"] = -3
             stats["last_verify_stderr"] = "bash not found on PATH"
             return "error: `bash` interpreter not found on PATH"
@@ -159,12 +176,45 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
         stats["last_verify_exit"] = exit_code
         stats["last_verify_stdout"] = stdout
         stats["last_verify_stderr"] = stderr
-        tail_out = _tail(stdout)
-        tail_err = _tail(stderr)
+        stats["last_verify_stage"] = stage
         return json.dumps({
+            "stage": stage,
             "exit_code": exit_code,
-            "stdout_tail": tail_out,
-            "stderr_tail": tail_err,
+            "stdout_tail": _tail(stdout),
+            "stderr_tail": _tail(stderr),
         })
 
-    return [list_files, read_file, write_file, run_verify], stats
+    @beta_async_tool
+    async def bash_exec(command: str, timeout_seconds: int = 60) -> str:
+        """Run an arbitrary shell command in the workspace.
+
+        Use this for things the read/write/verify tools don't cover: pip
+        install, npm install, git status, running a single test, dumping a
+        file's last 50 lines, etc. Runs `bash -c <command>` in the workspace
+        with a scrubbed env (no provider keys, no AWS/Temporal/GitHub creds,
+        no IMDS access) — so don't try to print secrets, they're not there.
+
+        Args:
+            command: The shell command to run. Wrapped in `bash -c` so pipes,
+                redirects, $(...), etc. all work as expected.
+            timeout_seconds: Per-call timeout. Default 60s, max 300s. Long
+                installs (a fresh `npm install` of a Next.js scaffold) need
+                higher; one-shot greps don't.
+
+        Returns JSON with exit_code, stdout, stderr (each capped at 10KB
+        with middle-truncation if longer).
+        """
+        stats["bash_exec_calls"] += 1
+        try:
+            exit_code, stdout, stderr = await sandbox.run_bash(command, timeout_seconds)
+        except SandboxError as e:
+            return f"error: {e}"
+        except FileNotFoundError:
+            return "error: `bash` interpreter not found on PATH"
+        return json.dumps({
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+
+    return [list_files, read_file, write_file, run_verify, bash_exec], stats
