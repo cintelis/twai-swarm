@@ -47,6 +47,10 @@ data "aws_iam_policy_document" "secrets_access" {
       aws_secretsmanager_secret.langfuse_salt.arn,
       aws_secretsmanager_secret.langfuse_public_key.arn,
       aws_secretsmanager_secret.langfuse_secret_key.arn,
+      # Neo4j self-hosted — Neo4j task reads its own admin password;
+      # worker reads URL + password to connect to the graph store.
+      aws_secretsmanager_secret.neo4j_password.arn,
+      aws_secretsmanager_secret.neo4j_url.arn,
     ]
   }
 }
