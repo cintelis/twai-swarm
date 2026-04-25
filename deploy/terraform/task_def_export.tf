@@ -16,6 +16,6 @@ resource "local_file" "worker_task_def_json" {
     memory                  = "2048"
     executionRoleArn        = aws_iam_role.exec.arn
     taskRoleArn             = aws_iam_role.task.arn
-    containerDefinitions    = jsondecode(aws_ecs_task_definition.worker.container_definitions)
+    containerDefinitions    = local.worker_container_definitions
   })
 }

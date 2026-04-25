@@ -67,16 +67,13 @@ resource "aws_security_group" "tasks" {
 #-----------------------------------------------------------------------------
 # Task definition: Worker
 #-----------------------------------------------------------------------------
-resource "aws_ecs_task_definition" "worker" {
-  family                   = "${local.name_prefix}-worker"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = tostring(var.worker_cpu)
-  memory                   = tostring(var.worker_memory)
-  execution_role_arn       = aws_iam_role.exec.arn
-  task_role_arn            = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
+locals {
+  # Container definitions defined once so both the task def AND the JSON
+  # exported for the GitHub Actions deploy workflow stay byte-identical.
+  # Reading from aws_ecs_task_definition.worker.container_definitions caused
+  # "Provider produced inconsistent final plan" errors because the provider
+  # normalises the JSON during apply (adds mountPoints:[], hostPort, etc.).
+  worker_container_definitions = [
     {
       name      = "worker"
       image     = "${aws_ecr_repository.app.repository_url}:${var.image_tag}"
@@ -91,13 +88,9 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "TEMPORAL_HOST", value = var.temporal_host },
         { name = "TEMPORAL_NAMESPACE", value = var.temporal_namespace },
         { name = "TEMPORAL_TLS", value = "true" },
-        # Empty = handle all queues. Narrow this on specialised worker services.
         { name = "TEMPORAL_QUEUES", value = "" },
-        # GitHub App install URL is public — env var, not SM secret.
         { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
-        # Langfuse host is public (the UI URL). Keys come via SM below.
         { name = "LANGFUSE_HOST", value = var.langfuse_public_url },
-        # OTLP collector endpoint — empty in dev; set to the greenfield collector URL.
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_otlp_endpoint },
         { name = "DEPLOYMENT_ENV", value = "dev" },
       ]
@@ -110,11 +103,8 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "GITHUB_APP_PRIVATE_KEY", valueFrom = aws_secretsmanager_secret.github_app_private_key.arn },
         { name = "TEMPORAL_API_KEY", valueFrom = aws_secretsmanager_secret.temporal_api_key.arn },
         { name = "PG_DSN", valueFrom = aws_secretsmanager_secret.pg_dsn.arn },
-        # Langfuse project keys — UNSET until first-run admin creates a project.
-        # observability.py no-ops gracefully when either is "UNSET".
         { name = "LANGFUSE_PUBLIC_KEY", valueFrom = aws_secretsmanager_secret.langfuse_public_key.arn },
         { name = "LANGFUSE_SECRET_KEY", valueFrom = aws_secretsmanager_secret.langfuse_secret_key.arn },
-        # The bootstrap task also needs the langfuse DB password to CREATE USER.
         { name = "LANGFUSE_DB_PASSWORD", valueFrom = aws_secretsmanager_secret.langfuse_db_password.arn },
       ]
 
@@ -135,7 +125,19 @@ resource "aws_ecs_task_definition" "worker" {
         }
       }
     }
-  ])
+  ]
+}
+
+resource "aws_ecs_task_definition" "worker" {
+  family                   = "${local.name_prefix}-worker"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = tostring(var.worker_cpu)
+  memory                   = tostring(var.worker_memory)
+  execution_role_arn       = aws_iam_role.exec.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode(local.worker_container_definitions)
 }
 
 #-----------------------------------------------------------------------------

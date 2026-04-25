@@ -183,6 +183,11 @@ module "langfuse_express" {
 }
 
 output "langfuse_url" {
-  value       = module.langfuse_express.service_url
-  description = "Langfuse UI URL. Sign up as admin on first visit, create a project, then set langfuse_public_url + langfuse_public_key + langfuse_secret_key in tfvars."
+  # The express-service module's service_url synthesises a friendly hostname
+  # (https://<name>.ecs.<region>.on.aws/) but AWS doesn't auto-create that
+  # DNS record — the real URL is the random `le-XXXX` endpoint allocated
+  # under ingress_paths. Read it directly from the resource so the output
+  # is always reachable.
+  value       = "https://${module.langfuse_express.ingress_paths[0].endpoint}"
+  description = "Langfuse UI URL. Sign up as admin on first visit, create a project, then set langfuse_public_key + langfuse_secret_key in tfvars."
 }
