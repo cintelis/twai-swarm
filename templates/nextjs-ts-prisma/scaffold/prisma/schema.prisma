@@ -1,0 +1,21 @@
+// Prisma schema. SQLite by default for zero-setup local dev — swap to
+// Postgres for production by changing the provider + DATABASE_URL.
+//
+// Replace the Item model with your domain entities; everything else
+// (generator, datasource) stays.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Item {
+  id        Int      @id @default(autoincrement())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -72,10 +72,11 @@ templates/python-fastapi-postgres/
 - Runs inside the sandbox container, which has the language toolchain installed.
 - Must exit `0` if the scaffold is valid, non-zero otherwise.
 - Should print compact diagnostics on failure — the Coder reads the output to decide what to fix.
+- **Must accept a stage arg**: `verify.sh <stage>` where stage ∈ `lint | typecheck | smoke | test | all`. Default (no arg) = `all`. The Coder uses focused stages to iterate fast (lint after a syntax change, test when ready) and `all` to gate "done". See existing templates for the case-statement pattern.
 - Should cover at minimum: lint, type-check (if applicable), and one smoke-level test.
 - **Should NOT** require network access beyond language package managers (pip, npm, maven). The sandbox may be egress-restricted.
 
-Keep `verify.sh` fast (<60s target). Slow verification starves the iterate-fix loop of budget.
+Keep `verify.sh` fast (<60s target for individual stages, <3 min for `all`). Slow verification starves the iterate-fix loop of budget.
 
 ---
 
@@ -103,9 +104,9 @@ BA → Researcher → Architect
 | Name | Language | Framework | Status |
 |---|---|---|---|
 | `python-fastapi-postgres` | Python 3.12+ | FastAPI + async SQLAlchemy + Alembic | ✓ Reference implementation |
-| `nextjs-ts-prisma` | TypeScript | Next.js 15 + Prisma + Tailwind | planned |
+| `nextjs-ts-prisma` | TypeScript | Next.js 14 (App Router) + Prisma (SQLite default) + Vitest | ✓ Sprint 11a |
+| `vite-react-tailwind` | TypeScript | Vite + React + Tailwind v3 + Vitest | ✓ Sprint 11a |
 | `spring-boot-jpa` | Java 21 | Spring Boot 3 + JPA + PostgreSQL | planned |
-| `vite-react-tailwind` | TypeScript | Vite + React + Tailwind + Zustand | planned |
 
 ---
 

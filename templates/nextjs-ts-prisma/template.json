@@ -1,0 +1,60 @@
+{
+  "name": "nextjs-ts-prisma",
+  "display_name": "Next.js + TypeScript + Prisma",
+  "description": "Full-stack Next.js 14 (App Router) scaffold with TypeScript, Prisma ORM (SQLite for dev), Tailwind-free pure server components + Route Handlers, ESLint flat config, Vitest. Production-shape starting point for full-stack apps where the same repo serves UI and API.",
+  "language": "typescript",
+  "framework": "nextjs",
+  "runtime_version": "node 20+",
+
+  "included": [
+    "Next.js 14 App Router with TypeScript",
+    "Prisma ORM with SQLite datasource (swap to Postgres by changing one line)",
+    "Example Item model with GET/POST Route Handlers",
+    "Server Component page that lists items via the Prisma client",
+    "Vitest with @testing-library/react setup",
+    "ESLint flat config (next/core-web-vitals + TypeScript)",
+    "Vitest + sample integration test",
+    ".gitignore, README, .env.example"
+  ],
+
+  "selection_hints": [
+    "Next.js or React-based full-stack app",
+    "TypeScript backend with the same repo serving the frontend",
+    "Server-rendered React with route handlers",
+    "Prisma or any TypeScript ORM mentioned",
+    "Web app needing both UI and an API in one codebase",
+    "Brief mentions Vercel deployment"
+  ],
+
+  "anti_hints": [
+    "Backend-only API service (no UI)",
+    "Single-page app (frontend-only) without a backend",
+    "Python or non-TypeScript language explicitly requested",
+    "Mobile app (React Native, Swift, Kotlin)",
+    "Realtime / WebSocket-first architecture",
+    "Heavy CPU workload best suited to Go / Rust"
+  ],
+
+  "verification": {
+    "script": "verify.sh",
+    "description": "Stages: lint (next lint), typecheck (tsc --noEmit), smoke (next build), test (vitest run), all (lint + typecheck + smoke + test). Exit 0 on stage=all means the scaffold builds, types check, and tests pass."
+  },
+
+  "customisation_guide": {
+    "primary_files": [
+      "README.md — replace project description with what the brief actually builds",
+      "prisma/schema.prisma — define your domain models (the Item model is a placeholder; rename or replace)",
+      "app/api/items/route.ts — pattern for Route Handlers; rename and add others as needed",
+      "app/page.tsx — landing page; replace the items list with your real UI",
+      "package.json — update name + description; add runtime deps as needed",
+      "tests/items.test.ts — replace with tests for your real routes / components"
+    ],
+    "preserve": [
+      "lib/prisma.ts — PrismaClient singleton pattern (Next.js dev hot-reload safety)",
+      "vitest.config.ts — happy-dom env + path aliases",
+      "tsconfig.json paths/baseUrl wiring",
+      ".gitignore (covers node_modules, .next, prisma/dev.db, .env)",
+      "verify.sh stage routing — multi-stage contract the agentic Coder relies on"
+    ]
+  }
+}

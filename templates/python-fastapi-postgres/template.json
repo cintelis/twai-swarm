@@ -30,7 +30,9 @@
   "anti_hints": [
     "Frontend-only project (no backend)",
     "Single-file CLI tool without persistence",
+    "Script or CLI utility, not an HTTP service",
     "Non-Python language explicitly requested (Rust, Go, Java, TypeScript, …)",
+    "Project uses Next.js, React, Vite, Vue or any JavaScript framework",
     "Document or event store instead of relational (MongoDB, DynamoDB, Kafka-first)",
     "Serverless-first architecture where Lambda handlers replace a long-lived service",
     "Data pipeline / batch job rather than an HTTP API"

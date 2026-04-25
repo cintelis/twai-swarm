@@ -1,0 +1,60 @@
+{
+  "name": "vite-react-tailwind",
+  "display_name": "Vite + React + TypeScript + Tailwind",
+  "description": "Frontend SPA scaffold: Vite 5, React 18, TypeScript strict mode, Tailwind CSS v3, Vitest with @testing-library/react, ESLint flat config. Production-shape starting point for client-only apps that talk to an external API.",
+  "language": "typescript",
+  "framework": "react",
+  "runtime_version": "node 20+",
+
+  "included": [
+    "Vite 5 with the React plugin (HMR, esbuild)",
+    "React 18 with TypeScript strict mode",
+    "Tailwind CSS v3 with PostCSS + Autoprefixer",
+    "Vitest + @testing-library/react sample test",
+    "ESLint with TypeScript + React rules",
+    "Path alias @/ → src/",
+    ".gitignore, README, index.html"
+  ],
+
+  "selection_hints": [
+    "React frontend or single-page app",
+    "Client-side UI talking to a separate backend API",
+    "Vite or Tailwind explicitly mentioned",
+    "Static site deployable to Netlify / Cloudflare Pages / S3",
+    "TypeScript SPA",
+    "Dashboard, admin panel, marketing site"
+  ],
+
+  "anti_hints": [
+    "Server-side rendered or full-stack app needing route handlers",
+    "Backend / API service (use a backend template instead)",
+    "Database access from the same codebase",
+    "Mobile app (React Native, Swift, Kotlin)",
+    "Python or non-TypeScript language explicitly requested",
+    "Realtime / WebSocket-first architecture (consider a different framework)"
+  ],
+
+  "verification": {
+    "script": "verify.sh",
+    "description": "Stages: lint (eslint .), typecheck (tsc --noEmit), smoke (vite build), test (vitest run), all (lint + typecheck + smoke + test). Exit 0 on stage=all means the SPA builds, types check, and tests pass."
+  },
+
+  "customisation_guide": {
+    "primary_files": [
+      "README.md — replace project description with what the brief actually builds",
+      "src/App.tsx — root component; replace the placeholder UI with your real screens",
+      "src/main.tsx — entry point; usually only edit to add Providers (Router, Query, etc.)",
+      "tailwind.config.js — extend the theme (colors, fonts) as the brief requires",
+      "package.json — update name + description; add deps as needed",
+      "src/App.test.tsx — replace with tests for your real components"
+    ],
+    "preserve": [
+      "vite.config.ts — Vite plugin wiring + path alias",
+      "tsconfig.json strict mode + path alias config",
+      "postcss.config.js — Tailwind needs this exact shape",
+      "src/index.css — Tailwind directives must come first",
+      ".gitignore",
+      "verify.sh stage routing — multi-stage contract the agentic Coder relies on"
+    ]
+  }
+}

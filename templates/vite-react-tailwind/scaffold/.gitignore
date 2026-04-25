@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editors / OS
+.DS_Store
+*.log
+.idea
+.vscode
+
+# Test / coverage
+coverage
+.nyc_output
+
+# Vitest cache
+.vitest-cache

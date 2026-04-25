@@ -114,3 +114,25 @@ def test_architecture_and_plan_contribute_to_corpus(tmp_path):
         templates_dir=tmp_path,
     )
     assert choice.name == "fastapi"
+
+
+# ─── Real templates dispatch ─────────────────────────────────────────────────
+# These tests don't isolate templates_dir — they hit the real templates/
+# tree. If a new template is added that matches one of these briefs better
+# than the asserted one, update the assertion deliberately rather than the
+# hint metadata. The point is that the catalogue stays coherent.
+
+@pytest.mark.parametrize("brief, expected", [
+    ("FastAPI books service with Postgres", "python-fastapi-postgres"),
+    ("Async Python REST API for tracking inventory", "python-fastapi-postgres"),
+    ("Next.js TypeScript app with Prisma to manage widgets", "nextjs-ts-prisma"),
+    ("Full-stack Next.js app with database for a blog", "nextjs-ts-prisma"),
+    ("React SPA with Tailwind for a kanban board", "vite-react-tailwind"),
+    ("Vite React dashboard showing analytics charts", "vite-react-tailwind"),
+])
+def test_real_templates_dispatch(brief, expected):
+    choice = pick_template(brief)
+    assert choice.name == expected, (
+        f"brief {brief!r} expected {expected!r} but matcher returned "
+        f"{choice.name!r} (score={choice.score}, reason={choice.reason})"
+    )

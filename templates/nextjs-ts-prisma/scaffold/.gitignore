@@ -1,0 +1,27 @@
+node_modules
+.next
+out
+dist
+
+# Prisma — committed schema, not the local DB
+prisma/dev.db
+prisma/dev.db-journal
+prisma/migrations/dev.db
+
+# Env (copy .env.example to .env)
+.env
+.env.local
+.env.*.local
+
+# Editors / OS
+.DS_Store
+*.log
+.idea
+.vscode
+
+# Test / coverage
+coverage
+.nyc_output
+
+# Vitest cache
+.vitest-cache
