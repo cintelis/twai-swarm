@@ -5,9 +5,15 @@ FROM python:3.12-slim
 # never appear until ~4KB accumulates (or the process exits).
 ENV PYTHONUNBUFFERED=1
 
-# Keep the image small but include the bits we'll inevitably need for debugging.
+# OS deps:
+#   - ca-certificates / curl: TLS roots + curl for verify.sh health probes
+#   - bash: required by the Coder's run_verify + bash_exec tools
+#   - git: Coder may `git init` / `git diff` inside its workspace
+#   - nodejs + npm (via NodeSource Node 20 LTS): toolchain for JS/TS templates
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl \
+      ca-certificates curl bash git gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,8 +22,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App code
+# App code + project templates the Coder copies into its sandbox.
+# Templates ship in the image so the worker doesn't need a runtime download.
 COPY app ./app
+COPY templates ./templates
 
 # Non-root
 RUN useradd --create-home --shell /bin/bash appuser \

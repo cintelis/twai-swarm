@@ -1,0 +1,55 @@
+# Keep the build context lean and the image clean.
+# Without this, COPY templates ./templates pulls in stale caches from
+# previous local verify.sh runs (pytest, ruff, egg-info, prisma dev.db, etc.)
+# and the worker's sandbox would inherit megabytes of junk per workflow.
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+.venv
+venv
+
+# Node / JS
+node_modules
+.next
+dist
+out
+.vite
+.vitest-cache
+
+# Prisma local DB
+prisma/dev.db
+prisma/dev.db-journal
+
+# Env files (image must NEVER contain real env)
+.env
+.env.local
+.env.*.local
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Git / CI / docs
+.git
+.github
+*.md
+!templates/**/*.md
+!templates/README.md
+
+# Local terraform state — would expose secrets if shipped
+deploy/terraform/.terraform
+deploy/terraform/*.tfstate*
+deploy/terraform/terraform.tfvars
+deploy/terraform/backend.conf
+
+# Tests don't need to ship in the runtime image
+tests
