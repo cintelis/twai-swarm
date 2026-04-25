@@ -111,6 +111,19 @@ variable "langfuse_disable_signup" {
   default     = false
 }
 
+# ─── OpenTelemetry export endpoint ────────────────────────────────────────
+# When set, the worker + API initialise the OTel SDK and send traces +
+# metrics to this OTLP HTTP endpoint. Empty (default) → telemetry SDK
+# isn't initialised and span/metric calls become cheap no-ops.
+#
+# Greenfield will set this to the EKS-hosted OTel collector URL.
+# Dev today leaves it empty (CloudWatch + Langfuse already cover dev needs).
+variable "otel_exporter_otlp_endpoint" {
+  description = "OTLP HTTP base URL (no /v1/traces suffix — added per signal). Empty disables OTel."
+  type        = string
+  default     = ""
+}
+
 variable "temporal_api_key" {
   description = "Temporal Cloud API key (replaces mTLS cert/key auth)"
   type        = string

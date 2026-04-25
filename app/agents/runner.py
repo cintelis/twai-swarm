@@ -6,7 +6,8 @@ No Temporal imports here -- agents are testable in isolation.
 """
 import json
 import logging
-from app import observability, router
+import time as _time
+from app import observability, router, telemetry
 from app.providers import anthropic_provider, openai_provider, xai_provider, ProviderResult
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,7 @@ async def _complete_with_fallback(
     foreign tool types at their boundary (see openai_provider._translate_tools).
     """
     primary_error: Exception | None = None
+    started_at = _time.monotonic()
     try:
         result = await _complete(
             provider=decision.provider,
@@ -216,6 +218,9 @@ async def _complete_with_fallback(
             max_tokens=max_tokens,
             tools=tools,
         )
+        # Metrics: successful primary call.
+        telemetry.counter_add("llm_calls", 1, provider=decision.provider, model=decision.model, fallback="false")
+        telemetry.histogram_record("llm_latency", _time.monotonic() - started_at, provider=decision.provider, model=decision.model)
         return result, decision
     except Exception as e:
         if not _is_transient(e):
@@ -235,6 +240,7 @@ async def _complete_with_fallback(
             spec=spec,
             reason=f"fallback from {decision.key} ({primary_error.__class__.__name__})",
         )
+        fallback_started_at = _time.monotonic()
         try:
             result = await _complete(
                 provider=fallback_decision.provider,
@@ -243,6 +249,19 @@ async def _complete_with_fallback(
                 user=user,
                 max_tokens=max_tokens,
                 tools=tools,
+            )
+            telemetry.counter_add(
+                "llm_fallback_fired", 1,
+                from_provider=decision.provider, to_provider=fallback_decision.provider,
+                trigger=primary_error.__class__.__name__,
+            )
+            telemetry.counter_add(
+                "llm_calls", 1,
+                provider=fallback_decision.provider, model=fallback_decision.model, fallback="true",
+            )
+            telemetry.histogram_record(
+                "llm_latency", _time.monotonic() - fallback_started_at,
+                provider=fallback_decision.provider, model=fallback_decision.model,
             )
             logger.info(
                 "fallback succeeded: %s/%s answered after %s/%s failed",

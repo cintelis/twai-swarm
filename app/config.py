@@ -41,6 +41,17 @@ LANGFUSE_HOST = os.getenv("LANGFUSE_HOST")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 
+# OpenTelemetry. All config goes via standard OTEL_* env vars; the SDK
+# reads them directly. Most important:
+#   OTEL_EXPORTER_OTLP_ENDPOINT — http(s) URL of the OTel collector. If
+#                                 unset, telemetry.init() is a no-op.
+#   OTEL_SERVICE_NAME           — defaults to "twai-swarm-{role}" if unset
+#   OTEL_RESOURCE_ATTRIBUTES    — comma-separated k=v extras (e.g.
+#                                 deployment.environment=prod)
+# We snapshot the endpoint here so app code can quickly check whether
+# telemetry is wired without re-reading the env on every span.
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
 def validate_runtime() -> None:
     """Fail fast if a runtime-required env var is missing.
 

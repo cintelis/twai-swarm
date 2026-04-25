@@ -6,12 +6,13 @@ Rule of thumb: if it touches the network, a clock, or randomness, it's an activi
 """
 import asyncio
 import logging
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Optional
 from temporalio import activity
 
-from . import db, agents
+from . import db, agents, telemetry
 
 
 async def _embed_task_output(
@@ -83,11 +84,23 @@ async def create_task_record(input: AgentTaskInput) -> str:
         title=input.title,
         description=input.description,
         parent_task_id=input.parent_task_id,
+        tenant_id=input.tenant_id,
     )
 
 @activity.defn
 async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskResult:
     """Run one agent. Heartbeats keep Temporal from marking long LLM calls as stuck."""
+    activity_started_at = time.monotonic()
+    span_ctx = telemetry.span(
+        "twai_swarm.activity.run_agent",
+        **{
+            "swarm.role": input.role,
+            "swarm.task_id": task_id,
+            "swarm.project_id": input.project_id,
+            "swarm.tenant_id": input.tenant_id,
+        },
+    )
+    span_ctx.__enter__()
     await db.update_task_running(task_id)
 
     # get_context_for_task = parent-walk ancestors + (for synthesis roles)
@@ -145,6 +158,15 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
     # logged and swallowed on failure so embedding cost doesn't fail the workflow.
     await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
 
+    # Record activity duration + close the span we opened above.
+    telemetry.histogram_record(
+        "agent_activity_duration",
+        time.monotonic() - activity_started_at,
+        role=input.role,
+        tenant_id=input.tenant_id,
+    )
+    span_ctx.__exit__(None, None, None)
+
     return AgentTaskResult(
         task_id=task_id,
         output=result["output"],
@@ -174,6 +196,18 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
     from . import config
     from .agents import coder_agentic
 
+    activity_started_at = time.monotonic()
+    span_ctx = telemetry.span(
+        "twai_swarm.activity.run_coder",
+        **{
+            "swarm.role": "coder",
+            "swarm.task_id": task_id,
+            "swarm.project_id": input.project_id,
+            "swarm.workflow_id": workflow_id,
+            "swarm.tenant_id": input.tenant_id,
+        },
+    )
+    span_ctx.__enter__()
     await db.update_task_running(task_id)
     context = await db.get_ancestor_outputs(task_id)
 
@@ -270,6 +304,23 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
     # SE/Reviewer/Documenter ("we've coded something like this before").
     # The embedding text strips the files[] array (see task_to_embedding_text).
     await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
+
+    # Coder-specific metrics + close span
+    iters = result.get("output", {}).get("iterations") if isinstance(result.get("output"), dict) else None
+    if isinstance(iters, int):
+        verify_passed = bool(result["output"].get("verify_passed", False))
+        telemetry.histogram_record(
+            "coder_iterations", float(iters),
+            verify_passed=verify_passed,
+            tenant_id=input.tenant_id,
+        )
+    telemetry.histogram_record(
+        "agent_activity_duration",
+        time.monotonic() - activity_started_at,
+        role="coder",
+        tenant_id=input.tenant_id,
+    )
+    span_ctx.__exit__(None, None, None)
 
     return AgentTaskResult(
         task_id=task_id,

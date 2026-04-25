@@ -24,3 +24,14 @@ pyjwt[crypto]>=2.8,<3.0
 # Pin to v2 to match the self-hosted server image; v3 SDK has breaking API
 # changes that won't work against a v2 server.
 langfuse>=2.40,<3.0
+
+# OpenTelemetry — application-layer traces + metrics. Sends nothing when
+# OTEL_EXPORTER_OTLP_ENDPOINT is unset (telemetry.init() is a no-op),
+# so dev startup stays fast. Greenfield will point this at the EKS-hosted
+# OTel collector → Prometheus + Loki + Grafana.
+opentelemetry-api>=1.27,<2.0
+opentelemetry-sdk>=1.27,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
+opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
+opentelemetry-instrumentation-asyncpg>=0.48b0,<1.0
+opentelemetry-instrumentation-httpx>=0.48b0,<1.0

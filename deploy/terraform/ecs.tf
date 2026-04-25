@@ -97,6 +97,9 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
         # Langfuse host is public (the UI URL). Keys come via SM below.
         { name = "LANGFUSE_HOST", value = var.langfuse_public_url },
+        # OTLP collector endpoint — empty in dev; set to the greenfield collector URL.
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_otlp_endpoint },
+        { name = "DEPLOYMENT_ENV", value = "dev" },
       ]
 
       secrets = [
@@ -199,6 +202,8 @@ module "api_express" {
       { name = "TEMPORAL_TLS", value = "true" },
       { name = "GITHUB_APP_INSTALL_URL", value = var.github_app_install_url },
       { name = "LANGFUSE_HOST", value = var.langfuse_public_url },
+      { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_otlp_endpoint },
+      { name = "DEPLOYMENT_ENV", value = "dev" },
     ]
 
     secret = [

@@ -44,6 +44,11 @@ langfuse_public_key     = ""     # pk-lf-...
 langfuse_secret_key     = ""     # sk-lf-...
 langfuse_disable_signup = false  # flip to true after the first admin account exists
 
+# ── OpenTelemetry ────────────────────────────────────────────────────────
+# Empty in dev (telemetry SDK no-ops). Set to the greenfield collector URL
+# when that's standing up — e.g. https://otel-collector.swarm.cintelis.ai
+otel_exporter_otlp_endpoint = ""
+
 db_password = "generate-a-strong-password-here"
 
 # Leave empty to use default VPC; set for production (see prod-runbook.md)

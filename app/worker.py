@@ -15,7 +15,7 @@ from aiohttp import web
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from app import config
+from app import config, telemetry
 from app.workflows import ProjectWorkflow
 from app.activities import (
     create_project_record,
@@ -52,6 +52,7 @@ def _connect_kwargs():
 
 async def main():
     config.validate_runtime()
+    telemetry.init(role="worker")
     queues_env = os.getenv("TEMPORAL_QUEUES", "").strip()
     if queues_env:
         roles = [r.strip() for r in queues_env.split(",") if r.strip()]

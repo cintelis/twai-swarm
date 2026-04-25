@@ -25,7 +25,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from temporalio.client import Client
 
-from app import auth, config, db
+from app import auth, config, db, telemetry
 from app.workflows import ProjectWorkflow, ProjectInput
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -39,6 +39,11 @@ app = FastAPI(title="Lean Agent Framework")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 _temporal: Client | None = None
+
+# Initialise OTel before instrumenting the FastAPI app — order matters,
+# otherwise the auto-instrumentation hooks attach to a not-yet-set provider.
+telemetry.init(role="api")
+telemetry.instrument_fastapi(app)
 
 
 @app.on_event("startup")
