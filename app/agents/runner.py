@@ -6,7 +6,7 @@ No Temporal imports here -- agents are testable in isolation.
 """
 import json
 import logging
-from app import router
+from app import observability, router
 from app.providers import anthropic_provider, openai_provider, xai_provider, ProviderResult
 
 logger = logging.getLogger(__name__)
@@ -269,8 +269,14 @@ async def run_agent(
     task_description: str,
     context: list[dict],
     complexity_hint: int = 1,
+    tenant_id: str = "default",
 ) -> dict:
-    """Run one agent turn. Returns dict with output + usage + cost."""
+    """Run one agent turn. Returns dict with output + usage + cost.
+
+    `tenant_id` lands as metadata on the Langfuse trace so per-tenant
+    filtering + cost attribution works as soon as the auth middleware
+    resolves real tenant values.
+    """
     decision = router.route(role, complexity_hint)
     system = SYSTEM_PROMPTS[role]
 
@@ -281,13 +287,16 @@ Prior context from upstream agents:
 
 Respond with ONLY the JSON object specified in your system prompt. No preamble, no markdown fences."""
 
-    result, effective = await _complete_with_fallback(
-        decision=decision,
-        system=system,
-        user=user_msg,
-        max_tokens=ROLE_MAX_TOKENS.get(role, 2048),
-        tools=ROLE_TOOLS.get(role),
-    )
+    # tenant_scope propagates to provider-level observability.generation()
+    # without needing to plumb tenant_id through every provider signature.
+    with observability.tenant_scope(tenant_id):
+        result, effective = await _complete_with_fallback(
+            decision=decision,
+            system=system,
+            user=user_msg,
+            max_tokens=ROLE_MAX_TOKENS.get(role, 2048),
+            tools=ROLE_TOOLS.get(role),
+        )
 
     # Defensive parse -- strip markdown fences if the model added them
     text = result.text.strip()

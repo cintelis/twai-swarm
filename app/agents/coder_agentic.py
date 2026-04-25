@@ -141,8 +141,14 @@ async def run_agentic_coder(
     se_plan: dict | None,
     documenter: dict | None,
     heartbeat: Any = None,  # Optional[Callable[[str], None]] — temporalio.activity.heartbeat
+    tenant_id: str = "default",
 ) -> dict:
-    """Run the agentic Coder loop. Returns the same shape as the one-shot coder."""
+    """Run the agentic Coder loop. Returns the same shape as the one-shot coder.
+
+    `tenant_id` is set in the observability contextvar so every LLM call
+    made by the tool-runner inherits it (tools themselves emit no traces).
+    """
+    from app import observability
     sandbox = Sandbox.create(workflow_id)
     template = pick_template(brief, architecture=architecture, se_plan=se_plan)
     _stage_template(sandbox, template)
@@ -168,6 +174,12 @@ async def run_agentic_coder(
     stop_reason: str | None = None
     last_text = ""
 
+    # Set the tenant scope around the whole tool-runner loop so when
+    # Coder calls get Langfuse-instrumented (future work — the SDK's
+    # tool_runner bypasses our provider adapter), tenant_id propagates
+    # automatically via observability contextvar.
+    tenant_ctx = observability.tenant_scope(tenant_id)
+    tenant_ctx.__enter__()
     try:
         async for message in runner:
             iterations += 1
@@ -201,7 +213,7 @@ async def run_agentic_coder(
         # snapshot has to happen first. Destroy only happens after a successful
         # run AND a successful snapshot (below), so failure cases leave the
         # workspace on disk for post-mortem inspection.
-        pass
+        tenant_ctx.__exit__(None, None, None)
 
     files = _snapshot_workspace(sandbox)
     verify_passed = stats.get("last_verify_exit") == 0

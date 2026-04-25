@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Optional
 
 from app import config
@@ -27,6 +28,36 @@ logger = logging.getLogger(__name__)
 
 _client: Optional[Any] = None
 _initialised = False
+
+# ContextVar so callers up the stack (runner, activities) can set the
+# current tenant once and have every subsequent LLM-call trace auto-tag
+# with it — without plumbing tenant_id through every provider signature.
+# Defaults to "default" so un-scoped code paths still work.
+_current_tenant: ContextVar[str] = ContextVar("swarm_tenant_id", default="default")
+
+
+@contextmanager
+def tenant_scope(tenant_id: str):
+    """Set the current tenant for all nested observability.generation() calls.
+
+    Usage:
+        with observability.tenant_scope(tenant_id):
+            result = await provider.complete(...)
+
+    On exit, restores the previous tenant (or "default"). ContextVar is
+    asyncio-safe: concurrent activities running in the same worker for
+    different tenants each get their own scope.
+    """
+    token = _current_tenant.set(tenant_id)
+    try:
+        yield
+    finally:
+        _current_tenant.reset(token)
+
+
+def current_tenant() -> str:
+    """Read the tenant_id set by the innermost `tenant_scope` on the stack."""
+    return _current_tenant.get()
 
 
 def _get_client() -> Optional[Any]:
@@ -71,7 +102,7 @@ def generation(
     system: str,
     user: str,
     tools: list[dict] | None = None,
-    tenant_id: str = "default",
+    tenant_id: str | None = None,
     metadata: dict | None = None,
 ):
     """Context manager that opens a Langfuse generation span.
@@ -94,6 +125,11 @@ def generation(
         yield _NoopGeneration()
         return
 
+    # Resolve tenant: explicit param > ContextVar > default. Providers don't
+    # pass tenant_id explicitly — they inherit from the tenant_scope the
+    # runner sets. An explicit param still wins if a caller wants to override.
+    effective_tenant = tenant_id if tenant_id is not None else _current_tenant.get()
+
     try:
         lf_gen = client.generation(
             name=name,
@@ -101,7 +137,7 @@ def generation(
             input={"system": system, "user": user, "tools": tools},
             metadata={
                 "provider": provider,
-                "tenant_id": tenant_id,
+                "tenant_id": effective_tenant,
                 **(metadata or {}),
             },
         )

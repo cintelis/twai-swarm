@@ -105,6 +105,74 @@ def test_generation_marks_error_on_exception(monkeypatch):
     assert "boom" in end_kwargs["status_message"]
 
 
+def test_tenant_scope_sets_and_restores(monkeypatch):
+    from app import observability
+    assert observability.current_tenant() == "default"
+
+    with observability.tenant_scope("acme"):
+        assert observability.current_tenant() == "acme"
+
+        with observability.tenant_scope("initech"):
+            assert observability.current_tenant() == "initech"
+
+        # Inner scope exited; back to acme
+        assert observability.current_tenant() == "acme"
+
+    # Outer scope exited; back to default
+    assert observability.current_tenant() == "default"
+
+
+@pytest.mark.asyncio
+async def test_generation_picks_up_tenant_from_contextvar(monkeypatch):
+    """When generation() is called WITHOUT explicit tenant_id, it should
+    inherit from the active tenant_scope on the stack."""
+    mock_gen = MagicMock()
+    mock_client = MagicMock()
+    mock_client.generation.return_value = mock_gen
+
+    from app import observability
+    monkeypatch.setattr("app.config.LANGFUSE_HOST", "https://lf.example.com")
+    monkeypatch.setattr("app.config.LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setattr("app.config.LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setattr(observability, "_client", mock_client)
+    monkeypatch.setattr(observability, "_initialised", True)
+
+    with observability.tenant_scope("acme"):
+        with observability.generation(
+            name="test", model="m", provider="p", system="s", user="u",
+        ) as gen:
+            gen.end(output="ok")
+
+    # The metadata passed to client.generation must reflect the tenant_scope
+    call_kwargs = mock_client.generation.call_args.kwargs
+    assert call_kwargs["metadata"]["tenant_id"] == "acme"
+
+
+@pytest.mark.asyncio
+async def test_explicit_tenant_id_overrides_contextvar(monkeypatch):
+    """If a caller explicitly passes tenant_id, it wins over the contextvar."""
+    mock_gen = MagicMock()
+    mock_client = MagicMock()
+    mock_client.generation.return_value = mock_gen
+
+    from app import observability
+    monkeypatch.setattr("app.config.LANGFUSE_HOST", "https://lf.example.com")
+    monkeypatch.setattr("app.config.LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setattr("app.config.LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setattr(observability, "_client", mock_client)
+    monkeypatch.setattr(observability, "_initialised", True)
+
+    with observability.tenant_scope("acme"):
+        with observability.generation(
+            name="test", model="m", provider="p", system="s", user="u",
+            tenant_id="initech",   # explicit override
+        ) as gen:
+            gen.end(output="ok")
+
+    call_kwargs = mock_client.generation.call_args.kwargs
+    assert call_kwargs["metadata"]["tenant_id"] == "initech"
+
+
 def test_sdk_failure_falls_back_to_noop(monkeypatch):
     """If the Langfuse SDK construction fails, we log and continue."""
     from app import observability

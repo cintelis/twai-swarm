@@ -68,6 +68,9 @@ class ProjectInput:
     brief: str
     # If True, skip the human approval gate (useful for unattended runs + tests).
     auto_approve: bool = False
+    # Tenant identity. Defaults to "default" for single-tenant dev; auth
+    # middleware will set the real value from JWT claims when that lands.
+    tenant_id: str = "default"
 
 @dataclass
 class ProjectOutput:
@@ -116,7 +119,7 @@ class ProjectWorkflow:
 
         project_id = await workflow.execute_activity(
             create_project_record,
-            args=[inp.name, inp.brief, wf_id],
+            args=[inp.name, inp.brief, wf_id, inp.tenant_id],
             start_to_close_timeout=timedelta(seconds=10),
         )
 
@@ -134,6 +137,7 @@ class ProjectWorkflow:
                 description=description,
                 parent_task_id=parent,
                 complexity_hint=complexity,
+                tenant_id=inp.tenant_id,
             )
             task_id = await workflow.execute_activity(
                 create_task_record,
@@ -245,6 +249,7 @@ class ProjectWorkflow:
             ),
             parent_task_id=doc_result.task_id,
             complexity_hint=2,
+            tenant_id=inp.tenant_id,
         )
         coder_task_id = await workflow.execute_activity(
             create_task_record,

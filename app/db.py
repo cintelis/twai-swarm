@@ -26,11 +26,19 @@ async def get_pool() -> asyncpg.Pool:
         _pool = await asyncpg.create_pool(config.PG_DSN, min_size=2, max_size=10)
     return _pool
 
-async def create_project(name: str, brief: str, workflow_id: str) -> str:
+async def create_project(
+    name: str,
+    brief: str,
+    workflow_id: str,
+    tenant_id: str = "default",
+) -> str:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO projects (name, brief, workflow_id) VALUES ($1, $2, $3) RETURNING id",
-        name, brief, workflow_id,
+        """
+        INSERT INTO projects (name, brief, workflow_id, tenant_id)
+        VALUES ($1, $2, $3, $4) RETURNING id
+        """,
+        name, brief, workflow_id, tenant_id,
     )
     return str(row["id"])
 
@@ -41,15 +49,17 @@ async def create_task(
     description: str,
     parent_task_id: Optional[str] = None,
     input_data: Optional[dict] = None,
+    tenant_id: str = "default",
 ) -> str:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO tasks (project_id, parent_task_id, role, title, description, input)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tasks (project_id, tenant_id, parent_task_id, role, title, description, input)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
         UUID(project_id),
+        tenant_id,
         UUID(parent_task_id) if parent_task_id else None,
         role, title, description,
         json.dumps(input_data) if input_data else None,
@@ -125,25 +135,32 @@ async def get_ancestor_outputs(task_id: str) -> list[dict]:
     ]
 
 
-async def upsert_task_embedding(task_id: str, content: str, embedding: list[float]) -> None:
+async def upsert_task_embedding(
+    task_id: str,
+    content: str,
+    embedding: list[float],
+    tenant_id: str = "default",
+) -> None:
     """Store the embedding for a completed task. Upsert so re-embeds replace.
 
     `embedding` is a 1536-dim float vector — matches the vector(1536) column.
     `content` is the source text we embedded (kept so we can re-embed without
-    re-deriving the prompt from output JSON).
+    re-deriving the prompt from output JSON). `tenant_id` scopes future
+    cross-project kNN to the right tenant.
     """
     from app.embeddings import vector_literal
     pool = await get_pool()
     await pool.execute(
         """
-        INSERT INTO task_embeddings (task_id, content, embedding)
-        VALUES ($1, $2, $3::vector)
+        INSERT INTO task_embeddings (task_id, tenant_id, content, embedding)
+        VALUES ($1, $2, $3, $4::vector)
         ON CONFLICT (task_id) DO UPDATE
-          SET content = EXCLUDED.content,
+          SET tenant_id = EXCLUDED.tenant_id,
+              content = EXCLUDED.content,
               embedding = EXCLUDED.embedding,
               created_at = now()
         """,
-        UUID(task_id), content, vector_literal(embedding),
+        UUID(task_id), tenant_id, content, vector_literal(embedding),
     )
 
 

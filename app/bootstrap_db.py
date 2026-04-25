@@ -30,18 +30,27 @@ SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- `tenant_id` on every first-class table. Today every row has 'default';
+-- when the auth middleware lands, JWT claims will resolve to real tenant
+-- values. Forward-compat — no migration needed when multi-tenant goes live.
+
 CREATE TABLE IF NOT EXISTS projects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id TEXT NOT NULL DEFAULT 'default',
     name TEXT NOT NULL,
     brief TEXT NOT NULL,
     workflow_id TEXT,
     status TEXT NOT NULL DEFAULT 'running',
     created_at TIMESTAMPTZ DEFAULT now()
 );
+-- Backfill column on existing DBs. Idempotent; no-op when column exists.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
+CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
 
 CREATE TABLE IF NOT EXISTS tasks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
     parent_task_id UUID REFERENCES tasks(id),
     role TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -57,20 +66,23 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
-
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id);
 
 CREATE TABLE IF NOT EXISTS task_embeddings (
     task_id UUID PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
     content TEXT NOT NULL,
     embedding vector(1536),
     created_at TIMESTAMPTZ DEFAULT now()
 );
-
+ALTER TABLE task_embeddings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default';
 CREATE INDEX IF NOT EXISTS idx_task_embeddings_vec ON task_embeddings
     USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_task_embeddings_tenant ON task_embeddings(tenant_id);
 
 -- GitHub App installations. One row per tenant×GitHub-account-they-installed-on.
 -- tenant_id is forward-compat: today everyone is 'default'; greenfield's tenant

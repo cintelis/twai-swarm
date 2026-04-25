@@ -19,6 +19,7 @@ async def _embed_task_output(
     role: str,
     title: str,
     output: dict,
+    tenant_id: str = "default",
 ) -> None:
     """Embed and store a completed task's output for later kNN retrieval.
 
@@ -29,7 +30,7 @@ async def _embed_task_output(
         from app.embeddings import embed_text, task_to_embedding_text
         content = task_to_embedding_text(role, title, output)
         embedding = await embed_text(content)
-        await db.upsert_task_embedding(task_id, content, embedding)
+        await db.upsert_task_embedding(task_id, content, embedding, tenant_id=tenant_id)
     except Exception as e:
         logger.warning(
             "embedding failed for task %s (role=%s): %s; skipping",
@@ -61,6 +62,10 @@ class AgentTaskInput:
     description: str
     parent_task_id: Optional[str] = None
     complexity_hint: int = 1
+    # Tenant identity. Threaded from ProjectInput through the workflow; every
+    # DB write and LLM trace carries it. Defaults to "default" — forward-compat
+    # with Temporal workflow inputs that were serialised before this field existed.
+    tenant_id: str = "default"
 
 @dataclass
 class AgentTaskResult:
@@ -102,6 +107,7 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
             task_description=input.description,
             context=context,
             complexity_hint=input.complexity_hint,
+            tenant_id=input.tenant_id,
         )
     except Exception as e:
         logger.error(
@@ -137,7 +143,7 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
 
     # Embed the task output for downstream kNN retrieval. Best-effort —
     # logged and swallowed on failure so embedding cost doesn't fail the workflow.
-    await _embed_task_output(task_id, input.role, input.title, result["output"])
+    await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
 
     return AgentTaskResult(
         task_id=task_id,
@@ -147,8 +153,13 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
     )
 
 @activity.defn
-async def create_project_record(name: str, brief: str, workflow_id: str) -> str:
-    return await db.create_project(name, brief, workflow_id)
+async def create_project_record(
+    name: str,
+    brief: str,
+    workflow_id: str,
+    tenant_id: str = "default",
+) -> str:
+    return await db.create_project(name, brief, workflow_id, tenant_id=tenant_id)
 
 
 @activity.defn
@@ -189,6 +200,7 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
                 task_description=input.description,
                 context=context,
                 complexity_hint=input.complexity_hint,
+                tenant_id=input.tenant_id,
             )
         else:
             try:
@@ -199,6 +211,7 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
                     se_plan=se_plan,
                     documenter=documenter,
                     heartbeat=activity.heartbeat,
+                    tenant_id=input.tenant_id,
                 )
                 # Repackage into the shape run_agent returns so the DB
                 # write + return dataclass below don't need a branch.
@@ -256,7 +269,7 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
     # Embed the Coder output too — useful as kNN context for future projects'
     # SE/Reviewer/Documenter ("we've coded something like this before").
     # The embedding text strips the files[] array (see task_to_embedding_text).
-    await _embed_task_output(task_id, input.role, input.title, result["output"])
+    await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
 
     return AgentTaskResult(
         task_id=task_id,

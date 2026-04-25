@@ -124,6 +124,10 @@ class CreateProjectReq(BaseModel):
     name: str
     brief: str
     auto_approve: bool = False
+    # Tenant identity. Optional — omitted → "default" (single-tenant dev).
+    # When the auth middleware lands, tenant_id will be resolved from the JWT
+    # and this field becomes a safety check (must match the JWT's claim).
+    tenant_id: str | None = None
 
 class CreateProjectResp(BaseModel):
     workflow_id: str
@@ -134,11 +138,26 @@ class RejectReq(BaseModel):
 @app.post("/projects", response_model=CreateProjectResp, dependencies=[Depends(auth.require_auth)])
 @limiter.limit("10/minute")
 async def create_project(request: Request, req: CreateProjectReq):
+    from app import tenant
+    # Resolve + validate tenant_id. Defaults to "default" for single-tenant
+    # dev; validate to reject bad input early even though we don't have
+    # auth middleware yet.
+    tenant_id = req.tenant_id or tenant.DEFAULT_TENANT_ID
+    try:
+        tenant.validate_tenant_id(tenant_id)
+    except tenant.InvalidTenantIdError as e:
+        raise HTTPException(400, str(e))
+
     client = await temporal()
     workflow_id = f"project-{uuid.uuid4()}"
     await client.start_workflow(
         ProjectWorkflow.run,
-        ProjectInput(name=req.name, brief=req.brief, auto_approve=req.auto_approve),
+        ProjectInput(
+            name=req.name,
+            brief=req.brief,
+            auto_approve=req.auto_approve,
+            tenant_id=tenant_id,
+        ),
         id=workflow_id,
         task_queue="project-workflows",
     )
