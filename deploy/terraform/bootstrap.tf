@@ -1,11 +1,32 @@
 #-----------------------------------------------------------------------------
-# One-shot DB bootstrap.
+# DB bootstrap task definition.
 #
-# Runs the init.sql against RDS from within the VPC using the same image.
-# We override the command to run a short Python script that executes the SQL.
+# Defines the one-shot ECS task that applies the schema (app/bootstrap_db.py).
+# Terraform manages the task DEFINITION only — running it is a manual step
+# triggered by `scripts/bootstrap_db.ps1` (Windows) or via aws ecs run-task
+# directly. We removed the previous null_resource + local-exec pattern
+# because it was Windows-bash-fragile (terraform's local-exec spawns bash
+# without the full Windows PATH, so `aws.exe` wasn't found).
 #
-# Triggered by a null_resource that fires after RDS is up. Re-runs only if
-# you taint it or change the SQL file hash.
+# When to run the bootstrap:
+#   - First-time deploy (creates schema)
+#   - Schema migration in app/bootstrap_db.py SCHEMA_SQL changed
+#   - New tables added (e.g. tenant_id columns, langfuse DB)
+#
+# How to run:
+#   PowerShell:  scripts/bootstrap_db.ps1
+#   Or manually:
+#     $task = aws ecs run-task --region ap-southeast-2 \
+#       --cluster lean-agent-cluster \
+#       --task-definition lean-agent-db-bootstrap \
+#       --launch-type FARGATE \
+#       --network-configuration "awsvpcConfiguration={subnets=[<3 subnet ids>],securityGroups=[sg-0b9bd1a13ffa5e437],assignPublicIp=ENABLED}" \
+#       --query 'tasks[0].taskArn' --output text
+#     aws ecs wait tasks-stopped --region ap-southeast-2 --cluster lean-agent-cluster --tasks $task
+#     aws logs tail /ecs/lean-agent --log-stream-name-prefix bootstrap --since 2m
+#
+# Bootstrap is idempotent: CREATE TABLE IF NOT EXISTS + ALTER TABLE IF
+# NOT EXISTS — safe to re-run.
 #-----------------------------------------------------------------------------
 
 resource "aws_ecs_task_definition" "db_bootstrap" {
@@ -41,58 +62,4 @@ resource "aws_ecs_task_definition" "db_bootstrap" {
       }
     }
   ])
-}
-
-# Trigger: re-run whenever init.sql changes
-resource "null_resource" "db_bootstrap" {
-  triggers = {
-    sql_hash = filemd5("${path.module}/../../db/init.sql")
-    task_def = aws_ecs_task_definition.db_bootstrap.arn
-  }
-
-  # Depends on RDS being healthy + the image being pushed.
-  # If the image doesn't exist yet in ECR, this will fail -- that's expected
-  # on the very first terraform apply. Re-run apply after the first push.
-  depends_on = [
-    aws_db_instance.pg,
-    aws_ecs_cluster.main,
-  ]
-
-  provisioner "local-exec" {
-    # Force bash on Windows (default would be cmd.exe, which can't run this script).
-    # On Linux/macOS bash is already the natural choice. Requires Git Bash on
-    # PATH on Windows — if `bash --version` works in PowerShell, you're set.
-    interpreter = ["bash", "-c"]
-    command     = <<-EOT
-      set -e
-      TASK_ARN=$(aws ecs run-task \
-        --region ${var.aws_region} \
-        --cluster ${aws_ecs_cluster.main.name} \
-        --task-definition ${aws_ecs_task_definition.db_bootstrap.arn} \
-        --launch-type FARGATE \
-        --network-configuration "awsvpcConfiguration={subnets=[${join(",", data.aws_subnets.target.ids)}],securityGroups=[${aws_security_group.tasks.id}],assignPublicIp=ENABLED}" \
-        --query 'tasks[0].taskArn' --output text)
-
-      echo "Bootstrap task: $TASK_ARN"
-
-      aws ecs wait tasks-stopped \
-        --region ${var.aws_region} \
-        --cluster ${aws_ecs_cluster.main.name} \
-        --tasks "$TASK_ARN"
-
-      EXIT_CODE=$(aws ecs describe-tasks \
-        --region ${var.aws_region} \
-        --cluster ${aws_ecs_cluster.main.name} \
-        --tasks "$TASK_ARN" \
-        --query 'tasks[0].containers[0].exitCode' --output text)
-
-      if [ "$EXIT_CODE" != "0" ]; then
-        echo "Bootstrap failed with exit code $EXIT_CODE"
-        echo "Check logs in CloudWatch: /ecs/${local.name_prefix} (bootstrap stream)"
-        exit 1
-      fi
-
-      echo "✅ DB bootstrap complete"
-    EOT
-  }
 }
