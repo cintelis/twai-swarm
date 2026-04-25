@@ -224,3 +224,15 @@ variable "worker_desired_count" {
   type        = number
   default     = 1
 }
+
+# ─── Dev access to internal services ──────────────────────────────────────
+# CIDR blocks allowed direct ingress to internal-only services (today:
+# Neo4j browser 7474 + Bolt 7687). Empty = locked down to VPC + worker SG.
+# For dev, populate with your office/home IP as "1.2.3.4/32" so you can
+# query Neo4j Browser from your laptop. Multiple entries allowed; remove
+# them all before any prod-facing deploy.
+variable "allowed_dev_ips" {
+  description = "CIDRs allowed to reach Neo4j 7474/7687 directly. Empty = no public ingress."
+  type        = list(string)
+  default     = []
+}

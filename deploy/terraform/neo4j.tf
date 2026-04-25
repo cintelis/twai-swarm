@@ -91,13 +91,37 @@ resource "aws_security_group" "neo4j" {
   }
 
   # HTTP browser — Neo4j's web UI. Only the worker can reach it; for human
-  # access use SSM port-forward (see header comment).
+  # access from a laptop, populate var.allowed_dev_ips with your IP/32.
   ingress {
     from_port       = 7474
     to_port         = 7474
     protocol        = "tcp"
     security_groups = [aws_security_group.tasks.id]
     description     = "Neo4j browser UI from worker tasks"
+  }
+
+  # Optional dev ingress — bolt + browser direct from listed IPs.
+  # Conditional on var.allowed_dev_ips being non-empty; default is locked-down.
+  dynamic "ingress" {
+    for_each = length(var.allowed_dev_ips) > 0 ? [1] : []
+    content {
+      from_port   = 7474
+      to_port     = 7474
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_dev_ips
+      description = "Dev access to Neo4j browser"
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = length(var.allowed_dev_ips) > 0 ? [1] : []
+    content {
+      from_port   = 7687
+      to_port     = 7687
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_dev_ips
+      description = "Dev access to Neo4j Bolt"
+    }
   }
 
   egress {
