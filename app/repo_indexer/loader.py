@@ -61,8 +61,30 @@ def ensure_constraints(driver: Driver) -> None:
             session.run(stmt)
 
 
+WRITE_CHUNK_SIZE = 1000
+
+
+def _chunked_write(session, query: str, rows: list, chunk_size: int = WRITE_CHUNK_SIZE) -> None:
+    """Run a parameterised Cypher query in chunks of `chunk_size` rows.
+
+    Single-shot writes of 100K+ rows can blow Bolt's packet size and trip
+    NLB-fronted TLS connections (we saw `An existing connection was forcibly
+    closed` mid-write on the 13K-file OpenClaw scan). Chunking keeps each
+    write under ~1 MB even for the chunky CallEdge payloads.
+    """
+    if not rows:
+        return
+    for i in range(0, len(rows), chunk_size):
+        session.run(query, rows=rows[i:i + chunk_size])
+
+
 def write_batch(driver: Driver, batch: IndexBatch) -> None:
-    """Write one IndexBatch in ~8 round-trips (one per node/edge type)."""
+    """Write one IndexBatch via batched UNWIND-MERGE writes.
+
+    Each node/edge type is one query, called multiple times when the row
+    count exceeds WRITE_CHUNK_SIZE — keeps Bolt round-trips low without
+    overflowing any single packet.
+    """
     repo = batch.repo
 
     with driver.session() as session:
@@ -79,146 +101,134 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             tenant_id=repo.tenant_id,
         )
 
-        if batch.files:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (r:Repo {name: row.repo})
-                MERGE (f:File {repo: row.repo, path: row.path})
-                SET f.language = row.language, f.sha = row.sha
-                MERGE (r)-[:CONTAINS]->(f)
-                """,
-                rows=[asdict(f) for f in batch.files],
-            )
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (r:Repo {name: row.repo})
+            MERGE (f:File {repo: row.repo, path: row.path})
+            SET f.language = row.language, f.sha = row.sha
+            MERGE (r)-[:CONTAINS]->(f)
+            """,
+            [asdict(f) for f in batch.files],
+        )
 
-        if batch.modules:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (f:File {repo: row.repo, path: row.file_path})
-                MERGE (m:Module {repo: row.repo, qualified_name: row.qualified_name})
-                MERGE (f)-[:DEFINES]->(m)
-                """,
-                rows=[asdict(m) for m in batch.modules],
-            )
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (f:File {repo: row.repo, path: row.file_path})
+            MERGE (m:Module {repo: row.repo, qualified_name: row.qualified_name})
+            MERGE (f)-[:DEFINES]->(m)
+            """,
+            [asdict(m) for m in batch.modules],
+        )
 
-        if batch.classes:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MERGE (c:Class {repo: row.repo, qualified_name: row.qualified_name})
-                SET c.name = row.name,
-                    c.file_path = row.file_path,
-                    c.line_start = row.line_start,
-                    c.line_end = row.line_end,
-                    c.docstring = row.docstring
-                WITH c, row
-                // Link class → defining module (same file may host multiple
-                // classes; this is the canonical containing module).
-                OPTIONAL MATCH (m:Module {repo: row.repo})<-[:DEFINES]-(:File {repo: row.repo, path: row.file_path})
-                FOREACH (_ IN CASE WHEN m IS NULL THEN [] ELSE [1] END |
-                  MERGE (m)-[:DEFINES]->(c)
-                )
-                """,
-                rows=[asdict(c) for c in batch.classes],
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MERGE (c:Class {repo: row.repo, qualified_name: row.qualified_name})
+            SET c.name = row.name,
+                c.file_path = row.file_path,
+                c.line_start = row.line_start,
+                c.line_end = row.line_end,
+                c.docstring = row.docstring
+            WITH c, row
+            OPTIONAL MATCH (m:Module {repo: row.repo})<-[:DEFINES]-(:File {repo: row.repo, path: row.file_path})
+            FOREACH (_ IN CASE WHEN m IS NULL THEN [] ELSE [1] END |
+              MERGE (m)-[:DEFINES]->(c)
             )
+            """,
+            [asdict(c) for c in batch.classes],
+        )
 
-        if batch.functions:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MERGE (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
-                SET fn.name = row.name,
-                    fn.file_path = row.file_path,
-                    fn.line_start = row.line_start,
-                    fn.line_end = row.line_end,
-                    fn.is_async = row.is_async,
-                    fn.is_method = row.is_method,
-                    fn.params = row.params,
-                    fn.docstring = row.docstring
-                WITH fn, row
-                // Link to parent: methods → enclosing Class, top-level → Module.
-                FOREACH (_ IN CASE WHEN row.parent_class_qn = '' THEN [] ELSE [1] END |
-                  MERGE (parent:Class {repo: row.repo, qualified_name: row.parent_class_qn})
-                  MERGE (parent)-[:DEFINES]->(fn)
-                )
-                """,
-                rows=[{**asdict(fn), "params": list(fn.params)} for fn in batch.functions],
+        # Functions get two writes (define + module link). Pre-build the
+        # asdict rows ONCE so we don't burn CPU on the rebuild for chunk #2.
+        function_rows = [{**asdict(fn), "params": list(fn.params)} for fn in batch.functions]
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MERGE (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
+            SET fn.name = row.name,
+                fn.file_path = row.file_path,
+                fn.line_start = row.line_start,
+                fn.line_end = row.line_end,
+                fn.is_async = row.is_async,
+                fn.is_method = row.is_method,
+                fn.params = row.params,
+                fn.docstring = row.docstring
+            WITH fn, row
+            FOREACH (_ IN CASE WHEN row.parent_class_qn = '' THEN [] ELSE [1] END |
+              MERGE (parent:Class {repo: row.repo, qualified_name: row.parent_class_qn})
+              MERGE (parent)-[:DEFINES]->(fn)
             )
-            # Link top-level functions to their module separately so the
-            # method case doesn't have to thread two MERGE branches.
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
-                MATCH (f:File {repo: row.repo, path: row.file_path})-[:DEFINES]->(m:Module)
-                WHERE row.parent_class_qn = ''
-                MERGE (m)-[:DEFINES]->(fn)
-                """,
-                rows=[{**asdict(fn), "params": list(fn.params)} for fn in batch.functions],
-            )
+            """,
+            function_rows,
+        )
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
+            MATCH (f:File {repo: row.repo, path: row.file_path})-[:DEFINES]->(m:Module)
+            WHERE row.parent_class_qn = ''
+            MERGE (m)-[:DEFINES]->(fn)
+            """,
+            function_rows,
+        )
 
-        if batch.symbols:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MERGE (s:Symbol {repo: row.repo, qualified_name: row.qualified_name})
-                SET s.name = row.name
-                """,
-                rows=[asdict(s) for s in batch.symbols],
-            )
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MERGE (s:Symbol {repo: row.repo, qualified_name: row.qualified_name})
+            SET s.name = row.name
+            """,
+            [asdict(s) for s in batch.symbols],
+        )
 
-        if batch.inherits:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (child:Class {repo: row.repo, qualified_name: row.child_qn})
-                // Parent could be a resolved Class OR an external Symbol.
-                OPTIONAL MATCH (parent_class:Class {repo: row.repo, qualified_name: row.parent_qn})
-                OPTIONAL MATCH (parent_sym:Symbol {repo: row.repo, qualified_name: row.parent_qn})
-                FOREACH (p IN CASE WHEN parent_class IS NOT NULL THEN [parent_class]
-                                   WHEN parent_sym   IS NOT NULL THEN [parent_sym]
-                                   ELSE [] END |
-                  MERGE (child)-[:INHERITS_FROM]->(p)
-                )
-                """,
-                rows=[asdict(e) for e in batch.inherits],
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (child:Class {repo: row.repo, qualified_name: row.child_qn})
+            OPTIONAL MATCH (parent_class:Class {repo: row.repo, qualified_name: row.parent_qn})
+            OPTIONAL MATCH (parent_sym:Symbol {repo: row.repo, qualified_name: row.parent_qn})
+            FOREACH (p IN CASE WHEN parent_class IS NOT NULL THEN [parent_class]
+                               WHEN parent_sym   IS NOT NULL THEN [parent_sym]
+                               ELSE [] END |
+              MERGE (child)-[:INHERITS_FROM]->(p)
             )
+            """,
+            [asdict(e) for e in batch.inherits],
+        )
 
-        if batch.calls:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (caller:Function {repo: row.repo, qualified_name: row.caller_qn})
-                OPTIONAL MATCH (callee_fn:Function {repo: row.repo, qualified_name: row.callee_qn})
-                OPTIONAL MATCH (callee_sym:Symbol {repo: row.repo, qualified_name: row.callee_qn})
-                FOREACH (c IN CASE WHEN callee_fn  IS NOT NULL THEN [callee_fn]
-                                   WHEN callee_sym IS NOT NULL THEN [callee_sym]
-                                   ELSE [] END |
-                  MERGE (caller)-[r:CALLS {line: row.line}]->(c)
-                )
-                """,
-                rows=[asdict(e) for e in batch.calls],
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (caller:Function {repo: row.repo, qualified_name: row.caller_qn})
+            OPTIONAL MATCH (callee_fn:Function {repo: row.repo, qualified_name: row.callee_qn})
+            OPTIONAL MATCH (callee_sym:Symbol {repo: row.repo, qualified_name: row.callee_qn})
+            FOREACH (c IN CASE WHEN callee_fn  IS NOT NULL THEN [callee_fn]
+                               WHEN callee_sym IS NOT NULL THEN [callee_sym]
+                               ELSE [] END |
+              MERGE (caller)-[r:CALLS {line: row.line}]->(c)
             )
+            """,
+            [asdict(e) for e in batch.calls],
+        )
 
-        if batch.imports:
-            session.run(
-                """
-                UNWIND $rows AS row
-                MATCH (f:File {repo: row.repo, path: row.file_path})
-                // Import target: own Module if known, else Symbol.
-                OPTIONAL MATCH (target_mod:Module {repo: row.repo, qualified_name: row.target_qn})
-                FOREACH (_ IN CASE WHEN target_mod IS NOT NULL THEN [1] ELSE [] END |
-                  MERGE (f)-[:IMPORTS]->(target_mod)
-                )
-                FOREACH (_ IN CASE WHEN target_mod IS NULL THEN [1] ELSE [] END |
-                  MERGE (s:Symbol {repo: row.repo, qualified_name: row.target_qn})
-                  ON CREATE SET s.name = split(row.target_qn, '.')[-1]
-                  MERGE (f)-[:IMPORTS]->(s)
-                )
-                """,
-                rows=[asdict(e) for e in batch.imports],
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (f:File {repo: row.repo, path: row.file_path})
+            OPTIONAL MATCH (target_mod:Module {repo: row.repo, qualified_name: row.target_qn})
+            FOREACH (_ IN CASE WHEN target_mod IS NOT NULL THEN [1] ELSE [] END |
+              MERGE (f)-[:IMPORTS]->(target_mod)
             )
+            FOREACH (_ IN CASE WHEN target_mod IS NULL THEN [1] ELSE [] END |
+              MERGE (s:Symbol {repo: row.repo, qualified_name: row.target_qn})
+              ON CREATE SET s.name = split(row.target_qn, '.')[-1]
+              MERGE (f)-[:IMPORTS]->(s)
+            )
+            """,
+            [asdict(e) for e in batch.imports],
+        )
 
 
 def prune_stale(driver: Driver, repo_name: str, current_commit_sha: str) -> int:

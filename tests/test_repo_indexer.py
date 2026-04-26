@@ -121,6 +121,32 @@ def test_walk_paths_respects_gitignore_and_skip_dirs(tmp_path):
     assert rel_paths == ["real.py"]
 
 
+def test_chunked_write_splits_rows():
+    """_chunked_write breaks a big row list into multiple session.run calls
+    so a single Cypher payload never exceeds the chunk size."""
+    from app.repo_indexer.loader import _chunked_write, WRITE_CHUNK_SIZE
+
+    captured: list[int] = []
+
+    class FakeSession:
+        def run(self, query: str, **kwargs):
+            captured.append(len(kwargs["rows"]))
+
+    rows = [{"i": i} for i in range(2500)]
+    _chunked_write(FakeSession(), "UNWIND $rows AS r RETURN r", rows, chunk_size=1000)
+    assert captured == [1000, 1000, 500]
+    assert WRITE_CHUNK_SIZE == 1000  # invariant we rely on for production scans
+
+
+def test_chunked_write_skips_empty_list():
+    from app.repo_indexer.loader import _chunked_write
+
+    class FakeSession:
+        def run(self, *a, **kw):
+            raise AssertionError("should not call session.run on empty rows")
+    _chunked_write(FakeSession(), "UNWIND $rows AS r RETURN r", [])
+
+
 def test_walker_reads_each_file_exactly_once(tmp_path, monkeypatch):
     """10g invariant: walk_repo opens each source file ONCE (not twice
     like the old version that did a streaming SHA on a second open)."""
