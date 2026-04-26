@@ -38,13 +38,31 @@ async def _call(tool, **kwargs):
     return await fn(**kwargs)
 
 
-def test_build_tools_returns_five(tmp_path):
+def test_build_tools_returns_five_without_neo4j(tmp_path):
+    """Default build_tools call (no Neo4j driver) returns the 5 sandbox tools."""
     sb = _sandbox(tmp_path)
     tools, stats = build_tools(sb)
     assert len(tools) == 5
     for key in ("list_files_calls", "read_file_calls", "write_file_calls",
                 "run_verify_calls", "bash_exec_calls"):
         assert stats[key] == 0
+
+
+def test_build_tools_adds_three_graph_tools_with_neo4j(tmp_path):
+    """When neo4j_driver + repo_name are passed, three repo_* tools join."""
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="repo")
+    assert len(tools) == 8
+    for key in ("repo_search_calls", "repo_find_definition_calls", "repo_find_callers_calls"):
+        assert stats[key] == 0
+
+
+def test_build_tools_requires_repo_name_with_driver(tmp_path):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    with pytest.raises(ValueError, match="repo_name is required"):
+        build_tools(sb, neo4j_driver=fake_driver)
 
 
 @pytest.mark.asyncio
@@ -214,3 +232,120 @@ def _unpack(built):
     tools, stats = built
     assert len(tools) == 5
     return tuple(tools), stats
+
+
+# ─── Graph tools (Sprint 10c) ───────────────────────────────────────────────
+# We pass a sentinel `fake_driver` and monkeypatch app.repo_query to return
+# canned responses. That keeps these tests fast (no Neo4j needed) while
+# proving the tool wiring + JSON shape.
+
+@pytest.mark.asyncio
+async def test_repo_search_returns_json(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    captured = {}
+    def fake_find_symbol(driver, repo, name, limit):
+        captured["args"] = (driver, repo, name, limit)
+        return [
+            repo_query.SymbolMatch(qualified_name="app.foo.bar", kind="function",
+                                   file_path="app/foo.py", line_start=10),
+        ]
+    monkeypatch.setattr(repo_query, "find_symbol", fake_find_symbol)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    repo_search = tools[5]   # 5 sandbox tools first, then 3 graph tools
+
+    out = await _call(repo_search, query="bar", limit=10)
+    parsed = json.loads(out)
+    assert len(parsed) == 1
+    assert parsed[0]["qualified_name"] == "app.foo.bar"
+    assert parsed[0]["kind"] == "function"
+    assert captured["args"] == (fake_driver, "r", "bar", 10)
+    assert stats["repo_search_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repo_search_clamps_limit(tmp_path, monkeypatch):
+    """limit is clamped to [1, 100] — caller can't request unbounded results."""
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    seen_limit = {}
+    def fake_find_symbol(driver, repo, name, limit):
+        seen_limit["v"] = limit
+        return []
+    monkeypatch.setattr(repo_query, "find_symbol", fake_find_symbol)
+
+    tools, _ = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    repo_search = tools[5]
+    await _call(repo_search, query="x", limit=10000)
+    assert seen_limit["v"] == 100
+
+
+@pytest.mark.asyncio
+async def test_repo_find_definition_returns_json(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    def fake_find_definition(driver, repo, qn):
+        return repo_query.Definition(
+            qualified_name=qn, kind="function",
+            file_path="app/foo.py", line_start=10, line_end=20,
+            docstring="hello",
+        )
+    monkeypatch.setattr(repo_query, "find_definition", fake_find_definition)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    repo_find_definition = tools[6]
+
+    out = await _call(repo_find_definition, qualified_name="app.foo.bar")
+    parsed = json.loads(out)
+    assert parsed["qualified_name"] == "app.foo.bar"
+    assert parsed["kind"] == "function"
+    assert parsed["line_start"] == 10
+    assert parsed["docstring"] == "hello"
+    assert stats["repo_find_definition_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repo_find_definition_returns_null_when_missing(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+    monkeypatch.setattr(repo_query, "find_definition", lambda d, r, qn: None)
+
+    tools, _ = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    repo_find_definition = tools[6]
+
+    out = await _call(repo_find_definition, qualified_name="nope")
+    assert out == "null"
+
+
+@pytest.mark.asyncio
+async def test_repo_find_callers_returns_json(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    def fake_find_callers(driver, repo, qn):
+        return [
+            repo_query.CallSite(caller_qn="app.x.use_it", callee_qn=qn,
+                                file_path="app/x.py", line=42),
+            repo_query.CallSite(caller_qn="app.y.also", callee_qn=qn,
+                                file_path="app/y.py", line=10),
+        ]
+    monkeypatch.setattr(repo_query, "find_callers", fake_find_callers)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    repo_find_callers = tools[7]
+
+    out = await _call(repo_find_callers, qualified_name="app.foo.bar")
+    parsed = json.loads(out)
+    assert len(parsed) == 2
+    assert parsed[0]["caller_qn"] == "app.x.use_it"
+    assert parsed[0]["line"] == 42
+    assert stats["repo_find_callers_calls"] == 1

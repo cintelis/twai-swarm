@@ -5,16 +5,28 @@ All tools are thin wrappers over `Sandbox`. They return **strings** because
 the Anthropic tool-use API serialises tool_result content as text; any
 structured shape gets JSON-encoded into a string.
 
-Factory pattern: `build_tools(sandbox)` returns `@beta_async_tool` instances
-that close over `sandbox`. We need the factory because the tool runner's
-decorator introspects the function signature to build a schema — so the
-sandbox can't be a parameter, it has to be captured.
+Factory pattern: `build_tools(sandbox, ...)` returns `@beta_async_tool`
+instances that close over `sandbox` (and optionally a Neo4j driver +
+repo_name when running against a pre-indexed existing repo). We need the
+factory because the tool runner's decorator introspects the function
+signature to build a schema — so the sandbox can't be a parameter, it
+has to be captured.
+
+Tool surface:
+  - list_files / read_file / write_file / run_verify / bash_exec
+        Always available. The "edit + verify" loop.
+  - repo_search / repo_find_definition / repo_find_callers
+        Only added when the caller passes a Neo4j driver + repo_name —
+        i.e. the Coder is working on an *existing* repo that's already
+        been indexed by app.repo_indexer. These let the model navigate
+        the call graph (Sprint 10c) instead of cold-reading every file.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import subprocess
+from typing import Any
 
 from anthropic import beta_async_tool
 
@@ -41,9 +53,24 @@ def _tail(text: str, limit: int = VERIFY_LOG_TAIL_BYTES) -> str:
     )
 
 
-def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
+def build_tools(
+    sandbox: Sandbox,
+    neo4j_driver: Any = None,
+    repo_name: str | None = None,
+) -> tuple[list, dict]:
     """Return (tools_list, stats_dict). The stats dict is mutated in place
-    by the tools as they're called, so the caller can report usage."""
+    by the tools as they're called, so the caller can report usage.
+
+    Args:
+        sandbox: workspace dir + safe FS / bash primitives.
+        neo4j_driver: optional Neo4j driver for graph queries. Pass when
+            the Coder is working on a pre-indexed repo.
+        repo_name: identifies which repo's nodes to query in Neo4j (the
+            same `--name` you passed to `python -m app.repo_indexer scan`).
+            Required when `neo4j_driver` is set.
+    """
+    if neo4j_driver is not None and not repo_name:
+        raise ValueError("repo_name is required when neo4j_driver is provided")
 
     stats = {
         "list_files_calls": 0,
@@ -51,6 +78,9 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
         "write_file_calls": 0,
         "run_verify_calls": 0,
         "bash_exec_calls": 0,
+        "repo_search_calls": 0,
+        "repo_find_definition_calls": 0,
+        "repo_find_callers_calls": 0,
         "bytes_written": 0,
         "last_verify_exit": None,
         "last_verify_stdout": "",
@@ -217,4 +247,103 @@ def build_tools(sandbox: Sandbox) -> tuple[list, dict]:
             "stderr": stderr,
         })
 
-    return [list_files, read_file, write_file, run_verify, bash_exec], stats
+    tools = [list_files, read_file, write_file, run_verify, bash_exec]
+
+    # ─── Graph tools (only when working on an indexed existing repo) ────
+    if neo4j_driver is not None:
+        # Imported lazily so test paths that don't touch graph tools don't
+        # need the neo4j client surface to be importable.
+        from app import repo_query
+
+        @beta_async_tool
+        async def repo_search(query: str, limit: int = 25) -> str:
+            """Find Functions / Classes / Modules in this repo by name (fuzzy).
+
+            Use this as the entry point when you know roughly what you're
+            looking for but not the qualified name. Match is case-insensitive
+            substring against the bare name (e.g. `parse_args`, `Sandbox`).
+
+            Args:
+                query: substring to look for. Short, specific names work best;
+                    very common words ("get", "data") return many matches.
+                limit: max results to return (1-100, default 25).
+
+            Returns JSON: [{qualified_name, kind, file_path, line_start}, ...].
+            Pass the qualified_name back into repo_find_definition or
+            repo_find_callers to drill in.
+            """
+            stats["repo_search_calls"] += 1
+            limit = max(1, min(100, int(limit)))
+            results = await asyncio.to_thread(
+                repo_query.find_symbol, neo4j_driver, repo_name, query, limit
+            )
+            return json.dumps([
+                {
+                    "qualified_name": r.qualified_name,
+                    "kind": r.kind,
+                    "file_path": r.file_path,
+                    "line_start": r.line_start,
+                }
+                for r in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_definition(qualified_name: str) -> str:
+            """Look up where a Function or Class is defined in this repo.
+
+            Args:
+                qualified_name: dotted path to the symbol (e.g.
+                    "app.agents.coder_sandbox.Sandbox.run_bash"). Get this
+                    from repo_search when you don't already know it.
+
+            Returns JSON: {qualified_name, kind, file_path, line_start,
+            line_end, docstring} — or null if the symbol isn't in the graph
+            (could be external / from a third-party library).
+            """
+            stats["repo_find_definition_calls"] += 1
+            d = await asyncio.to_thread(
+                repo_query.find_definition, neo4j_driver, repo_name, qualified_name
+            )
+            if d is None:
+                return "null"
+            return json.dumps({
+                "qualified_name": d.qualified_name,
+                "kind": d.kind,
+                "file_path": d.file_path,
+                "line_start": d.line_start,
+                "line_end": d.line_end,
+                "docstring": d.docstring,
+            })
+
+        @beta_async_tool
+        async def repo_find_callers(qualified_name: str) -> str:
+            """List every function in this repo that calls `qualified_name`.
+
+            Critical before any refactor: tells you the blast radius. If the
+            list is empty, the function is unused (or only called externally
+            / via dynamic dispatch we couldn't resolve). If it's long, the
+            change is high-risk and likely needs broader updates.
+
+            Args:
+                qualified_name: dotted path to the callee. Same format as
+                    repo_find_definition.
+
+            Returns JSON: [{caller_qn, file_path, line}, ...] where `line`
+            is the line number of the call site inside the caller's file.
+            """
+            stats["repo_find_callers_calls"] += 1
+            sites = await asyncio.to_thread(
+                repo_query.find_callers, neo4j_driver, repo_name, qualified_name
+            )
+            return json.dumps([
+                {
+                    "caller_qn": s.caller_qn,
+                    "file_path": s.file_path,
+                    "line": s.line,
+                }
+                for s in sites
+            ])
+
+        tools.extend([repo_search, repo_find_definition, repo_find_callers])
+
+    return tools, stats
