@@ -41,4 +41,9 @@ opentelemetry-instrumentation-httpx>=0.48b0,<1.0
 # Rust toolchain in the worker image. Add tree-sitter-typescript in 10b.
 tree-sitter>=0.23,<0.26
 tree-sitter-python>=0.23,<0.26
+# Sprint 10d — TypeScript / TSX / JavaScript / JSX scanner support.
+# Same package ships both `language_typescript()` (for .ts / .js) and
+# `language_tsx()` (for .tsx / .jsx — needed because regular TS grammar
+# parse-errors on JSX literals).
+tree-sitter-typescript>=0.23,<0.26
 neo4j>=5.25,<7.0

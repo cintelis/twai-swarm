@@ -26,9 +26,20 @@ def _parser_for_python():
     only touch actions / walker)."""
     import tree_sitter_python as tspython
     from tree_sitter import Language, Parser
-    py_language = Language(tspython.language())
-    parser = Parser(py_language)
-    return parser
+    return Parser(Language(tspython.language()))
+
+
+def _parsers_for_typescript():
+    """Build separate parsers for .ts/.js (typescript grammar) and .tsx/.jsx
+    (TSX grammar). They share most node types but TSX is needed for files
+    using JSX syntax — using the wrong grammar produces parse errors on
+    `<Foo />` literals."""
+    import tree_sitter_typescript as tsts
+    from tree_sitter import Language, Parser
+    return {
+        "typescript": Parser(Language(tsts.language_typescript())),
+        "tsx":        Parser(Language(tsts.language_tsx())),
+    }
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -46,20 +57,42 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
 
     print(f"[indexer] scanning {repo_root}  ->  Neo4j repo={repo_name!r}")
-    parser = _parser_for_python()
 
-    # Lazy-import the extractor too — keeps the CLI startup fast for
-    # `--help` / arg-validation paths.
+    # Lazy-import extractors — keeps `--help` fast and means tests that
+    # only touch actions/walker don't drag in tree-sitter at import time.
     from .extractor_python import extract_python_file
+    from .extractor_typescript import extract_typescript_file
+
+    py_parser = _parser_for_python()
+    ts_parsers = _parsers_for_typescript()
+
+    languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
+
+    # Pre-walk to build the file set — the TS extractor uses it to resolve
+    # relative imports (`./bar` -> `app/foo/bar.ts`). Cheap: just paths,
+    # not file contents.
+    repo_files: set[str] = set()
+    if any(lang in languages for lang in ("typescript", "javascript")):
+        for rel_path, _src, _lang, _sha in walk_repo(repo_root, languages=languages):
+            repo_files.add(rel_path)
 
     aggregate = IndexBatch(repo=repo)
     start = time.monotonic()
     file_count = 0
-    for rel_path, source, language, sha in walk_repo(repo_root, languages=("python",)):
-        if language != "python":
-            continue
+    for rel_path, source, language, sha in walk_repo(repo_root, languages=languages):
         try:
-            fragment = extract_python_file(repo, rel_path, source, sha, parser)
+            if language == "python":
+                fragment = extract_python_file(repo, rel_path, source, sha, py_parser)
+            elif language in ("typescript", "javascript"):
+                # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
+                use_tsx = rel_path.endswith((".tsx", ".jsx"))
+                parser = ts_parsers["tsx"] if use_tsx else ts_parsers["typescript"]
+                fragment = extract_typescript_file(
+                    repo, rel_path, source, sha, parser,
+                    repo_files=repo_files, language=language,
+                )
+            else:
+                continue
         except Exception as e:
             # Don't let one weird file kill the whole scan — log and continue.
             logger.warning("extractor failed on %s: %s", rel_path, e)
@@ -114,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--commit-sha", default="", help="Git commit SHA being scanned")
     scan.add_argument("--tenant-id", default="default", help="Tenant scope (multi-tenant forward-compat)")
     scan.add_argument("--dry-run", action="store_true", help="Parse + report counts without writing to Neo4j")
+    scan.add_argument(
+        "--languages", nargs="+", default=None,
+        choices=["python", "typescript", "javascript"],
+        help="Languages to extract. Default: all supported.",
+    )
     scan.set_defaults(func=cmd_scan)
 
     args = p.parse_args(argv)

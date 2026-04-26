@@ -29,9 +29,15 @@ SKIP_DIRS = frozenset({
     "egg-info",
 })
 
-# Extension → language mapping. Sprint 10b adds .ts / .tsx / .js / .jsx.
+# Extension → language mapping. Sprint 10d added the TS family.
 EXT_LANGUAGE: dict[str, Language] = {
-    ".py": "python",
+    ".py":  "python",
+    ".ts":  "typescript",
+    ".tsx": "typescript",   # tree-sitter-typescript provides a separate TSX
+                            # grammar, but the IndexBatch shape is identical
+                            # to .ts — extractor picks the right parser.
+    ".js":  "javascript",
+    ".jsx": "javascript",
 }
 
 
@@ -82,7 +88,7 @@ def _file_sha(path: Path) -> str:
 
 def walk_repo(
     repo_root: Path,
-    languages: tuple[Language, ...] = ("python",),
+    languages: tuple[Language, ...] = ("python", "typescript", "javascript"),
 ) -> Iterator[tuple[str, bytes, Language, str]]:
     """Yield (rel_path, source_bytes, language, sha) for every parseable file.
 
