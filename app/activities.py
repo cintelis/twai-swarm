@@ -328,3 +328,177 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
         model=result["model"],
         tier=result["model_key"],
     )
+
+
+
+# ─── Sprint 10e: RepoTaskWorkflow activities ─────────────────────────────────
+# Three activities glued together by app.workflows.repo_task.RepoTaskWorkflow:
+#   clone_repo_activity       — git clone --depth 1 to /tmp/repo-tasks/<wf-id>
+#   index_repo_activity       — runs the repo_indexer over the cloned tree
+#   run_repo_coder_activity   — agentic Coder loop with Sprint 10c graph tools
+#
+# Each activity is a single Temporal-friendly entry point: input is a small
+# typed payload (or primitives), output is JSON-serialisable.
+
+@activity.defn
+async def clone_repo_activity(
+    repo_url: str,
+    branch: str,
+    workflow_id: str,
+) -> dict:
+    """Shallow-clone `repo_url` at `branch` into /tmp/repo-tasks/<workflow_id>.
+
+    Returns {"path": "<absolute path>", "commit_sha": "<40-char>"}.
+
+    v1: HTTPS-only, no auth (public repos OR url with embedded token).
+    Sprint 10f layers GitHub App token injection for private repos.
+    """
+    import shutil
+    from pathlib import Path
+
+    safe_id = "".join(c for c in workflow_id if c.isalnum() or c in ("-", "_"))
+    if not safe_id:
+        raise ValueError(f"workflow_id {workflow_id!r} produced empty safe path")
+    dest = Path("/tmp/repo-tasks") / safe_id
+    if dest.exists():
+        # Activity retry — start fresh. Some platforms refuse `git clone`
+        # into an already-existing dir even when it's empty, so we let
+        # git create dest itself.
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    activity.heartbeat("cloning")
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", "--depth", "1", "--branch", branch, repo_url, str(dest),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git clone failed (rc={proc.returncode}): {stderr.decode('utf-8', 'replace')[:500]}"
+        )
+
+    sha_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(dest), "rev-parse", "HEAD",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    sha_out, _ = await sha_proc.communicate()
+    commit_sha = sha_out.decode("utf-8").strip()
+    if not commit_sha:
+        raise RuntimeError("git rev-parse HEAD returned empty")
+
+    return {"path": str(dest), "commit_sha": commit_sha}
+
+
+@activity.defn
+async def index_repo_activity(
+    repo_path: str,
+    repo_name: str,
+    commit_sha: str,
+    tenant_id: str = "default",
+) -> dict:
+    """Run the repo indexer over `repo_path` and write to Neo4j.
+
+    Returns the IndexBatch counts dict so the workflow output can include
+    "we indexed X files / Y functions before the Coder ran."
+    """
+    from pathlib import Path
+    from app.repo_indexer.actions import IndexBatch, RepoNode
+    from app.repo_indexer.loader import (
+        driver_from_env, ensure_constraints, prune_stale, write_batch,
+    )
+    from app.repo_indexer.resolver import resolve_batch
+    from app.repo_indexer.walker import walk_repo
+    from app.repo_indexer.extractor_python import extract_python_file
+    from app.repo_indexer.extractor_typescript import extract_typescript_file
+    import tree_sitter_python as tspython
+    import tree_sitter_typescript as tsts
+    from tree_sitter import Language, Parser
+
+    repo_root = Path(repo_path).resolve()
+    if not repo_root.is_dir():
+        raise FileNotFoundError(f"repo_path {repo_root} is not a directory")
+
+    repo = RepoNode(name=repo_name, url="", commit_sha=commit_sha, tenant_id=tenant_id)
+    py_parser = Parser(Language(tspython.language()))
+    ts_parsers = {
+        "typescript": Parser(Language(tsts.language_typescript())),
+        "tsx":        Parser(Language(tsts.language_tsx())),
+    }
+
+    activity.heartbeat("indexing — pre-walking file set")
+    repo_files: set[str] = set()
+    for rel_path, _src, _lang, _sha in walk_repo(repo_root):
+        repo_files.add(rel_path)
+
+    aggregate = IndexBatch(repo=repo)
+    file_count = 0
+    for rel_path, source, language, sha in walk_repo(repo_root):
+        try:
+            if language == "python":
+                fragment = extract_python_file(repo, rel_path, source, sha, py_parser)
+            elif language in ("typescript", "javascript"):
+                use_tsx = rel_path.endswith((".tsx", ".jsx"))
+                parser = ts_parsers["tsx"] if use_tsx else ts_parsers["typescript"]
+                fragment = extract_typescript_file(
+                    repo, rel_path, source, sha, parser,
+                    repo_files=repo_files, language=language,
+                )
+            else:
+                continue
+        except Exception as e:
+            logger.warning("index_repo_activity: extractor failed on %s: %s", rel_path, e)
+            continue
+        aggregate.extend(fragment)
+        file_count += 1
+        if file_count % 50 == 0:
+            activity.heartbeat(f"indexed {file_count} files")
+
+    resolve_batch(aggregate)
+
+    activity.heartbeat("writing to Neo4j")
+    with driver_from_env() as driver:
+        ensure_constraints(driver)
+        prune_stale(driver, repo_name, commit_sha)
+        write_batch(driver, aggregate)
+
+    return {"file_count": file_count, **aggregate.counts()}
+
+
+@activity.defn
+async def run_repo_coder_activity(
+    repo_path: str,
+    repo_name: str,
+    brief: str,
+    tenant_id: str,
+    workflow_id: str,
+) -> dict:
+    """Run the agentic Coder against the cloned + indexed repo.
+
+    Opens its own Neo4j driver — workflow-side I/O is forbidden by
+    Temporal, so the driver lifecycle is tied to this activity.
+    """
+    from pathlib import Path
+    from app.agents.coder_repo import run_agentic_repo_coder
+    from app.repo_indexer.loader import driver_from_env
+
+    activity.heartbeat("repo coder starting")
+    hb_task = asyncio.create_task(_keep_alive(message="repo coder running"))
+    try:
+        with driver_from_env() as driver:
+            result = await run_agentic_repo_coder(
+                workflow_id=workflow_id,
+                repo_root=Path(repo_path),
+                repo_name=repo_name,
+                brief=brief,
+                neo4j_driver=driver,
+                heartbeat=activity.heartbeat,
+                tenant_id=tenant_id,
+            )
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+    return result

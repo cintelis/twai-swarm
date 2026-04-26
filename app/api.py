@@ -26,7 +26,7 @@ from slowapi.util import get_remote_address
 from temporalio.client import Client
 
 from app import auth, config, db, telemetry
-from app.workflows import ProjectWorkflow, ProjectInput
+from app.workflows import ProjectWorkflow, ProjectInput, RepoTaskWorkflow, RepoTaskInput
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -167,6 +167,54 @@ async def create_project(request: Request, req: CreateProjectReq):
         task_queue="project-workflows",
     )
     return CreateProjectResp(workflow_id=workflow_id)
+
+
+# ─── Sprint 10e — RepoTaskWorkflow (work on existing code) ──────────────────
+
+class CreateRepoTaskReq(BaseModel):
+    repo_url: str            # public https git URL (Sprint 10f adds GitHub App auth)
+    branch: str = "main"
+    brief: str
+    repo_name: str | None = None      # default: derive from URL
+    tenant_id: str | None = None
+
+
+class CreateRepoTaskResp(BaseModel):
+    workflow_id: str
+
+
+@app.post("/repo-tasks", response_model=CreateRepoTaskResp, dependencies=[Depends(auth.require_auth)])
+@limiter.limit("10/minute")
+async def create_repo_task(request: Request, req: CreateRepoTaskReq):
+    """Kick off a RepoTaskWorkflow: clone -> index -> graph-aware Coder.
+
+    Returns the workflow_id so the caller can poll
+    `GET /repo-tasks/{workflow_id}` (added in 10f) for status + diff.
+    For now use the existing Temporal handle pattern to await completion.
+    """
+    from app import tenant
+    tenant_id = req.tenant_id or tenant.DEFAULT_TENANT_ID
+    try:
+        tenant.validate_tenant_id(tenant_id)
+    except tenant.InvalidTenantIdError as e:
+        raise HTTPException(400, str(e))
+
+    client = await temporal()
+    workflow_id = f"repo-task-{uuid.uuid4()}"
+    await client.start_workflow(
+        RepoTaskWorkflow.run,
+        RepoTaskInput(
+            repo_url=req.repo_url,
+            branch=req.branch,
+            brief=req.brief,
+            repo_name=req.repo_name or "",
+            tenant_id=tenant_id,
+        ),
+        id=workflow_id,
+        task_queue="project-workflows",
+    )
+    return CreateRepoTaskResp(workflow_id=workflow_id)
+
 
 @app.post("/projects/{workflow_id}/approve", dependencies=[Depends(auth.require_auth)])
 async def approve_project(workflow_id: str):

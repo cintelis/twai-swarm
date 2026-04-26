@@ -16,16 +16,23 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app import config, telemetry
-from app.workflows import ProjectWorkflow
+from app.workflows import ProjectWorkflow, RepoTaskWorkflow
 from app.activities import (
     create_project_record,
     create_task_record,
     run_agent_activity,
     run_coder_activity,
+    # Sprint 10e — RepoTaskWorkflow activities.
+    clone_repo_activity,
+    index_repo_activity,
+    run_repo_coder_activity,
 )
 
-ACTIVITIES = [create_project_record, create_task_record, run_agent_activity, run_coder_activity]
-WORKFLOWS = [ProjectWorkflow]
+ACTIVITIES = [
+    create_project_record, create_task_record, run_agent_activity, run_coder_activity,
+    clone_repo_activity, index_repo_activity, run_repo_coder_activity,
+]
+WORKFLOWS = [ProjectWorkflow, RepoTaskWorkflow]
 
 _state = {"ready": False, "workers_running": 0}
 

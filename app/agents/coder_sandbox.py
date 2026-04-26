@@ -73,6 +73,18 @@ class Sandbox:
         root.mkdir(parents=True, exist_ok=True)
         return cls(root=root.resolve())
 
+    @classmethod
+    def wrap(cls, existing_path: str | os.PathLike) -> "Sandbox":
+        """Wrap an existing directory as a Sandbox without mkdir.
+
+        Used by the RepoTaskWorkflow (Sprint 10e) — the cloned repo is
+        already on disk and we want the same path-validation + tooling
+        primitives without the create-empty-dir semantics."""
+        root = Path(existing_path).resolve()
+        if not root.is_dir():
+            raise SandboxError(f"sandbox wrap target {root} is not a directory")
+        return cls(root=root)
+
     def destroy(self) -> None:
         """Remove the workspace. Safe to call twice."""
         if self.root.exists():
