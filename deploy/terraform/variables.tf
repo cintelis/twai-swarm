@@ -236,3 +236,18 @@ variable "allowed_dev_ips" {
   type        = list(string)
   default     = []
 }
+
+# ─── Neo4j public TLS endpoint ────────────────────────────────────────────
+# Set this to provision an NLB + ACM cert + TLS termination so a stable
+# hostname (e.g. neo4j-dev.totallywild.ai) replaces the rotating Fargate
+# task IP. Empty = NLB not created; access via `allowed_dev_ips` direct.
+#
+# Two-step apply: first apply emits the DNS validation CNAME records as
+# outputs; add them to Cloudflare (and the friendly hostname → NLB DNS),
+# wait for ACM to validate, then re-apply to attach the cert to the
+# listener. See deploy/terraform/neo4j_public.tf for the full sequence.
+variable "neo4j_public_hostname" {
+  description = "Public hostname for Neo4j (e.g. neo4j-dev.totallywild.ai). Empty disables the NLB."
+  type        = string
+  default     = ""
+}

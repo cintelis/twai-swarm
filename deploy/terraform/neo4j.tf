@@ -101,7 +101,9 @@ resource "aws_security_group" "neo4j" {
   }
 
   # Optional dev ingress — bolt + browser direct from listed IPs.
-  # Conditional on var.allowed_dev_ips being non-empty; default is locked-down.
+  # Used when var.neo4j_public_hostname is empty (no NLB). Once you've
+  # validated the NLB-fronted path, you can remove allowed_dev_ips from
+  # tfvars to lock the direct holes back down.
   dynamic "ingress" {
     for_each = length(var.allowed_dev_ips) > 0 ? [1] : []
     content {
@@ -121,6 +123,32 @@ resource "aws_security_group" "neo4j" {
       protocol    = "tcp"
       cidr_blocks = var.allowed_dev_ips
       description = "Dev access to Neo4j Bolt"
+    }
+  }
+
+  # NLB-fronted access (the TLS-terminating path). When the public NLB
+  # exists, allow ingress from its SG so target-group traffic reaches
+  # Neo4j. preserve_client_ip=false on the TGs makes this work cleanly
+  # without per-IP SG churn.
+  dynamic "ingress" {
+    for_each = local.neo4j_public_enabled ? [1] : []
+    content {
+      from_port       = 7474
+      to_port         = 7474
+      protocol        = "tcp"
+      security_groups = [aws_security_group.neo4j_nlb[0].id]
+      description     = "Browser ingress from public NLB"
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = local.neo4j_public_enabled ? [1] : []
+    content {
+      from_port       = 7687
+      to_port         = 7687
+      protocol        = "tcp"
+      security_groups = [aws_security_group.neo4j_nlb[0].id]
+      description     = "Bolt ingress from public NLB"
     }
   }
 
@@ -231,6 +259,24 @@ resource "aws_ecs_service" "neo4j" {
 
   service_registries {
     registry_arn = aws_service_discovery_service.neo4j.arn
+  }
+
+  # Public NLB target groups — only attached when the public hostname is set.
+  dynamic "load_balancer" {
+    for_each = local.neo4j_public_enabled ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.neo4j_browser[0].arn
+      container_name   = "neo4j"
+      container_port   = 7474
+    }
+  }
+  dynamic "load_balancer" {
+    for_each = local.neo4j_public_enabled ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.neo4j_bolt[0].arn
+      container_name   = "neo4j"
+      container_port   = 7687
+    }
   }
 
   # Container terminates with the task; Service Discovery deregisters the IP
