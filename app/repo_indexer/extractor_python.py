@@ -33,7 +33,6 @@ from .actions import (
     InheritsEdge,
     ModuleNode,
     RepoNode,
-    SymbolNode,
 )
 
 
@@ -66,25 +65,44 @@ def _docstring(source: bytes, body_node: Any) -> str:
     return ""
 
 
-def _function_params(source: bytes, params_node: Any) -> tuple[str, ...]:
+def _function_params(source: bytes, params_node: Any) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Return (param_names, param_types).
+
+    param_types is a tuple of (name, type_text) pairs — only includes params
+    that have type annotations. Used by the resolver to turn `param.method()`
+    calls into Function edges instead of Symbol edges.
+    """
     if params_node is None:
-        return ()
-    out: list[str] = []
+        return (), ()
+    names: list[str] = []
+    types: list[tuple[str, str]] = []
     for child in params_node.children:
-        if child.type in ("identifier", "typed_parameter", "default_parameter",
-                          "typed_default_parameter", "list_splat_pattern",
-                          "dictionary_splat_pattern"):
-            # Pull just the name token out — drop type annotations + defaults.
-            name_node = child if child.type == "identifier" else child.child_by_field_name("name")
-            if name_node is None:
-                # Fallback: first identifier child.
-                for c in child.children:
-                    if c.type == "identifier":
-                        name_node = c
-                        break
-            if name_node is not None:
-                out.append(_node_text(source, name_node))
-    return tuple(out)
+        if child.type not in ("identifier", "typed_parameter", "default_parameter",
+                              "typed_default_parameter", "list_splat_pattern",
+                              "dictionary_splat_pattern"):
+            continue
+
+        # Param name — children layout differs across param kinds.
+        name_node = child if child.type == "identifier" else child.child_by_field_name("name")
+        if name_node is None:
+            for c in child.children:
+                if c.type == "identifier":
+                    name_node = c
+                    break
+        if name_node is None:
+            continue
+        param_name = _node_text(source, name_node)
+        names.append(param_name)
+
+        # Type annotation — only present on typed_parameter / typed_default_parameter.
+        # tree-sitter exposes it as a `type` field child.
+        type_node = child.child_by_field_name("type")
+        if type_node is not None:
+            type_text = _node_text(source, type_node).strip()
+            if type_text:
+                types.append((param_name, type_text))
+
+    return tuple(names), tuple(types)
 
 
 def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
@@ -125,23 +143,62 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
     return found
 
 
-def _walk_imports(source: bytes, root: Any) -> list[str]:
-    """Return [imported_module_qn] from `import x` and `from x import y` lines."""
-    out: list[str] = []
+def _walk_imports(source: bytes, root: Any) -> list[tuple[str, str, str]]:
+    """Return [(target_qn, local_name, kind)] for every import in the file.
+
+    kind is "module" for `import a` / `import a.b` (binds a module/package
+    in this file's namespace) or "symbol" for `from x import y` (binds a
+    single symbol — function/class/constant — that lives inside module x).
+
+    Local-name normalisation:
+      `import a.b`              -> ("a.b", "a", "module")
+      `import a.b as foo`       -> ("a.b", "foo", "module")
+      `from x import y`         -> ("x.y", "y", "symbol")
+      `from x import y as foo`  -> ("x.y", "foo", "symbol")
+      `from x import y, z`      -> emits two entries
+    """
+    out: list[tuple[str, str, str]] = []
     for child in root.children:
         if child.type == "import_statement":
-            # `import a, b.c` — children are dotted_name siblings.
+            # `import a, b.c, d as foo` — siblings are dotted_name | aliased_import.
             for sub in child.children:
                 if sub.type == "dotted_name":
-                    out.append(_node_text(source, sub))
+                    target = _node_text(source, sub)
+                    # Local binding for `import a.b` is `a` (the package root),
+                    # not `a.b` — that's how Python attribute access works.
+                    local = target.split(".", 1)[0]
+                    out.append((target, local, "module"))
                 elif sub.type == "aliased_import":
                     name = sub.child_by_field_name("name")
-                    if name is not None:
-                        out.append(_node_text(source, name))
+                    alias = sub.child_by_field_name("alias")
+                    if name is not None and alias is not None:
+                        out.append((_node_text(source, name), _node_text(source, alias), "module"))
         elif child.type == "import_from_statement":
             mod = child.child_by_field_name("module_name")
-            if mod is not None:
-                out.append(_node_text(source, mod))
+            if mod is None:
+                continue
+            mod_qn = _node_text(source, mod)
+            # Imported names are dotted_name / aliased_import siblings AFTER
+            # the literal `import` keyword token. Tracking the keyword is more
+            # robust than `is`-comparing against `mod`, which can fail when
+            # tree-sitter returns new Node wrappers per attribute access.
+            seen_import_kw = False
+            for sub in child.children:
+                if sub.type == "import":
+                    seen_import_kw = True
+                    continue
+                if not seen_import_kw:
+                    continue
+                if sub.type == "dotted_name":
+                    name = _node_text(source, sub)
+                    out.append((f"{mod_qn}.{name}", name, "symbol"))
+                elif sub.type == "aliased_import":
+                    name_node = sub.child_by_field_name("name")
+                    alias_node = sub.child_by_field_name("alias")
+                    if name_node is not None and alias_node is not None:
+                        name = _node_text(source, name_node)
+                        alias = _node_text(source, alias_node)
+                        out.append((f"{mod_qn}.{name}", alias, "symbol"))
     return out
 
 
@@ -186,6 +243,7 @@ def extract_python_file(
             f"{module_qn}.{name}" if module_qn else name
         )
         local_names.add(name)
+        param_names, param_types = _function_params(source, params)
         batch.functions.append(FunctionNode(
             repo=repo.name,
             qualified_name=qn,
@@ -196,24 +254,21 @@ def extract_python_file(
             is_async=is_async,
             is_method=is_method,
             parent_class_qn=parent_class_qn,
-            params=_function_params(source, params),
+            params=param_names,
+            param_types=param_types,
             docstring=_docstring(source, body),
         ))
-        # Calls inside this function become CallEdges (resolved or symbol).
+        # Calls inside this function become CallEdges. Same-file local calls
+        # resolve here; everything else is left as the raw dotted name and
+        # the resolver decides post-pass whether it lands on a Function
+        # (cross-file) or a Symbol (truly external).
         for callee_dotted, line in _walk_calls(source, body):
             head = callee_dotted.split(".", 1)[0]
             if head in local_names and "." not in callee_dotted:
-                # Same-file call to a top-level def — resolve directly.
                 callee_qn = f"{module_qn}.{callee_dotted}" if module_qn else callee_dotted
             else:
-                # External or cross-file — record as a symbol; cross-file
-                # resolution happens in Sprint 10b via the import map.
+                # Defer — resolver will rewrite or wrap in Symbol.
                 callee_qn = callee_dotted
-                batch.symbols.append(SymbolNode(
-                    repo=repo.name,
-                    qualified_name=callee_dotted,
-                    name=callee_dotted.rsplit(".", 1)[-1],
-                ))
             batch.calls.append(CallEdge(
                 repo=repo.name,
                 caller_qn=qn,
@@ -238,20 +293,16 @@ def extract_python_file(
             line_end=node.end_point[0] + 1,
             docstring=_docstring(source, body),
         ))
-        # Inheritance — superclasses are in the argument_list child.
+        # Inheritance — superclasses are in the argument_list child. Recorded
+        # as observed; resolver decides post-pass whether the parent maps
+        # to an in-repo Class or stays as an external Symbol.
         superclasses = node.child_by_field_name("superclasses")
         if superclasses is not None:
             for sub in superclasses.children:
                 if sub.type in ("identifier", "attribute"):
                     parent_dotted = _node_text(source, sub)
-                    parent_qn = parent_dotted  # always recorded as-seen; resolution in 10b
-                    batch.symbols.append(SymbolNode(
-                        repo=repo.name,
-                        qualified_name=parent_dotted,
-                        name=parent_dotted.rsplit(".", 1)[-1],
-                    ))
                     batch.inherits.append(InheritsEdge(
-                        repo=repo.name, child_qn=qn, parent_qn=parent_qn,
+                        repo=repo.name, child_qn=qn, parent_qn=parent_dotted,
                     ))
         # Methods.
         if body is not None:
@@ -266,9 +317,13 @@ def extract_python_file(
             _emit_class(child)
 
     # Imports — file-level edges.
-    for target in _walk_imports(source, root):
+    for target_qn, local_name, kind in _walk_imports(source, root):
         batch.imports.append(ImportEdge(
-            repo=repo.name, file_path=rel_path, target_qn=target,
+            repo=repo.name,
+            file_path=rel_path,
+            target_qn=target_qn,
+            local_name=local_name,
+            kind=kind,
         ))
 
     return batch

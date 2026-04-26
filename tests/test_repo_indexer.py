@@ -128,10 +128,12 @@ def test_extractor_inheritance(parser):
     assert len(batch.inherits) == 1
     edge = batch.inherits[0]
     assert edge.child_qn == "x.Child"
-    # Parent is unresolved here (would need cross-file pass), so it goes
-    # in as the bare dotted name and a Symbol node is emitted.
+    # Extractor records the bare dotted name as observed; the resolver
+    # decides post-pass whether it lands on a Class or a Symbol.
     assert edge.parent_qn == "Parent"
-    assert any(s.qualified_name == "Parent" for s in batch.symbols)
+    # Sprint 10b: extractor no longer emits Symbol nodes eagerly — that's
+    # the resolver's job.
+    assert batch.symbols == []
 
 
 def test_extractor_intrafile_call_resolves(parser):
@@ -150,30 +152,48 @@ def main():
     assert edge.callee_qn == "main.helper"
 
 
-def test_extractor_external_call_emits_symbol(parser):
+def test_extractor_external_call_no_symbol_until_resolver(parser):
+    """Extractor records the dotted name verbatim; Symbols come from the
+    resolver, not the extractor."""
     src = b"""import json
 def parse(data):
     return json.loads(data)
 """
     batch = extract_python_file(REPO, "x.py", src, "sha-6", parser)
 
-    # The json.loads call is recorded as an edge to a SymbolNode.
     edges = batch.calls
     assert any(e.callee_qn == "json.loads" for e in edges)
-    assert any(s.qualified_name == "json.loads" for s in batch.symbols)
+    assert batch.symbols == []   # extractor doesn't emit them
 
 
-def test_extractor_imports(parser):
+def test_extractor_imports_capture_local_name_and_kind(parser):
     src = b"""import os
 import json as j
 from pathlib import Path
+from app.foo import bar as baz
 """
     batch = extract_python_file(REPO, "x.py", src, "sha-7", parser)
 
-    targets = sorted({i.target_qn for i in batch.imports})
-    assert "os" in targets
-    assert "json" in targets
-    assert "pathlib" in targets
+    by_local = {i.local_name: i for i in batch.imports}
+    assert by_local["os"].target_qn == "os"
+    assert by_local["os"].kind == "module"
+    assert by_local["j"].target_qn == "json"
+    assert by_local["j"].kind == "module"
+    assert by_local["Path"].target_qn == "pathlib.Path"
+    assert by_local["Path"].kind == "symbol"
+    assert by_local["baz"].target_qn == "app.foo.bar"
+    assert by_local["baz"].kind == "symbol"
+
+
+def test_extractor_captures_param_types(parser):
+    src = b"""def handle(box: Sandbox, n: int = 5):
+    return box.run(n)
+"""
+    batch = extract_python_file(REPO, "x.py", src, "sha-pt", parser)
+
+    fn = batch.functions[0]
+    types = dict(fn.param_types)
+    assert types == {"box": "Sandbox", "n": "int"}
 
 
 def test_extractor_init_module_qn(parser):

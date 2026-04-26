@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .actions import IndexBatch, RepoNode
 from .loader import driver_from_env, ensure_constraints, prune_stale, write_batch
+from .resolver import resolve_batch
 from .walker import walk_repo
 
 logger = logging.getLogger("repo_indexer")
@@ -67,9 +68,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         file_count += 1
 
     walk_secs = time.monotonic() - start
-    counts = aggregate.counts()
     print(f"[indexer] parsed {file_count} files in {walk_secs:.1f}s")
-    for k, v in counts.items():
+    for k, v in aggregate.counts().items():
+        print(f"  {k:20s} {v}")
+
+    # Cross-file resolution pass — rewrites Calls/Inheritance to point at
+    # in-repo Functions/Classes when possible, emits Symbol nodes only
+    # for truly external targets.
+    resolve_start = time.monotonic()
+    resolve_batch(aggregate)
+    resolve_secs = time.monotonic() - resolve_start
+    print(f"[indexer] resolved cross-file refs in {resolve_secs:.2f}s")
+    for k, v in aggregate.counts().items():
         print(f"  {k:20s} {v}")
 
     if args.dry_run:

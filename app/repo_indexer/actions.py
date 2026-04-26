@@ -60,6 +60,12 @@ class FunctionNode:
     is_method: bool = False
     parent_class_qn: str = ""    # populated iff is_method
     params: tuple[str, ...] = field(default_factory=tuple)
+    # Per-param type annotation strings, e.g. (("sandbox", "Sandbox"), ...).
+    # The resolver uses these to turn `param.method(...)` calls into edges
+    # that point at the actual Function instead of an external Symbol.
+    # Captured as observed (no normalisation); resolution maps the bare
+    # type name through the file's imports.
+    param_types: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     docstring: str = ""
 
 
@@ -97,6 +103,15 @@ class ImportEdge:
     repo: str
     file_path: str       # importing file
     target_qn: str       # imported module's qualified_name (or symbol)
+    # Local name the import binds to. For `import a.b` -> "a"; for
+    # `import a.b as foo` -> "foo"; for `from x import y` -> "y";
+    # for `from x import y as foo` -> "foo". Used by the resolver to
+    # map bare-name references in this file back to a qualified target.
+    local_name: str = ""
+    # "module" if the import binds a module/package; "symbol" if it
+    # binds a single name (function, class, constant) from inside a module.
+    # `import x` / `import x.y` -> module. `from x import y` -> symbol.
+    kind: str = "module"
 
 
 @dataclass
