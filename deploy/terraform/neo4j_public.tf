@@ -210,7 +210,7 @@ output "neo4j_acm_validation_records" {
 }
 
 output "neo4j_nlb_dns" {
-  description = "NLB hostname. Add `${var.neo4j_public_hostname}` as a DNS-only CNAME → this in Cloudflare."
+  description = "NLB hostname. Add the friendly Neo4j hostname as a DNS-only CNAME pointing at this value in Cloudflare."
   value       = local.neo4j_public_enabled ? aws_lb.neo4j[0].dns_name : ""
 }
 
