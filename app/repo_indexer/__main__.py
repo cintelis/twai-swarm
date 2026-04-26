@@ -15,7 +15,7 @@ from pathlib import Path
 from .actions import IndexBatch, RepoNode
 from .loader import driver_from_env, ensure_constraints, prune_stale, write_batch
 from .resolver import resolve_batch
-from .walker import walk_repo
+from .walker import walk_paths, walk_repo
 
 logger = logging.getLogger("repo_indexer")
 
@@ -69,16 +69,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
     languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
 
     # Pre-walk to build the file set — the TS extractor uses it to resolve
-    # relative imports (`./bar` -> `app/foo/bar.ts`). Cheap: just paths,
-    # not file contents.
+    # relative imports (`./bar` -> `app/foo/bar.ts`). Sprint 10g: this used
+    # to read every file's bytes via walk_repo; now it's path-only so we
+    # don't pay 2× the I/O on TS+JS scans.
+    pre_start = time.monotonic()
     repo_files: set[str] = set()
     if any(lang in languages for lang in ("typescript", "javascript")):
-        for rel_path, _src, _lang, _sha in walk_repo(repo_root, languages=languages):
+        for rel_path, _lang in walk_paths(repo_root, languages=languages):
             repo_files.add(rel_path)
+    pre_secs = time.monotonic() - pre_start
+    if repo_files:
+        print(f"[indexer] pre-walked {len(repo_files)} files in {pre_secs:.1f}s (TS/JS path resolution)")
 
     aggregate = IndexBatch(repo=repo)
     start = time.monotonic()
     file_count = 0
+    PROGRESS_EVERY = 200
     for rel_path, source, language, sha in walk_repo(repo_root, languages=languages):
         try:
             if language == "python":
@@ -99,6 +105,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             continue
         aggregate.extend(fragment)
         file_count += 1
+        if file_count % PROGRESS_EVERY == 0:
+            elapsed = time.monotonic() - start
+            rate = file_count / elapsed if elapsed > 0 else 0
+            print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
 
     walk_secs = time.monotonic() - start
     print(f"[indexer] parsed {file_count} files in {walk_secs:.1f}s")

@@ -77,13 +77,52 @@ def _matches_gitignore(rel_path: str, patterns: list[str]) -> bool:
     return False
 
 
-def _file_sha(path: Path) -> str:
-    """SHA-256 of file bytes — drives diff-skip on re-scan."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(64 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB; generated bundles past this aren't worth indexing.
+
+
+def _walk_disk(repo_root: Path) -> Iterator[Path]:
+    """Yield every regular file under repo_root, pruning SKIP_DIRS in-place
+    so we never recurse into them. No file reads here — pure tree walk."""
+    def _recurse(d: Path) -> Iterator[Path]:
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name in SKIP_DIRS:
+                continue
+            if entry.is_dir():
+                yield from _recurse(entry)
+            elif entry.is_file():
+                yield entry
+    yield from _recurse(repo_root)
+
+
+def walk_paths(
+    repo_root: Path,
+    languages: tuple[Language, ...] = ("python", "typescript", "javascript"),
+) -> Iterator[tuple[str, Language]]:
+    """Yield (rel_path, language) for every parseable file. PATH-ONLY —
+    no file reads, no SHA, no parsing. Used by the TS pre-walk that just
+    needs to know which files exist for relative-import resolution.
+
+    Sprint 10g: the previous code re-used walk_repo for this and threw
+    away the bytes — that meant 2 full reads of every file in the repo
+    on a TS+JS scan. Painful on 13K-file repos.
+    """
+    if not repo_root.is_dir():
+        raise FileNotFoundError(f"repo root {repo_root} is not a directory")
+    gi_patterns = _read_gitignore_patterns(repo_root)
+    allowed_exts = {ext for ext, lang in EXT_LANGUAGE.items() if lang in languages}
+
+    for path in _walk_disk(repo_root):
+        ext = path.suffix.lower()
+        if ext not in allowed_exts:
+            continue
+        rel = path.relative_to(repo_root).as_posix()
+        if _matches_gitignore(rel, gi_patterns):
+            continue
+        yield rel, EXT_LANGUAGE[ext]
 
 
 def walk_repo(
@@ -95,6 +134,10 @@ def walk_repo(
     `rel_path` is a posix-style relative path from `repo_root`. `sha` is the
     SHA-256 hex digest of the file contents — used by the loader to skip
     re-MERGE on unchanged files.
+
+    Sprint 10g: the file is opened and read EXACTLY ONCE. SHA is computed
+    over the same in-memory bytes we hand to the parser. Previously each
+    file was opened twice (once for content, once for SHA streaming).
     """
     if not repo_root.is_dir():
         raise FileNotFoundError(f"repo root {repo_root} is not a directory")
@@ -102,22 +145,7 @@ def walk_repo(
     gi_patterns = _read_gitignore_patterns(repo_root)
     allowed_exts = {ext for ext, lang in EXT_LANGUAGE.items() if lang in languages}
 
-    # Manual walk so we can prune SKIP_DIRS in-place without recursion cost.
-    def _walk(d: Path) -> Iterator[Path]:
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            name = entry.name
-            if name in SKIP_DIRS:
-                continue
-            if entry.is_dir():
-                yield from _walk(entry)
-            elif entry.is_file():
-                yield entry
-
-    for path in _walk(repo_root):
+    for path in _walk_disk(repo_root):
         ext = path.suffix.lower()
         if ext not in allowed_exts:
             continue
@@ -128,8 +156,7 @@ def walk_repo(
             data = path.read_bytes()
         except OSError:
             continue
-        # Skip files that are too large to be sensible source — usually
-        # generated bundles / fixtures sneak in.
-        if len(data) > 2 * 1024 * 1024:  # 2 MB
+        if len(data) > MAX_FILE_BYTES:
             continue
-        yield rel, data, EXT_LANGUAGE[ext], _file_sha(path)
+        sha = hashlib.sha256(data).hexdigest()
+        yield rel, data, EXT_LANGUAGE[ext], sha

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from app.repo_indexer.actions import IndexBatch, RepoNode
-from app.repo_indexer.walker import walk_repo
+from app.repo_indexer.walker import walk_paths, walk_repo
 
 # Tree-sitter is required for the extractor tests; skip if unavailable
 # rather than failing the whole module import.
@@ -68,6 +70,76 @@ def test_walker_emits_sha(tmp_path):
     rel_path, source, lang, sha = found[0]
     assert lang == "python"
     assert len(sha) == 64  # sha-256 hex
+
+
+# ─── Sprint 10g — path-only walker ──────────────────────────────────────────
+
+def test_walk_paths_returns_paths_only(tmp_path):
+    """walk_paths must NOT read file bytes — it just returns (path, language)."""
+    (tmp_path / "a.py").write_text("def a(): pass", encoding="utf-8")
+    (tmp_path / "b.ts").write_text("export const x = 1;", encoding="utf-8")
+    (tmp_path / "skip.md").write_text("# not a source file", encoding="utf-8")
+
+    found = list(walk_paths(tmp_path))
+    rel_paths = sorted(p for p, _lang in found)
+    languages = {p: lang for p, lang in found}
+
+    assert rel_paths == ["a.py", "b.ts"]
+    assert languages["a.py"] == "python"
+    assert languages["b.ts"] == "typescript"
+
+
+def test_walk_paths_does_not_open_files(tmp_path, monkeypatch):
+    """Critical 10g invariant: walk_paths must not call read_bytes — that
+    was the I/O sink we paid 2x on TS+JS scans."""
+    (tmp_path / "a.py").write_text("def a(): pass", encoding="utf-8")
+    (tmp_path / "b.ts").write_text("export const x = 1;", encoding="utf-8")
+
+    opens = []
+    real_read_bytes = Path.read_bytes
+
+    def spy_read_bytes(self):
+        opens.append(self.name)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    list(walk_paths(tmp_path))
+    # walk_paths reads .gitignore at most; never the source files themselves.
+    assert all(name == ".gitignore" for name in opens), f"unexpected reads: {opens}"
+
+
+def test_walk_paths_respects_gitignore_and_skip_dirs(tmp_path):
+    (tmp_path / ".gitignore").write_text("*.generated.py\nbuilt/\n", encoding="utf-8")
+    (tmp_path / "real.py").write_text("def x(): pass", encoding="utf-8")
+    (tmp_path / "thing.generated.py").write_text("def y(): pass", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "lib.ts").write_text("export const x = 1;", encoding="utf-8")
+    (tmp_path / "built").mkdir()
+    (tmp_path / "built" / "z.ts").write_text("export const z = 1;", encoding="utf-8")
+
+    rel_paths = sorted(p for p, _lang in walk_paths(tmp_path))
+    assert rel_paths == ["real.py"]
+
+
+def test_walker_reads_each_file_exactly_once(tmp_path, monkeypatch):
+    """10g invariant: walk_repo opens each source file ONCE (not twice
+    like the old version that did a streaming SHA on a second open)."""
+    (tmp_path / "a.py").write_text("def a(): pass", encoding="utf-8")
+    (tmp_path / "b.py").write_text("def b(): pass", encoding="utf-8")
+
+    opens: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def spy_read_bytes(self):
+        opens.append(self.name)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    list(walk_repo(tmp_path))
+
+    # .gitignore may be read once. Each source file exactly once.
+    source_opens = [n for n in opens if n.endswith(".py")]
+    assert sorted(source_opens) == ["a.py", "b.py"], source_opens
 
 
 # ─── extractor ──────────────────────────────────────────────────────────────

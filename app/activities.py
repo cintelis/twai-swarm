@@ -408,7 +408,7 @@ async def index_repo_activity(
         driver_from_env, ensure_constraints, prune_stale, write_batch,
     )
     from app.repo_indexer.resolver import resolve_batch
-    from app.repo_indexer.walker import walk_repo
+    from app.repo_indexer.walker import walk_paths, walk_repo
     from app.repo_indexer.extractor_python import extract_python_file
     from app.repo_indexer.extractor_typescript import extract_typescript_file
     import tree_sitter_python as tspython
@@ -426,9 +426,10 @@ async def index_repo_activity(
         "tsx":        Parser(Language(tsts.language_tsx())),
     }
 
+    # Sprint 10g: path-only pre-walk (was reading bytes for nothing).
     activity.heartbeat("indexing — pre-walking file set")
     repo_files: set[str] = set()
-    for rel_path, _src, _lang, _sha in walk_repo(repo_root):
+    for rel_path, _lang in walk_paths(repo_root):
         repo_files.add(rel_path)
 
     aggregate = IndexBatch(repo=repo)
