@@ -14,8 +14,8 @@ from pathlib import Path
 
 from .actions import IndexBatch, RepoNode
 from .loader import driver_from_env, ensure_constraints, prune_stale, write_batch
-from .resolver import resolve_batch
-from .walker import walk_paths, walk_repo
+from .phases import DEFAULT_PHASES
+from .runner import PhaseContext, run_pipeline
 
 logger = logging.getLogger("repo_indexer")
 
@@ -58,72 +58,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     print(f"[indexer] scanning {repo_root}  ->  Neo4j repo={repo_name!r}")
 
-    # Lazy-import extractors — keeps `--help` fast and means tests that
-    # only touch actions/walker don't drag in tree-sitter at import time.
-    from .extractor_python import extract_python_file
-    from .extractor_typescript import extract_typescript_file
-
     py_parser = _parser_for_python()
     ts_parsers = _parsers_for_typescript()
 
     languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
 
-    # Pre-walk to build the file set — the TS extractor uses it to resolve
-    # relative imports (`./bar` -> `app/foo/bar.ts`). Sprint 10g: this used
-    # to read every file's bytes via walk_repo; now it's path-only so we
-    # don't pay 2× the I/O on TS+JS scans.
-    pre_start = time.monotonic()
-    repo_files: set[str] = set()
-    if any(lang in languages for lang in ("typescript", "javascript")):
-        for rel_path, _lang in walk_paths(repo_root, languages=languages):
-            repo_files.add(rel_path)
-    pre_secs = time.monotonic() - pre_start
-    if repo_files:
-        print(f"[indexer] pre-walked {len(repo_files)} files in {pre_secs:.1f}s (TS/JS path resolution)")
-
     aggregate = IndexBatch(repo=repo)
-    start = time.monotonic()
-    file_count = 0
-    PROGRESS_EVERY = 200
-    for rel_path, source, language, sha in walk_repo(repo_root, languages=languages):
-        try:
-            if language == "python":
-                fragment = extract_python_file(repo, rel_path, source, sha, py_parser)
-            elif language in ("typescript", "javascript"):
-                # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
-                use_tsx = rel_path.endswith((".tsx", ".jsx"))
-                parser = ts_parsers["tsx"] if use_tsx else ts_parsers["typescript"]
-                fragment = extract_typescript_file(
-                    repo, rel_path, source, sha, parser,
-                    repo_files=repo_files, language=language,
-                )
-            else:
-                continue
-        except Exception as e:
-            # Don't let one weird file kill the whole scan — log and continue.
-            logger.warning("extractor failed on %s: %s", rel_path, e)
-            continue
-        aggregate.extend(fragment)
-        file_count += 1
-        if file_count % PROGRESS_EVERY == 0:
-            elapsed = time.monotonic() - start
-            rate = file_count / elapsed if elapsed > 0 else 0
-            print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
-
-    walk_secs = time.monotonic() - start
-    print(f"[indexer] parsed {file_count} files in {walk_secs:.1f}s")
-    for k, v in aggregate.counts().items():
-        print(f"  {k:20s} {v}")
-
-    # Cross-file resolution pass — rewrites Calls/Inheritance to point at
-    # in-repo Functions/Classes when possible, emits Symbol nodes only
-    # for truly external targets.
-    resolve_start = time.monotonic()
-    resolve_batch(aggregate)
-    resolve_secs = time.monotonic() - resolve_start
-    print(f"[indexer] resolved cross-file refs in {resolve_secs:.2f}s")
-    for k, v in aggregate.counts().items():
-        print(f"  {k:20s} {v}")
+    ctx = PhaseContext(
+        repo=repo,
+        repo_root=repo_root,
+        languages=languages,
+        batch=aggregate,
+        py_parser=py_parser,
+        ts_parsers=ts_parsers,
+    )
+    run_pipeline(ctx, DEFAULT_PHASES)
 
     if args.dry_run:
         print("[indexer] --dry-run: skipping Neo4j write")

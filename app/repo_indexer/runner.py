@@ -1,0 +1,48 @@
+"""Phase runner — orchestrates the indexer pipeline.
+
+Sprint 11a: extracted from `__main__.cmd_scan` so future phases (SHA
+short-circuit, multiprocessing, community detect, embeddings, …) plug in
+without churning the CLI. See `repo-indexer-future-state.md` §4.2.
+
+This module deliberately stays small: a typed `PhaseContext`, a `Phase`
+protocol, and a no-frills `run_pipeline` driver. Ordering smarts live in
+the phase list passed by the caller; the runner just iterates.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Protocol
+
+from .actions import IndexBatch, Language, RepoNode
+
+
+@dataclass
+class PhaseContext:
+    """Shared state passed through every phase. Not frozen — phases mutate
+    `batch`, `repo_files`, and may attach extra fields in later sprints
+    (e.g. SHA cache for 11b).
+    """
+    repo: RepoNode
+    repo_root: Path
+    languages: tuple[Language, ...]
+    batch: IndexBatch
+    repo_files: set[str] = field(default_factory=set)
+    py_parser: Any = None
+    ts_parsers: dict | None = None
+    progress: Callable[[str], None] = print
+
+
+class Phase(Protocol):
+    name: str
+
+    def run(self, ctx: PhaseContext) -> None: ...
+
+
+def run_pipeline(ctx: PhaseContext, phases: Iterable[Phase]) -> None:
+    """Iterate phases in order, calling `run(ctx)` on each. No retries, no
+    cancellation, no parallel scheduling — those belong on the phases
+    themselves or in a richer driver if/when we need one.
+    """
+    for phase in phases:
+        phase.run(ctx)
