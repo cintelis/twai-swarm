@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 
-from .scope_tree import ScopeTree, range_strictly_contains
+from .scope_tree import ScopeTree
 from .types import Position, ScopeId
 
 
