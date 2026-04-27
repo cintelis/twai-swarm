@@ -46,6 +46,11 @@ from ..runner import PhaseContext
 # section calls it out — don't change without breaking the determinism
 # promise the Coder relies on.
 LOUVAIN_SEED = 42
+# Modularity-optimisation knob. python-louvain default is 1.0; we set 2.0
+# so process extraction (Sprint 13b) sees enough cross-community boundaries
+# to surface meaningful flows on sparsely-connected codebases. Sweep
+# results + rationale: sprint-status/sprint-13a-louvain-tuning.md.
+LOUVAIN_RESOLUTION = 2.0
 
 _TOKEN_SPLIT_RE = re.compile(r"[._\-]")
 _ALPHA_RE = re.compile(r"[^a-z]")
@@ -212,7 +217,11 @@ def _detect_communities(graph) -> list[set[str]]:
     if graph.number_of_nodes() == 0:
         return []
 
-    partition = community_louvain.best_partition(graph, random_state=LOUVAIN_SEED)
+    partition = community_louvain.best_partition(
+        graph,
+        random_state=LOUVAIN_SEED,
+        resolution=LOUVAIN_RESOLUTION,
+    )
     by_id: dict[int, set[str]] = {}
     for node, cid in partition.items():
         by_id.setdefault(cid, set()).add(node)

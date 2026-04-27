@@ -27,6 +27,7 @@ from app.repo_indexer.actions import (  # noqa: E402
 )
 from app.repo_indexer.phases.community_detect import (  # noqa: E402
     CommunityDetectPhase,
+    _cohesion,
     _label_for,
     _tokens_for_qn,
 )
@@ -108,22 +109,21 @@ def test_two_clear_clusters():
 # ---------------------------------------------------------------------------
 
 def test_label_uses_common_token():
-    batch = IndexBatch(repo=REPO)
-    # Three densely-connected functions all containing "auth" as their
-    # top token. We use distinct second-to-last segments (`a`, `b`, `c`)
-    # so no other token can tie with `auth` (which appears 3x).
+    """Pure-function test of `_label_for`. Three function qns all sharing
+    the token `auth` should produce label `auth`, regardless of how
+    Louvain would have clustered them — _label_for is independent of
+    the partition algorithm.
+
+    (Originally this test ran the full phase and relied on Louvain
+    clustering 3 nodes in a triangle into one community. After Sprint
+    13a tuning bumped the resolution to 2.0, modularity prefers
+    splitting tiny synthetic graphs into singletons, so the assertion
+    no longer survives an end-to-end run. Testing the helper directly
+    is more honest anyway.)
+    """
     members = ["app.a.auth_login", "app.b.auth_logout", "app.c.auth_check"]
-    for qn in members:
-        batch.functions.append(_fn(qn))
-    # Triangle — guarantees one community.
-    batch.calls.append(_call(members[0], members[1]))
-    batch.calls.append(_call(members[1], members[2]))
-    batch.calls.append(_call(members[2], members[0]))
-
-    CommunityDetectPhase().run(_ctx(batch))
-
-    assert len(batch.communities) == 1
-    assert batch.communities[0].label == "auth"
+    label = _label_for(sorted(members), used_labels=set(), cluster_index=0)
+    assert label == "auth"
 
 
 # ---------------------------------------------------------------------------
@@ -175,24 +175,33 @@ def test_label_disambiguation():
 # ---------------------------------------------------------------------------
 
 def test_cohesion_clamped():
-    batch = IndexBatch(repo=REPO)
-    # Cluster A: triangle (fully internal, cohesion = 1.0).
-    triangle = ["app.t.foo_alpha", "app.t.foo_beta", "app.t.foo_gamma"]
-    # A standalone singleton — no edges at all.
-    singleton = "app.iso.lonely_function"
-    for qn in triangle + [singleton]:
-        batch.functions.append(_fn(qn))
-    batch.calls.append(_call(triangle[0], triangle[1]))
-    batch.calls.append(_call(triangle[1], triangle[2]))
-    batch.calls.append(_call(triangle[2], triangle[0]))
+    """Pure-function test of `_cohesion`. Singleton (no edges touching the
+    member) returns 0.0; fully-connected community (every edge intra)
+    returns 1.0.
 
-    CommunityDetectPhase().run(_ctx(batch))
+    (Originally this test ran the full phase. After 13a tuning bumped
+    resolution to 2.0, Louvain splits the triangle fixture into three
+    singletons — the cohesion math still works correctly, but the
+    triangle community no longer exists in the partition. Testing the
+    cohesion helper directly with a synthetic graph keeps the math
+    coverage without coupling to Louvain's micro-graph behavior.)
+    """
+    import networkx as nx
 
-    by_size = {c.size: c for c in batch.communities}
-    assert 1 in by_size, "singleton community missing"
-    assert 3 in by_size, "triangle community missing"
-    assert by_size[1].cohesion == 0.0
-    assert by_size[3].cohesion == 1.0
+    triangle = {"app.t.foo_alpha", "app.t.foo_beta", "app.t.foo_gamma"}
+    singleton = {"app.iso.lonely_function"}
+
+    g = nx.Graph()
+    for n in triangle | singleton:
+        g.add_node(n)
+    # Triangle edges only — singleton has no edges.
+    nodes = sorted(triangle)
+    g.add_edge(nodes[0], nodes[1])
+    g.add_edge(nodes[1], nodes[2])
+    g.add_edge(nodes[2], nodes[0])
+
+    assert _cohesion(g, triangle) == 1.0
+    assert _cohesion(g, singleton) == 0.0
 
 
 # ---------------------------------------------------------------------------
