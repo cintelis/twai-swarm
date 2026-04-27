@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -63,6 +64,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
 
+    # Sprint 11c: resolve worker count. Default cpu_count()//2 (forward-looking
+    # for the 13K-file case; small repos pay spawn overhead). `--parse-workers
+    # 1` forces the sequential path.
+    parse_workers = args.parse_workers
+    if parse_workers is None:
+        parse_workers = max(1, (os.cpu_count() or 1) // 2)
+
     aggregate = IndexBatch(repo=repo)
 
     if args.dry_run:
@@ -74,6 +82,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             py_parser=py_parser,
             ts_parsers=ts_parsers,
             driver=None,
+            parse_workers=parse_workers,
         )
         run_pipeline(ctx, DEFAULT_PHASES)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -94,6 +103,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             py_parser=py_parser,
             ts_parsers=ts_parsers,
             driver=driver,
+            parse_workers=parse_workers,
         )
         run_pipeline(ctx, DEFAULT_PHASES)
         write_start = time.monotonic()
@@ -122,6 +132,11 @@ def main(argv: list[str] | None = None) -> int:
         "--languages", nargs="+", default=None,
         choices=["python", "typescript", "javascript"],
         help="Languages to extract. Default: all supported.",
+    )
+    scan.add_argument(
+        "--parse-workers", type=int, default=None,
+        help="Parse files in N worker processes. Default: cpu_count()//2 "
+             "(or 1 if cpu_count() is 1). Set to 1 to force sequential.",
     )
     scan.set_defaults(func=cmd_scan)
 

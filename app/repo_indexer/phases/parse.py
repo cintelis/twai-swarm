@@ -17,6 +17,15 @@ scans of the file persist in Neo4j until commit_sha changes (which
 triggers `prune_stale`). This is a pre-existing limitation (the
 current loader's MERGE never deletes), not introduced by 11b. Full
 per-file diffing is deferred.
+
+Sprint 11c — opt-in multiprocessing. Sequential by default
+(`ctx.parse_workers <= 1`). When >=2, files are dispatched to a
+`multiprocessing.Pool` whose workers each build their own tree-sitter
+parsers (parsers aren't picklable, and `Parser` is not thread-safe).
+Pool overhead means parallel mode is a regression on small repos; tune
+via `--parse-workers`. The SHA short-circuit still runs on the main
+process before submission, so unchanged files never cross the pickle
+boundary.
 """
 from __future__ import annotations
 
@@ -29,6 +38,61 @@ from ..runner import PhaseContext
 logger = logging.getLogger("repo_indexer")
 
 PROGRESS_EVERY = 200
+
+# Per-worker globals populated by `_pool_init`. Tree-sitter Parser objects
+# are NOT picklable, so each worker process must build its own from scratch.
+_PY_PARSER = None
+_TS_PARSERS: dict | None = None
+
+
+def _pool_init() -> None:
+    """Worker-process initializer. Builds a Python parser + a TS/TSX parser
+    dict and stashes them in module globals. Runs once per worker, not once
+    per task — that's the point of using `initializer` instead of building
+    parsers inside `_pool_extract`.
+    """
+    global _PY_PARSER, _TS_PARSERS
+    import tree_sitter_python as tspython
+    import tree_sitter_typescript as tsts
+    from tree_sitter import Language, Parser
+
+    _PY_PARSER = Parser(Language(tspython.language()))
+    _TS_PARSERS = {
+        "typescript": Parser(Language(tsts.language_typescript())),
+        "tsx":        Parser(Language(tsts.language_tsx())),
+    }
+
+
+def _pool_extract(args: tuple) -> tuple:
+    """Worker-side per-file extraction. Args:
+        (rel_path, source, language, sha, repo, repo_files)
+
+    Returns `(rel_path, fragment_or_None, error_str_or_None)`. Catches all
+    exceptions so one weird file never crashes the pool. The `args` tuple
+    is everything we need to be picklable — parsers come from module
+    globals populated by `_pool_init`.
+    """
+    rel_path, source, language, sha, repo, repo_files = args
+    try:
+        # Lazy-import inside the worker — keeps the parent process from
+        # paying the import cost when sequential mode is used.
+        if language == "python":
+            from ..extractor_python import extract_python_file
+            fragment = extract_python_file(repo, rel_path, source, sha, _PY_PARSER)
+        elif language in ("typescript", "javascript"):
+            from ..extractor_typescript import extract_typescript_file
+            use_tsx = rel_path.endswith((".tsx", ".jsx"))
+            assert _TS_PARSERS is not None  # set by _pool_init
+            parser = _TS_PARSERS["tsx"] if use_tsx else _TS_PARSERS["typescript"]
+            fragment = extract_typescript_file(
+                repo, rel_path, source, sha, parser,
+                repo_files=repo_files, language=language,
+            )
+        else:
+            return (rel_path, None, None)
+    except Exception as e:  # noqa: BLE001 — pool boundary catch-all
+        return (rel_path, None, f"{type(e).__name__}: {e}")
+    return (rel_path, fragment, None)
 
 
 class ParsePhase:
@@ -50,42 +114,86 @@ class ParsePhase:
                 ctx.driver, ctx.repo.name, ctx.repo.tenant_id,
             )
 
+        # Generator that walks the repo, applies the SHA short-circuit, and
+        # yields work items for the parse step. Bumping `ctx.skipped_files`
+        # here keeps the skip count accurate whether we run sequentially
+        # or hand items to a pool.
+        def _work_items():
+            for rel_path, source, language, sha in walker.walk_repo(
+                ctx.repo_root, languages=ctx.languages
+            ):
+                prior = ctx.prior_shas.get(rel_path)
+                if prior == sha:
+                    ctx.skipped_files += 1
+                    continue
+                yield (rel_path, source, language, sha)
+
         start = time.monotonic()
         file_count = 0
-        for rel_path, source, language, sha in walker.walk_repo(
-            ctx.repo_root, languages=ctx.languages
-        ):
-            # Short-circuit: file content unchanged since the last scan.
-            # The loader's MERGE leaves prior nodes/edges in place.
-            prior = ctx.prior_shas.get(rel_path)
-            if prior == sha:
-                ctx.skipped_files += 1
-                continue
-            try:
-                if language == "python":
-                    fragment = extract_python_file(
-                        ctx.repo, rel_path, source, sha, ctx.py_parser,
-                    )
-                elif language in ("typescript", "javascript"):
-                    # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
-                    use_tsx = rel_path.endswith((".tsx", ".jsx"))
-                    parser = ctx.ts_parsers["tsx"] if use_tsx else ctx.ts_parsers["typescript"]
-                    fragment = extract_typescript_file(
-                        ctx.repo, rel_path, source, sha, parser,
-                        repo_files=ctx.repo_files, language=language,
-                    )
-                else:
+
+        if ctx.parse_workers <= 1:
+            # Sequential path — byte-identical to pre-11c behavior.
+            for rel_path, source, language, sha in _work_items():
+                try:
+                    if language == "python":
+                        fragment = extract_python_file(
+                            ctx.repo, rel_path, source, sha, ctx.py_parser,
+                        )
+                    elif language in ("typescript", "javascript"):
+                        # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
+                        use_tsx = rel_path.endswith((".tsx", ".jsx"))
+                        parser = ctx.ts_parsers["tsx"] if use_tsx else ctx.ts_parsers["typescript"]
+                        fragment = extract_typescript_file(
+                            ctx.repo, rel_path, source, sha, parser,
+                            repo_files=ctx.repo_files, language=language,
+                        )
+                    else:
+                        continue
+                except Exception as e:
+                    # Don't let one weird file kill the whole scan — log and continue.
+                    logger.warning("extractor failed on %s: %s", rel_path, e)
                     continue
-            except Exception as e:
-                # Don't let one weird file kill the whole scan — log and continue.
-                logger.warning("extractor failed on %s: %s", rel_path, e)
-                continue
-            ctx.batch.extend(fragment)
-            file_count += 1
-            if file_count % PROGRESS_EVERY == 0:
-                elapsed = time.monotonic() - start
-                rate = file_count / elapsed if elapsed > 0 else 0
-                print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
+                ctx.batch.extend(fragment)
+                file_count += 1
+                if file_count % PROGRESS_EVERY == 0:
+                    elapsed = time.monotonic() - start
+                    rate = file_count / elapsed if elapsed > 0 else 0
+                    print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
+        else:
+            # Parallel path — multiprocessing.Pool. Imported here, not at
+            # module top, so dry-run / unit tests that never use a pool
+            # don't fork-related side effects.
+            import multiprocessing
+
+            ctx.progress(f"[indexer] parse phase: {ctx.parse_workers} workers")
+
+            # Lazy generator of args tuples. Don't materialize the full
+            # list — source bytes for 13K files would balloon RSS. Pool's
+            # imap_unordered consumes lazily (with internal buffering).
+            args_iter = (
+                (rel_path, source, language, sha, ctx.repo, ctx.repo_files)
+                for (rel_path, source, language, sha) in _work_items()
+            )
+
+            with multiprocessing.Pool(
+                ctx.parse_workers, initializer=_pool_init,
+            ) as pool:
+                for rel_path, fragment, err in pool.imap_unordered(
+                    _pool_extract, args_iter, chunksize=8,
+                ):
+                    if err is not None:
+                        logger.warning("extractor failed on %s: %s", rel_path, err)
+                        continue
+                    if fragment is None:
+                        # Unsupported language — already filtered by the
+                        # walker, but defensive.
+                        continue
+                    ctx.batch.extend(fragment)
+                    file_count += 1
+                    if file_count % PROGRESS_EVERY == 0:
+                        elapsed = time.monotonic() - start
+                        rate = file_count / elapsed if elapsed > 0 else 0
+                        print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
 
         walk_secs = time.monotonic() - start
         if ctx.skipped_files:
