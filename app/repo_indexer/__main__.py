@@ -83,6 +83,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             ts_parsers=ts_parsers,
             driver=None,
             parse_workers=parse_workers,
+            legacy_resolver=args.legacy_resolver,
         )
         run_pipeline(ctx, DEFAULT_PHASES)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -104,6 +105,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             ts_parsers=ts_parsers,
             driver=driver,
             parse_workers=parse_workers,
+            legacy_resolver=args.legacy_resolver,
         )
         run_pipeline(ctx, DEFAULT_PHASES)
         write_start = time.monotonic()
@@ -137,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
         "--parse-workers", type=int, default=None,
         help="Parse files in N worker processes. Default: cpu_count()//2 "
              "(or 1 if cpu_count() is 1). Set to 1 to force sequential.",
+    )
+    scan.add_argument(
+        "--legacy-resolver", action="store_true", default=False,
+        help="Use the pre-12b resolver. Removed in Sprint 13.",
     )
     scan.set_defaults(func=cmd_scan)
 

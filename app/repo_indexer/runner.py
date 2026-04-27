@@ -45,6 +45,13 @@ class PhaseContext:
     # PhaseContext default stays 1 so existing call sites and unit tests don't
     # silently spawn pools.
     parse_workers: int = 1
+    # Sprint 12b: when True, `phases.resolve` falls back to the legacy
+    # `resolver.resolve_batch`. Default False uses the new
+    # `scope_resolution.finalize.finalize_batch` path (Tarjan SCC over imports
+    # + wildcard expansion + param-type method resolution). The flag exists
+    # for one sprint only; Sprint 13 deletes the legacy resolver and this
+    # field along with it.
+    legacy_resolver: bool = False
 
 
 class Phase(Protocol):

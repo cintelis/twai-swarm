@@ -47,3 +47,10 @@ tree-sitter-python>=0.23,<0.26
 # parse-errors on JSX literals).
 tree-sitter-typescript>=0.23,<0.26
 neo4j>=5.25,<7.0
+# Sprint 12b — repo_indexer cross-file resolution.
+# rustworkx hosts the Tarjan SCC + topological-sort over the import graph
+# used by `scope_resolution/finalize.py` (re-export closure handling).
+# Spike `sprint-status/sprint-12-tarjan-spike.md` measured rustworkx at
+# ~5x faster than networkx end-to-end at GitNexus self-scan dimensions
+# and well under the 200ms budget.
+rustworkx>=0.16,<0.18

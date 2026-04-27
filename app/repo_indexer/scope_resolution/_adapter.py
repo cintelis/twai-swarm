@@ -1,0 +1,123 @@
+"""Adapter — bridge `IndexBatch` shape to `scope_resolution` types.
+
+The four indexes from Sprint 12a (`scope_tree`, `position_index`,
+`qualified_name_index`, `module_scope_index`) are pure structural
+algorithms over `Declaration` / `ScopeId` / `Range`. This module is the
+one place that knows how to convert the indexer's `IndexBatch` records
+(FunctionNode, ClassNode, ModuleNode) into those types.
+
+Kept private (`_adapter`) so 12c's method-dispatch index — which will
+also need the same conversion — has a single import target rather than
+re-deriving the mapping inline. Public entry points: `to_declarations`,
+`to_scopes`.
+
+Range encoding: we use line numbers as the int values for `start_byte`
+and `end_byte`. The 12a predicates only need monotonic int ordering for
+strict containment — they don't care whether the ints represent bytes
+or lines. The extractor emits 1-based inclusive line numbers; we feed
+those through unchanged. `range_strictly_contains` rejects equal ranges,
+so two scopes that happen to share the same line span will fail the
+ScopeTree invariant — same shape as a byte-range collision.
+"""
+from __future__ import annotations
+
+from ..actions import IndexBatch
+from .types import Declaration, Range, ScopeId
+
+
+def _range_for(file_path: str, line_start: int, line_end: int) -> Range:
+    # Line numbers used as ints in start_byte/end_byte. The 12a predicates
+    # only need monotonic int ordering for containment — bytes vs lines is
+    # immaterial to them. end_byte is treated half-open (matches the
+    # ScopeTree convention), so we add 1 to the inclusive end line.
+    return Range(file_path=file_path, start_byte=line_start, end_byte=line_end + 1)
+
+
+def to_declarations(batch: IndexBatch) -> list[Declaration]:
+    """Convert FunctionNodes / ClassNodes / ModuleNodes to Declarations.
+
+    Method declarations carry a `scope_id` pointing at their enclosing
+    class scope (looked up by `parent_class_qn`); top-level functions
+    and classes get `scope_id=None`. ModuleNodes also produce
+    Declarations (kind="module") so the qualified-name index can answer
+    "is this qn a known module?" queries.
+    """
+    # Pre-build a map of class_qn -> ScopeId so methods can name their
+    # enclosing scope without a second pass.
+    class_scope_by_qn: dict[str, ScopeId] = {}
+    for c in batch.classes:
+        class_scope_by_qn[c.qualified_name] = ScopeId(
+            file_path=c.file_path,
+            range=_range_for(c.file_path, c.line_start, c.line_end),
+            kind="class",
+        )
+
+    out: list[Declaration] = []
+
+    for m in batch.modules:
+        # Modules don't have line ranges in our extractor output. Encode a
+        # zero-width range at line 0 — it's outside any function/class
+        # range and won't collide. Module declarations are excluded from
+        # ScopeTree (see to_scopes), so the range only matters for the
+        # qualified-name index, which doesn't touch ranges.
+        out.append(Declaration(
+            qualified_name=m.qualified_name,
+            name=m.qualified_name.rsplit(".", 1)[-1] if "." in m.qualified_name else m.qualified_name,
+            kind="module",
+            file_path=m.file_path,
+            range=Range(file_path=m.file_path, start_byte=0, end_byte=0),
+            scope_id=None,
+        ))
+
+    for c in batch.classes:
+        out.append(Declaration(
+            qualified_name=c.qualified_name,
+            name=c.name,
+            kind="class",
+            file_path=c.file_path,
+            range=_range_for(c.file_path, c.line_start, c.line_end),
+            scope_id=None,
+        ))
+
+    for f in batch.functions:
+        scope_id = None
+        if f.is_method and f.parent_class_qn:
+            scope_id = class_scope_by_qn.get(f.parent_class_qn)
+        out.append(Declaration(
+            qualified_name=f.qualified_name,
+            name=f.name,
+            kind="method" if f.is_method else "function",
+            file_path=f.file_path,
+            range=_range_for(f.file_path, f.line_start, f.line_end),
+            scope_id=scope_id,
+        ))
+
+    return out
+
+
+def to_scopes(batch: IndexBatch) -> list[ScopeId]:
+    """Flat list of ScopeIds — one per FunctionNode (kind="function"),
+    one per ClassNode (kind="class"). ModuleNodes don't have line ranges
+    in our extractor output, so they don't become scopes here.
+
+    `build_scope_tree` consumes this list and rejects identical ranges
+    via ScopeTreeInvariantError; let that propagate (same contract as
+    the 12a indexes).
+    """
+    out: list[ScopeId] = []
+    for c in batch.classes:
+        out.append(ScopeId(
+            file_path=c.file_path,
+            range=_range_for(c.file_path, c.line_start, c.line_end),
+            kind="class",
+        ))
+    for f in batch.functions:
+        out.append(ScopeId(
+            file_path=f.file_path,
+            range=_range_for(f.file_path, f.line_start, f.line_end),
+            kind="function",
+        ))
+    return out
+
+
+__all__ = ["to_declarations", "to_scopes"]
