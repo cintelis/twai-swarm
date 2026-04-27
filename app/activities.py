@@ -407,10 +407,8 @@ async def index_repo_activity(
     from app.repo_indexer.loader import (
         driver_from_env, ensure_constraints, prune_stale, write_batch,
     )
-    from app.repo_indexer.scope_resolution.finalize import finalize_batch
-    from app.repo_indexer.walker import walk_paths, walk_repo
-    from app.repo_indexer.extractor_python import extract_python_file
-    from app.repo_indexer.extractor_typescript import extract_typescript_file
+    from app.repo_indexer.phases import DEFAULT_PHASES
+    from app.repo_indexer.runner import PhaseContext, run_pipeline
     import tree_sitter_python as tspython
     import tree_sitter_typescript as tsts
     from tree_sitter import Language, Parser
@@ -426,48 +424,45 @@ async def index_repo_activity(
         "tsx":        Parser(Language(tsts.language_tsx())),
     }
 
-    # Sprint 10g: path-only pre-walk (was reading bytes for nothing).
-    activity.heartbeat("indexing — pre-walking file set")
-    repo_files: set[str] = set()
-    for rel_path, _lang in walk_paths(repo_root):
-        repo_files.add(rel_path)
-
     aggregate = IndexBatch(repo=repo)
-    file_count = 0
-    for rel_path, source, language, sha in walk_repo(repo_root):
-        try:
-            if language == "python":
-                fragment = extract_python_file(repo, rel_path, source, sha, py_parser)
-            elif language in ("typescript", "javascript"):
-                use_tsx = rel_path.endswith((".tsx", ".jsx"))
-                parser = ts_parsers["tsx"] if use_tsx else ts_parsers["typescript"]
-                fragment = extract_typescript_file(
-                    repo, rel_path, source, sha, parser,
-                    repo_files=repo_files, language=language,
-                )
-            else:
-                continue
-        except Exception as e:
-            logger.warning("index_repo_activity: extractor failed on %s: %s", rel_path, e)
-            continue
-        aggregate.extend(fragment)
-        file_count += 1
-        if file_count % 50 == 0:
-            activity.heartbeat(f"indexed {file_count} files")
 
-    # Sprint 13 cleanup: legacy resolve_batch deleted; finalize_batch is the
-    # only resolution path. NOTE: this activity bypasses runner.run_pipeline,
-    # so CommunityDetectPhase / ProcessExtractPhase don't run here yet —
-    # Temporal-driven scans miss the discoverability data. Tracked as a
-    # Sprint 14-prep refactor: switch this body to run_pipeline(ctx, DEFAULT_PHASES).
-    finalize_batch(aggregate)
+    # Route phase milestones through Temporal heartbeats so a slow scan
+    # doesn't time out. The progress callback fires once per phase boundary
+    # (scan / parse / resolve / community_detect / process_extract); the
+    # per-200-file rate prints in ParsePhase still go to stdout via raw
+    # `print` — they're not captured here.
+    def _progress(msg: str) -> None:
+        activity.heartbeat(msg)
+        print(msg, flush=True)
 
-    activity.heartbeat("writing to Neo4j")
     with driver_from_env() as driver:
         ensure_constraints(driver)
         prune_stale(driver, repo_name, commit_sha)
+        ctx = PhaseContext(
+            repo=repo,
+            repo_root=repo_root,
+            languages=("python", "typescript", "javascript"),
+            batch=aggregate,
+            py_parser=py_parser,
+            ts_parsers=ts_parsers,
+            progress=_progress,
+            driver=driver,
+            # Sequential parsing inside a Temporal activity. multiprocessing.Pool
+            # from inside an activity has cross-platform sharp edges (Windows
+            # spawn re-imports the workflow context, fork on Linux can deadlock
+            # with Temporal's worker threads). Re-evaluate if scan time on a
+            # 13K-file repo becomes a real Coder UX problem.
+            parse_workers=1,
+            # Embeddings are opt-in even for Temporal scans. Activity callers
+            # that want them set this flag via a separate mechanism (env var
+            # or workflow input field) — out of scope for this refactor.
+            embed_enabled=False,
+        )
+        run_pipeline(ctx, DEFAULT_PHASES)
+        activity.heartbeat("writing to Neo4j")
         write_batch(driver, aggregate)
 
+    file_count = len(aggregate.files)
     return {"file_count": file_count, **aggregate.counts()}
 
 
