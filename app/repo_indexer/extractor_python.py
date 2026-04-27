@@ -175,6 +175,10 @@ def _walk_imports(source: bytes, root: Any) -> list[tuple[str, str, str]]:
       `from x import y`         -> ("x.y", "y", "symbol")
       `from x import y as foo`  -> ("x.y", "foo", "symbol")
       `from x import y, z`      -> emits two entries
+      `from x import *`         -> ("x", "*", "module") — finalize.py's
+                                    _is_wildcard branch picks this up
+                                    and unions x's exports into the file's
+                                    binding scope.
     """
     out: list[tuple[str, str, str]] = []
     for child in root.children:
@@ -218,6 +222,10 @@ def _walk_imports(source: bytes, root: Any) -> list[tuple[str, str, str]]:
                         name = _node_text(source, name_node)
                         alias = _node_text(source, alias_node)
                         out.append((f"{mod_qn}.{name}", alias, "symbol"))
+                elif sub.type == "wildcard_import":
+                    # `from x import *`: target_qn is the module itself,
+                    # local_name="*" matches finalize._is_wildcard's gate.
+                    out.append((mod_qn, "*", "module"))
     return out
 
 

@@ -270,6 +270,25 @@ def test_extractor_flattens_super_call_chain(parser):
     assert "super" not in calls_by_callee
 
 
+def test_extractor_emits_wildcard_import(parser):
+    """`from x import *` should produce an ImportEdge with local_name='*'
+    and kind='module' so finalize.py's _is_wildcard branch picks it up.
+    Pre-fix the wildcard_import tree-sitter node was silently skipped.
+    """
+    src = b"""from app.helpers import *
+from app.utils import named_helper
+
+def consumer():
+    return named_helper()
+"""
+    batch = extract_python_file(REPO, "consumer.py", src, "sha-wild", parser)
+
+    by_target = {(imp.target_qn, imp.local_name, imp.kind) for imp in batch.imports}
+    assert ("app.helpers", "*", "module") in by_target
+    # The non-wildcard import should still be there with the regular shape.
+    assert ("app.utils.named_helper", "named_helper", "symbol") in by_target
+
+
 def test_extractor_external_call_no_symbol_until_resolver(parser):
     """Extractor records the dotted name verbatim; Symbols come from the
     resolver, not the extractor."""
