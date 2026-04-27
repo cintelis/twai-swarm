@@ -24,6 +24,11 @@ Tool surface:
         Same opt-in conditions. High-level discoverability (Sprint 13c):
         list execution flows / Louvain communities so the Coder can ask
         "what does this codebase do" before drilling in.
+  - repo_semantic_search
+        Same opt-in conditions. Hybrid BM25 + vector search (Sprint 14b):
+        find code by concept rather than exact name. The right default
+        for high-level briefs ("auth flow", "error handling"); use
+        repo_search when you already know the symbol name.
 """
 from __future__ import annotations
 
@@ -87,6 +92,7 @@ def build_tools(
         "repo_find_callers_calls": 0,
         "repo_find_processes_calls": 0,
         "repo_find_modules_calls": 0,
+        "repo_semantic_search_calls": 0,
         "bytes_written": 0,
         "last_verify_exit": None,
         "last_verify_stdout": "",
@@ -423,9 +429,50 @@ def build_tools(
                 for m in results
             ])
 
+        @beta_async_tool
+        async def repo_semantic_search(query: str, limit: int = 10) -> str:
+            """Find code semantically related to a natural-language query.
+
+            Hybrid retrieval: combines BM25 keyword search (over symbol
+            names + docstrings) with vector similarity (over per-symbol
+            embeddings), then fuses the two ranked lists via Reciprocal
+            Rank Fusion. Use this when the user asks about CONCEPTS
+            ("auth flow", "error handling", "database connection
+            pooling") rather than exact symbol names. For exact-name
+            lookup, repo_search is faster and more precise.
+
+            Args:
+                query: Natural-language description of what to find.
+                    Empty string returns no results.
+                limit: Max results (1-100, default 10).
+
+            Returns JSON: [{qualified_name, name, kind, file_path,
+            line_start, docstring}, ...] ranked by hybrid relevance.
+            Test-only files are excluded. Docstrings are truncated.
+            If the repo wasn't indexed with embeddings the query falls
+            back to BM25 only — still useful, just narrower.
+            """
+            stats["repo_semantic_search_calls"] += 1
+            limit = max(1, min(100, int(limit)))
+            results = await asyncio.to_thread(
+                repo_query.semantic_search,
+                neo4j_driver, repo_name, query, limit, False,
+            )
+            return json.dumps([
+                {
+                    "qualified_name": r.qualified_name,
+                    "name": r.name,
+                    "kind": r.kind,
+                    "file_path": r.file_path,
+                    "line_start": r.line_start,
+                    "docstring": r.docstring,
+                }
+                for r in results
+            ])
+
         tools.extend([
             repo_search, repo_find_definition, repo_find_callers,
-            repo_find_processes, repo_find_modules,
+            repo_find_processes, repo_find_modules, repo_semantic_search,
         ])
 
     return tools, stats

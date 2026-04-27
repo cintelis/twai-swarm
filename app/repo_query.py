@@ -7,10 +7,14 @@ shape.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from neo4j import Driver
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -19,6 +23,7 @@ __all__ = [
     "SymbolMatch",
     "ProcessSummary",
     "ModuleSummary",
+    "SemanticHit",
     "find_definition",
     "find_callers",
     "find_callees",
@@ -26,6 +31,7 @@ __all__ = [
     "find_symbol",
     "find_processes",
     "find_modules",
+    "semantic_search",
 ]
 
 
@@ -81,6 +87,37 @@ class ModuleSummary:
     cohesion: float
     size: int
     sample_member_qns: tuple[str, ...]  # up to ~5 representative members
+
+
+# ─── Sprint 14b — hybrid semantic search ─────────────────────────────────────
+
+@dataclass(frozen=True)
+class SemanticHit:
+    """One result from `semantic_search`: a Function or Class plus the fused
+    score from BM25 + vector reciprocal-rank-fusion.
+
+    `rrf_score` is exposed for debugging / tunability — the agent doesn't use
+    it directly (it gets the ranked list and the score is opaque), but it
+    matters to humans iterating on the relevance set.
+    """
+    qualified_name: str
+    name: str
+    kind: str             # "function" | "class"
+    file_path: str
+    line_start: int       # 0 for classes if not stored
+    docstring: str        # truncated to ~200 chars
+    rrf_score: float
+
+
+# Truncate docstrings before they cross the wire to the Coder. Long module
+# docstrings are wasteful to send and the BM25 leg already used the full
+# text for ranking; the agent only needs a sniff for relevance.
+_DOCSTRING_TRUNC_CHARS = 200
+
+# Standard RRF damping factor (Cormack et al. 2009). 60 is the canonical
+# choice; small enough that rank-1 dominates rank-2 but large enough that
+# the long tail still contributes a fractional vote.
+_RRF_K_DEFAULT = 60
 
 
 def find_definition(driver: Driver, repo: str, qualified_name: str) -> Optional[Definition]:
@@ -184,6 +221,23 @@ _TEST_PATH_PREDICATE = (
     "OR fp CONTAINS '/tests/' OR fp CONTAINS '/test_' "
     "OR fp STARTS WITH 'test_')"
 )
+
+
+def _test_path_predicate_for(var: str) -> str:
+    """Return the test-path OR-chain bound to a different Cypher variable.
+
+    `_TEST_PATH_PREDICATE` is hardcoded to `fp`; some queries reference
+    the file path under a different alias (`node.file_path`,
+    `m.file`, etc.). This helper rewrites the variable so the same
+    semantics apply across `find_processes` / `find_modules` /
+    `semantic_search`. Sprint 14b extracted this so the predicate
+    lives in one place.
+    """
+    return (
+        f"({var} STARTS WITH 'tests/' OR {var} STARTS WITH 'test/' "
+        f"OR {var} CONTAINS '/tests/' OR {var} CONTAINS '/test_' "
+        f"OR {var} STARTS WITH 'test_')"
+    )
 
 
 def find_symbol(driver: Driver, repo: str, name: str, limit: int = 25) -> list[SymbolMatch]:
@@ -365,5 +419,271 @@ def find_modules(
             cohesion=float(row["cohesion"]),
             size=int(row["size"]),
             sample_member_qns=sample,
+        ))
+    return out
+
+
+# ─── Sprint 14b — semantic_search ────────────────────────────────────────────
+
+
+def _embed_query_sync(query: str) -> Optional[list[float]]:
+    """Embed `query` synchronously, returning None on any failure.
+
+    The query layer is sync (matches the rest of `repo_query`), but
+    `app.embeddings.embed_text` is async. We bridge with `asyncio.run`.
+    Failures (no API key, network error, missing openai package) return
+    None so the caller can fall back to BM25-only — semantic search is
+    a best-effort discoverability surface, not load-bearing.
+    """
+    try:
+        from app.embeddings import embed_text
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("semantic_search: app.embeddings not importable (%s); BM25-only", exc)
+        return None
+    try:
+        return asyncio.run(embed_text(query))
+    except RuntimeError as exc:
+        # If we're already inside a running event loop (e.g. called from
+        # an async tool), `asyncio.run` raises. Schedule on a worker thread
+        # via `asyncio.run` from a fresh loop. Fall back to BM25-only if
+        # that path also fails — the Coder tool wraps this in
+        # `asyncio.to_thread` so a fresh thread should mean a fresh loop.
+        logger.warning("semantic_search: embed_text scheduling failed (%s); BM25-only", exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("semantic_search: embed_text failed (%s); BM25-only", exc)
+        return None
+
+
+def _bm25_leg(
+    driver: Driver,
+    repo: str,
+    query: str,
+    candidate_limit: int,
+    include_tests: bool,
+) -> tuple[Optional[list[dict]], Optional[Exception]]:
+    """Run the full-text leg. Returns (rows, None) on success or
+    (None, exc) if the index is missing / the query failed.
+
+    Sorted by `score DESC` in Python before the caller assigns ranks.
+    """
+    test_filter = "" if include_tests else f" AND NOT {_test_path_predicate_for('node.file_path')}"
+    cypher = f"""
+        CALL db.index.fulltext.queryNodes('function_text', $query) YIELD node, score
+        WHERE node.repo = $repo{test_filter}
+        RETURN node.qualified_name AS qualified_name,
+               node.name AS name,
+               coalesce(node.file_path, '') AS file_path,
+               coalesce(node.line_start, 0) AS line_start,
+               coalesce(node.docstring, '') AS docstring,
+               score AS score,
+               'function' AS kind
+        LIMIT $candidate_limit
+        UNION
+        CALL db.index.fulltext.queryNodes('class_text', $query) YIELD node, score
+        WHERE node.repo = $repo{test_filter}
+        RETURN node.qualified_name AS qualified_name,
+               node.name AS name,
+               coalesce(node.file_path, '') AS file_path,
+               coalesce(node.line_start, 0) AS line_start,
+               coalesce(node.docstring, '') AS docstring,
+               score AS score,
+               'class' AS kind
+        LIMIT $candidate_limit
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(
+                cypher, repo=repo, query=query, candidate_limit=int(candidate_limit),
+            )
+            rows = result.data()
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows, None
+
+
+def _vector_leg(
+    driver: Driver,
+    repo: str,
+    query_vec: list[float],
+    candidate_limit: int,
+    include_tests: bool,
+) -> tuple[Optional[list[dict]], Optional[Exception]]:
+    """Run the vector leg. Returns (rows, None) on success or (None, exc)
+    if the vector index is missing / the query failed.
+
+    Sorted by `score DESC` in Python before the caller assigns ranks.
+    """
+    test_filter = "" if include_tests else f" AND NOT {_test_path_predicate_for('node.file_path')}"
+    cypher = f"""
+        CALL db.index.vector.queryNodes('function_embedding', $candidate_limit, $query_vec)
+            YIELD node, score
+        WHERE node.repo = $repo{test_filter}
+        RETURN node.qualified_name AS qualified_name,
+               node.name AS name,
+               coalesce(node.file_path, '') AS file_path,
+               coalesce(node.line_start, 0) AS line_start,
+               coalesce(node.docstring, '') AS docstring,
+               score AS score,
+               'function' AS kind
+        UNION
+        CALL db.index.vector.queryNodes('class_embedding', $candidate_limit, $query_vec)
+            YIELD node, score
+        WHERE node.repo = $repo{test_filter}
+        RETURN node.qualified_name AS qualified_name,
+               node.name AS name,
+               coalesce(node.file_path, '') AS file_path,
+               coalesce(node.line_start, 0) AS line_start,
+               coalesce(node.docstring, '') AS docstring,
+               score AS score,
+               'class' AS kind
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(
+                cypher, repo=repo, query_vec=query_vec,
+                candidate_limit=int(candidate_limit),
+            )
+            rows = result.data()
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows, None
+
+
+def semantic_search(
+    driver: Driver,
+    repo: str,
+    query: str,
+    k: int = 10,
+    include_tests: bool = False,
+    rrf_k: int = _RRF_K_DEFAULT,
+) -> list[SemanticHit]:
+    """Hybrid BM25 + vector search. Returns top-k results ranked by RRF.
+
+    Both legs run sequentially (the Neo4j driver doesn't trivially
+    parallelise two queries from one session — measure and revisit if
+    it's a hot path). Each leg pulls top 2*k candidates so the fusion
+    has headroom; the final list is truncated to k.
+
+    Args:
+        driver: Neo4j driver.
+        repo: Repo node `name` to filter on.
+        query: Natural-language query string. Empty / whitespace-only
+            returns an empty list immediately (no Neo4j round-trip).
+        k: Max results to return. Default 10.
+        include_tests: When False (default), drop hits whose `file_path`
+            matches `_test_path_predicate_for(...)`. Power users can
+            override at this layer; the Coder tool always passes False.
+        rrf_k: Reciprocal-rank-fusion damping factor. Default 60
+            (`_RRF_K_DEFAULT`); standard choice from the literature.
+            Smaller values give rank-1 a heavier weight; larger values
+            flatten the curve. The agent never sees this — exposed for
+            relevance-tuning experiments.
+
+    Edge cases:
+        * Empty query → `[]`.
+        * Embedding call fails (no API key, network, etc.) → BM25-only
+          result with a logged warning.
+        * Full-text index missing → vector-only result with a logged
+          warning.
+        * Both indexes missing → `[]` with a logged warning.
+
+    Returns:
+        Up to `k` `SemanticHit` records, ranked by fused RRF score
+        descending. Docstrings are truncated to ~200 chars.
+    """
+    if not query or not query.strip():
+        return []
+    candidate_limit = max(1, int(k) * 2)
+
+    # 1. Embed (best-effort).
+    query_vec = _embed_query_sync(query)
+
+    # 2. BM25 leg.
+    bm25_rows, bm25_err = _bm25_leg(driver, repo, query, candidate_limit, include_tests)
+    if bm25_err is not None:
+        logger.warning(
+            "semantic_search: BM25 leg failed (%s); falling back to vector-only",
+            bm25_err,
+        )
+        bm25_rows = []
+
+    # 3. Vector leg (only if we have a query vector).
+    if query_vec is None:
+        vector_rows: list[dict] = []
+        vector_err: Optional[Exception] = None
+    else:
+        vector_rows_or_none, vector_err = _vector_leg(
+            driver, repo, query_vec, candidate_limit, include_tests,
+        )
+        if vector_err is not None:
+            logger.warning(
+                "semantic_search: vector leg failed (%s); falling back to BM25-only",
+                vector_err,
+            )
+            vector_rows = []
+        else:
+            vector_rows = vector_rows_or_none or []
+
+    # 4. Both legs empty AND at least one had an error → nothing usable.
+    if not bm25_rows and not vector_rows:
+        if bm25_err is not None or vector_err is not None or query_vec is None:
+            logger.warning(
+                "semantic_search: no results and at least one leg unavailable "
+                "(bm25_err=%s vector_err=%s query_vec_present=%s)",
+                bm25_err, vector_err, query_vec is not None,
+            )
+        return []
+
+    # 5. Reciprocal Rank Fusion. For each unique node (keyed on
+    #    qualified_name + kind), sum 1 / (rrf_k + rank_i) over the legs
+    #    in which it appears. Standard formula.
+    #
+    #    Worked example (rrf_k=60):
+    #       BM25 ranks: A=1, B=2, C=3
+    #       Vector ranks: B=1, A=2, D=3
+    #       A: 1/(60+1) + 1/(60+2) ≈ 0.01639 + 0.01613 ≈ 0.03252
+    #       B: 1/(60+2) + 1/(60+1) ≈ 0.01613 + 0.01639 ≈ 0.03252
+    #       C: 1/(60+3)            ≈ 0.01587
+    #       D: 1/(60+3)            ≈ 0.01587
+    #    A and B tie because they swap ranks symmetrically; C and D tie
+    #    for the same reason. Tie-broken by qualified_name asc below.
+    fused: dict[tuple[str, str], dict] = {}
+    for rank, row in enumerate(bm25_rows, start=1):
+        key = (row["qualified_name"], row["kind"])
+        contrib = 1.0 / (rrf_k + rank)
+        if key in fused:
+            fused[key]["rrf"] += contrib
+        else:
+            fused[key] = {"row": row, "rrf": contrib}
+
+    for rank, row in enumerate(vector_rows, start=1):
+        key = (row["qualified_name"], row["kind"])
+        contrib = 1.0 / (rrf_k + rank)
+        if key in fused:
+            fused[key]["rrf"] += contrib
+        else:
+            fused[key] = {"row": row, "rrf": contrib}
+
+    # 6. Sort by RRF desc; tie-break on qualified_name asc for determinism.
+    ranked = sorted(
+        fused.values(),
+        key=lambda e: (-e["rrf"], e["row"]["qualified_name"]),
+    )[: int(k)]
+
+    out: list[SemanticHit] = []
+    for entry in ranked:
+        row = entry["row"]
+        docstring = (row.get("docstring") or "")[:_DOCSTRING_TRUNC_CHARS]
+        out.append(SemanticHit(
+            qualified_name=row["qualified_name"],
+            name=row.get("name") or row["qualified_name"].rsplit(".", 1)[-1],
+            kind=row["kind"],
+            file_path=row.get("file_path") or "",
+            line_start=int(row.get("line_start") or 0),
+            docstring=docstring,
+            rrf_score=float(entry["rrf"]),
         ))
     return out

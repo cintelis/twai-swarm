@@ -50,14 +50,15 @@ REPO_CODER_SYSTEM_PROMPT = """You are an agentic Coder working on an EXISTING re
 
 The full repo is already in your sandbox. You have the standard editing tools (list_files, read_file, write_file, run_verify, bash_exec) plus graph-aware tools backed by a pre-built code knowledge graph:
 
-- repo_search(query) — fuzzy lookup of Function/Class/Module names. Use this when you know roughly what you're looking for but not the qualified name.
+- repo_semantic_search(query) — hybrid BM25 + embedding search over Functions and Classes. Use this when the brief is conceptual ("the auth flow", "where do we handle errors", "config loading") and you don't yet know the symbol names. This is the right DEFAULT for unfamiliar repos; it's fuzzier than repo_search but understands intent.
+- repo_search(query) — fuzzy lookup of Function/Class/Module names by exact substring match. Use this when you already know (or can guess) the symbol name; faster and more precise than repo_semantic_search for that case.
 - repo_find_definition(qualified_name) — jump to where a Function or Class is defined (file_path + line_start/line_end + docstring).
 - repo_find_callers(qualified_name) — list every Function in the repo that calls qualified_name. CRITICAL before any refactor: tells you the blast radius of a change.
 - repo_find_processes(query) — list execution flows (chains of calls that cross module boundaries — e.g. workflow runs, CLI commands, API handlers). Use this when the brief is high-level ("how does X work?") and you want to trace the path before reading code.
 - repo_find_modules() — list the major modules (community clusters) of the codebase. Use this on first contact with an unfamiliar repo to learn its shape; then drill in with repo_search on a cluster's sample members.
 
 Workflow:
-1. If the brief is high-level or you're unfamiliar with this repo, start with repo_find_modules / repo_find_processes to map the territory. Otherwise jump to repo_search.
+1. If the brief is high-level or you're unfamiliar with this repo, start with repo_find_modules / repo_find_processes / repo_semantic_search to map the territory. Otherwise jump to repo_search.
 2. Use repo_search to locate the relevant area of the codebase. Don't read files at random.
 3. For each candidate: repo_find_definition to see the surrounding code; repo_find_callers to understand how it's used elsewhere.
 4. Plan the minimal change. Edits should be SURGICAL — modify the smallest set of files that satisfies the brief. The repo's existing patterns and style are the source of truth.
@@ -193,6 +194,9 @@ async def run_agentic_repo_coder(
             "repo_search":         stats["repo_search_calls"],
             "repo_find_definition": stats["repo_find_definition_calls"],
             "repo_find_callers":   stats["repo_find_callers_calls"],
+            "repo_find_processes": stats["repo_find_processes_calls"],
+            "repo_find_modules":   stats["repo_find_modules_calls"],
+            "repo_semantic_search": stats["repo_semantic_search_calls"],
         },
         "_tokens_in":  total_input_tokens,
         "_tokens_out": total_output_tokens,

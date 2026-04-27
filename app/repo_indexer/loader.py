@@ -94,6 +94,23 @@ def ensure_constraints(driver: Driver) -> None:
         for stmt in stmts:
             session.run(stmt)
 
+        # Sprint 14b — full-text (BM25) indexes on Function/Class. These
+        # power the keyword leg of `repo_query.semantic_search`. They are
+        # NOT gated on the `app.embeddings` import — full-text indexing
+        # has no embeddings dependency, and the BM25 leg is useful even
+        # when the repo was never indexed `--with-embeddings`.
+        for label, index_name in (
+            ("Function", "function_text"),
+            ("Class", "class_text"),
+        ):
+            session.run(
+                f"""
+                CREATE FULLTEXT INDEX {index_name} IF NOT EXISTS
+                FOR (n:{label})
+                ON EACH [n.name, n.docstring]
+                """
+            )
+
         # Sprint 14a — vector indexes. Created here (not as constraints —
         # they're indexes, not uniqueness rules) so the embed phase can
         # write into them on the very first opt-in scan. Sourced dim from

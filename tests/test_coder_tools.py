@@ -53,15 +53,17 @@ def test_build_tools_adds_graph_tools_with_neo4j(tmp_path):
 
     Sprint 10c added 3 graph tools (search/find_definition/find_callers);
     Sprint 13c added 2 more (find_processes/find_modules) for high-level
-    discoverability. So 5 sandbox + 5 graph = 10 total.
+    discoverability; Sprint 14b added repo_semantic_search. So 5 sandbox
+    + 6 graph = 11 total.
     """
     sb = _sandbox(tmp_path)
     fake_driver = object()
     tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="repo")
-    assert len(tools) == 10
+    assert len(tools) == 11
     for key in (
         "repo_search_calls", "repo_find_definition_calls", "repo_find_callers_calls",
         "repo_find_processes_calls", "repo_find_modules_calls",
+        "repo_semantic_search_calls",
     ):
         assert stats[key] == 0
 
@@ -512,3 +514,94 @@ async def test_repo_find_modules_clamps_limit(tmp_path, monkeypatch):
     tool = _tools_by_name(tools)["repo_find_modules"]
     await _call(tool, limit=99999)
     assert seen["limit"] == 100
+
+
+# ─── Hybrid semantic search (Sprint 14b) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repo_semantic_search_tool_calls_query_layer(tmp_path, monkeypatch):
+    """The Coder tool routes args through to repo_query.semantic_search and
+    serialises SemanticHit dataclasses into the JSON shape the model
+    consumes — qualified_name, name, kind, file_path, line_start, docstring."""
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    captured: dict = {}
+
+    def fake_semantic_search(driver, repo, query, k, include_tests):
+        captured["args"] = (driver, repo, query, k, include_tests)
+        return [
+            repo_query.SemanticHit(
+                qualified_name="app.auth.login",
+                name="login",
+                kind="function",
+                file_path="app/auth.py",
+                line_start=42,
+                docstring="Log a user in via email/password.",
+                rrf_score=0.0325,
+            ),
+        ]
+    monkeypatch.setattr(repo_query, "semantic_search", fake_semantic_search)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    tool = _tools_by_name(tools)["repo_semantic_search"]
+
+    out = await _call(tool, query="auth flow", limit=5)
+    parsed = json.loads(out)
+
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["qualified_name"] == "app.auth.login"
+    assert parsed[0]["name"] == "login"
+    assert parsed[0]["kind"] == "function"
+    assert parsed[0]["file_path"] == "app/auth.py"
+    assert parsed[0]["line_start"] == 42
+    assert "Log a user in" in parsed[0]["docstring"]
+    # rrf_score is intentionally NOT in the wire shape — agent doesn't need it.
+    assert "rrf_score" not in parsed[0]
+    # include_tests must default to False — Coder shouldn't see test paths.
+    assert captured["args"] == (fake_driver, "r", "auth flow", 5, False)
+    assert stats["repo_semantic_search_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_semantic_tool_added_only_when_driver_and_repo_name_provided(tmp_path):
+    """Sprint 14b: same opt-in shape as the rest of the repo_* tools.
+    Without a driver, the tool isn't registered at all."""
+    sb = _sandbox(tmp_path)
+
+    bare_tools, _ = build_tools(sb)
+    assert "repo_semantic_search" not in {t.name for t in bare_tools}
+
+    full_tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="repo")
+    assert "repo_semantic_search" in {t.name for t in full_tools}
+
+
+def test_semantic_tool_count_matches_expected_total(tmp_path):
+    """build_tools(sandbox, driver, repo) returns 11 tools after 14b
+    (was 10 after 13c). Lock the count so future additions / removals
+    are an explicit decision rather than a silent drift."""
+    sb = _sandbox(tmp_path)
+    tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
+    assert len(tools) == 11
+    assert "repo_semantic_search" in {t.name for t in tools}
+
+
+@pytest.mark.asyncio
+async def test_repo_semantic_search_clamps_limit(tmp_path, monkeypatch):
+    """limit clamped to [1, 100] same as the other repo_* tools."""
+    sb = _sandbox(tmp_path)
+    from app import repo_query
+
+    seen: dict = {}
+    def fake(driver, repo, query, k, include_tests):
+        seen["k"] = k
+        return []
+    monkeypatch.setattr(repo_query, "semantic_search", fake)
+
+    tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
+    tool = _tools_by_name(tools)["repo_semantic_search"]
+    await _call(tool, query="x", limit=99999)
+    assert seen["k"] == 100
