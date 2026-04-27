@@ -31,6 +31,14 @@ class PhaseContext:
     py_parser: Any = None
     ts_parsers: dict | None = None
     progress: Callable[[str], None] = print
+    # Sprint 11b: SHA short-circuit. `driver` is a Neo4j Driver (typed Any
+    # so the runner doesn't drag neo4j into the import path); `prior_shas`
+    # holds {rel_path: sha} from the last scan. ParsePhase populates it on
+    # entry when driver is set, then skips files whose on-disk SHA matches.
+    # Tests pre-seed `prior_shas` directly with `driver=None`.
+    driver: Any = None
+    prior_shas: dict[str, str] = field(default_factory=dict)
+    skipped_files: int = 0
 
 
 class Phase(Protocol):

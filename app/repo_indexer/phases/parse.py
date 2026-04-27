@@ -4,6 +4,19 @@ extractor, and accumulates fragments into `ctx.batch`.
 Lazy-imports the extractors so tests that only touch actions/walker
 don't drag tree-sitter into the import path. Per-file failures are
 logged and skipped — one weird file shouldn't kill the whole scan.
+
+Sprint 11b — per-file SHA short-circuit. On entry, when `ctx.driver` is
+set and `ctx.prior_shas` is empty, we fetch the previously-stored SHAs
+for this repo from Neo4j. Files whose on-disk SHA already matches the
+stored value are skipped: they contribute nothing to `ctx.batch`, so
+the loader's MERGE leaves the existing Neo4j data intact.
+
+Caveat: 11b's short-circuit means a file's nodes/edges are not
+re-emitted when its SHA matches. This means stale edges from PRIOR
+scans of the file persist in Neo4j until commit_sha changes (which
+triggers `prune_stale`). This is a pre-existing limitation (the
+current loader's MERGE never deletes), not introduced by 11b. Full
+per-file diffing is deferred.
 """
 from __future__ import annotations
 
@@ -27,11 +40,27 @@ class ParsePhase:
         from ..extractor_python import extract_python_file
         from ..extractor_typescript import extract_typescript_file
 
+        # Sprint 11b: prefetch prior file SHAs once per scan when a driver
+        # is wired in and the test harness hasn't pre-seeded the cache.
+        # `driver is None` (dry-run / unit tests) leaves the cache empty
+        # and the short-circuit naturally disabled.
+        if ctx.driver is not None and not ctx.prior_shas:
+            from ..loader import fetch_file_shas
+            ctx.prior_shas = fetch_file_shas(
+                ctx.driver, ctx.repo.name, ctx.repo.tenant_id,
+            )
+
         start = time.monotonic()
         file_count = 0
         for rel_path, source, language, sha in walker.walk_repo(
             ctx.repo_root, languages=ctx.languages
         ):
+            # Short-circuit: file content unchanged since the last scan.
+            # The loader's MERGE leaves prior nodes/edges in place.
+            prior = ctx.prior_shas.get(rel_path)
+            if prior == sha:
+                ctx.skipped_files += 1
+                continue
             try:
                 if language == "python":
                     fragment = extract_python_file(
@@ -59,6 +88,10 @@ class ParsePhase:
                 print(f"[indexer]   parsed {file_count} files ({rate:.0f}/s)", flush=True)
 
         walk_secs = time.monotonic() - start
+        if ctx.skipped_files:
+            ctx.progress(
+                f"[indexer] skipped {ctx.skipped_files} unchanged files (SHA match)"
+            )
         ctx.progress(f"[indexer] parsed {file_count} files in {walk_secs:.1f}s")
         for k, v in ctx.batch.counts().items():
             ctx.progress(f"  {k:20s} {v}")

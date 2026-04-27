@@ -231,6 +231,29 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
         )
 
 
+def fetch_file_shas(driver: Driver, repo_name: str, tenant_id: str = "default") -> dict[str, str]:
+    """Return {rel_path: sha} for every File previously written under this repo.
+    Empty dict if the repo isn't in Neo4j yet (first scan).
+
+    `tenant_id` is on the Repo node today, not File; it's accepted here for
+    forward-compat with the multi-tenant fix tracked in
+    `production-multitenant-architecture.md`, but we don't filter on it yet.
+    """
+    out: dict[str, str] = {}
+    with driver.session() as session:
+        result = session.run(
+            "MATCH (f:File {repo: $repo}) RETURN f.path AS path, f.sha AS sha",
+            repo=repo_name,
+        )
+        for rec in result:
+            path = rec["path"]
+            sha = rec["sha"]
+            if path is None or sha is None:
+                continue
+            out[path] = sha
+    return out
+
+
 def prune_stale(driver: Driver, repo_name: str, current_commit_sha: str) -> int:
     """Delete nodes from earlier scans of this repo that aren't in the
     current scan. Identifies by repo + commit_sha mismatch on the Repo

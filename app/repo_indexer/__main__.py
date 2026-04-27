@@ -64,30 +64,42 @@ def cmd_scan(args: argparse.Namespace) -> int:
     languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
 
     aggregate = IndexBatch(repo=repo)
-    ctx = PhaseContext(
-        repo=repo,
-        repo_root=repo_root,
-        languages=languages,
-        batch=aggregate,
-        py_parser=py_parser,
-        ts_parsers=ts_parsers,
-    )
-    run_pipeline(ctx, DEFAULT_PHASES)
 
     if args.dry_run:
+        ctx = PhaseContext(
+            repo=repo,
+            repo_root=repo_root,
+            languages=languages,
+            batch=aggregate,
+            py_parser=py_parser,
+            ts_parsers=ts_parsers,
+            driver=None,
+        )
+        run_pipeline(ctx, DEFAULT_PHASES)
         print("[indexer] --dry-run: skipping Neo4j write")
         return 0
 
-    write_start = time.monotonic()
     with driver_from_env() as driver:
+        # ensure_constraints MUST run before fetch_file_shas — guarantees
+        # the Repo / File constraints exist on a fresh database.
         ensure_constraints(driver)
         deleted = prune_stale(driver, repo_name, repo.commit_sha)
         if deleted:
             print(f"[indexer] pruned {deleted} stale nodes from previous commit")
+        ctx = PhaseContext(
+            repo=repo,
+            repo_root=repo_root,
+            languages=languages,
+            batch=aggregate,
+            py_parser=py_parser,
+            ts_parsers=ts_parsers,
+            driver=driver,
+        )
+        run_pipeline(ctx, DEFAULT_PHASES)
+        write_start = time.monotonic()
         write_batch(driver, aggregate)
-
-    write_secs = time.monotonic() - write_start
-    print(f"[indexer] wrote to Neo4j in {write_secs:.1f}s")
+        write_secs = time.monotonic() - write_start
+        print(f"[indexer] wrote to Neo4j in {write_secs:.1f}s")
     return 0
 
 
