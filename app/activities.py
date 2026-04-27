@@ -407,7 +407,7 @@ async def index_repo_activity(
     from app.repo_indexer.loader import (
         driver_from_env, ensure_constraints, prune_stale, write_batch,
     )
-    from app.repo_indexer.resolver import resolve_batch
+    from app.repo_indexer.scope_resolution.finalize import finalize_batch
     from app.repo_indexer.walker import walk_paths, walk_repo
     from app.repo_indexer.extractor_python import extract_python_file
     from app.repo_indexer.extractor_typescript import extract_typescript_file
@@ -455,7 +455,12 @@ async def index_repo_activity(
         if file_count % 50 == 0:
             activity.heartbeat(f"indexed {file_count} files")
 
-    resolve_batch(aggregate)
+    # Sprint 13 cleanup: legacy resolve_batch deleted; finalize_batch is the
+    # only resolution path. NOTE: this activity bypasses runner.run_pipeline,
+    # so CommunityDetectPhase / ProcessExtractPhase don't run here yet —
+    # Temporal-driven scans miss the discoverability data. Tracked as a
+    # Sprint 14-prep refactor: switch this body to run_pipeline(ctx, DEFAULT_PHASES).
+    finalize_batch(aggregate)
 
     activity.heartbeat("writing to Neo4j")
     with driver_from_env() as driver:

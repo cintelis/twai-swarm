@@ -39,7 +39,7 @@ from .actions import (
     SymbolNode,
     CallEdge,
 )
-from .resolver import resolve_batch
+from .scope_resolution.finalize import finalize_batch
 
 __all__ = [
     "ClassNode",
@@ -52,5 +52,5 @@ __all__ = [
     "RepoNode",
     "SymbolNode",
     "CallEdge",
-    "resolve_batch",
+    "finalize_batch",
 ]

@@ -97,9 +97,12 @@ def test_no_app_repo_indexer_runtime_dependency():
     """
     import sys
 
+    # `app.repo_indexer.resolver` was the pre-12b legacy resolver; deleted
+    # in Sprint 13 cleanup. scope_resolution.finalize is the only resolution
+    # path now and it lives inside this package, so it's not "forbidden" — it's
+    # a sibling. Don't add it to this set.
     forbidden = {
         "app.repo_indexer.walker",
-        "app.repo_indexer.resolver",
         "app.repo_indexer.loader",
         "app.repo_indexer.extractor_python",
         "app.repo_indexer.extractor_typescript",

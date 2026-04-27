@@ -26,7 +26,6 @@ from app.repo_indexer.actions import (  # noqa: E402
     ModuleNode,
     RepoNode,
 )
-from app.repo_indexer.resolver import resolve_batch as legacy_resolve_batch  # noqa: E402
 from app.repo_indexer.scope_resolution.finalize import finalize_batch  # noqa: E402
 
 
@@ -314,32 +313,15 @@ def _build_simple_repo() -> IndexBatch:
     return batch
 
 
-def test_finalize_parity_with_legacy_on_simple_repo():
-    legacy_batch = _build_simple_repo()
-    new_batch = _build_simple_repo()
+def test_finalize_resolves_simple_repo():
+    """The legacy parity test from 12b lived here and asserted finalize ==
+    legacy on this fixture. With the legacy resolver deleted in Sprint 13
+    cleanup, the test now anchors finalize's absolute behaviour: 3 of the 4
+    calls resolve to in-repo Functions (bare-name + module-prefix +
+    param-type method), the fourth stays as a Symbol."""
+    batch = _build_simple_repo()
+    finalize_batch(batch)
 
-    legacy_resolve_batch(legacy_batch)
-    finalize_batch(new_batch)
-
-    # Resolved-edge counts: callees rewritten to in-repo Function qns.
-    in_repo_qns = {f.qualified_name for f in new_batch.functions}
-
-    legacy_resolved = sum(1 for c in legacy_batch.calls if c.callee_qn in in_repo_qns)
-    new_resolved = sum(1 for c in new_batch.calls if c.callee_qn in in_repo_qns)
-
-    # Finalize must resolve at least as many as legacy.
-    assert new_resolved >= legacy_resolved
-    # On this fixture they should match — there are no closure / wildcard
-    # cases hidden in here.
-    assert new_resolved == legacy_resolved == 3
-
-    # Pairwise edge equivalence (same caller + line + resolved callee).
-    legacy_resolved_set = {
-        (c.caller_qn, c.callee_qn, c.line)
-        for c in legacy_batch.calls if c.callee_qn in in_repo_qns
-    }
-    new_resolved_set = {
-        (c.caller_qn, c.callee_qn, c.line)
-        for c in new_batch.calls if c.callee_qn in in_repo_qns
-    }
-    assert legacy_resolved_set == new_resolved_set
+    in_repo_qns = {f.qualified_name for f in batch.functions}
+    resolved = sum(1 for c in batch.calls if c.callee_qn in in_repo_qns)
+    assert resolved == 3
