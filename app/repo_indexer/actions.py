@@ -114,6 +114,33 @@ class ImportEdge:
     kind: str = "module"
 
 
+# ─── Sprint 13a — community detection ───────────────────────────────────────
+
+@dataclass(frozen=True)
+class CommunityNode:
+    """A graph community detected by Louvain over CALLS / IMPORTS / INHERITS_FROM.
+
+    Derived data — re-computable from the base graph. `label` is heuristic
+    (top-frequency token across member names) and unique within (repo, tenant_id).
+    `cohesion` is the intra-community edge ratio (1.0 = fully internal,
+    0.0 = singleton or fully disconnected).
+    """
+    repo: str
+    tenant_id: str            # MANDATORY — see Cross-cutting invariants
+    label: str                # heuristic, deterministic, unique within (repo, tenant_id)
+    cohesion: float           # 0.0..1.0 — intra-community edge ratio
+    size: int                 # member count
+
+
+@dataclass(frozen=True)
+class MemberOfEdge:
+    """Edge from a Function or Class to its Community."""
+    repo: str
+    tenant_id: str
+    member_qn: str            # qualified_name of the Function or Class
+    community_label: str      # FK to CommunityNode.label
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -131,6 +158,11 @@ class IndexBatch:
     inherits: list[InheritsEdge] = field(default_factory=list)
     calls: list[CallEdge] = field(default_factory=list)
     imports: list[ImportEdge] = field(default_factory=list)
+    # Sprint 13a — derived community structure. Populated by
+    # `phases.community_detect.CommunityDetectPhase` after resolution; the
+    # loader writes them to the graph via MEMBER_OF edges.
+    communities: list[CommunityNode] = field(default_factory=list)
+    member_of: list[MemberOfEdge] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -144,6 +176,8 @@ class IndexBatch:
         self.inherits.extend(other.inherits)
         self.calls.extend(other.calls)
         self.imports.extend(other.imports)
+        self.communities.extend(other.communities)
+        self.member_of.extend(other.member_of)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -155,4 +189,6 @@ class IndexBatch:
             "inherits_edges": len(self.inherits),
             "call_edges": len(self.calls),
             "import_edges": len(self.imports),
+            "communities": len(self.communities),
+            "member_of_edges": len(self.member_of),
         }

@@ -329,4 +329,6 @@ def test_batch_counts():
     assert set(counts.keys()) == {
         "files", "modules", "classes", "functions", "symbols",
         "inherits_edges", "call_edges", "import_edges",
+        # Sprint 13a — community detection.
+        "communities", "member_of_edges",
     }

@@ -55,6 +55,11 @@ def ensure_constraints(driver: Driver) -> None:
         "CREATE CONSTRAINT class_id IF NOT EXISTS FOR (c:Class) REQUIRE (c.repo, c.qualified_name) IS UNIQUE",
         "CREATE CONSTRAINT function_id IF NOT EXISTS FOR (fn:Function) REQUIRE (fn.repo, fn.qualified_name) IS UNIQUE",
         "CREATE CONSTRAINT symbol_id IF NOT EXISTS FOR (s:Symbol) REQUIRE (s.repo, s.qualified_name) IS UNIQUE",
+        # Sprint 13a — derived community structure. tenant_id stays on the
+        # node but NOT in the uniqueness key, same convention as Repo/File
+        # (the multi-tenant gap is tracked in
+        # `production-multitenant-architecture.md` and is a separate fix).
+        "CREATE CONSTRAINT community_id IF NOT EXISTS FOR (c:Community) REQUIRE (c.repo, c.label) IS UNIQUE",
     ]
     with driver.session() as session:
         for stmt in stmts:
@@ -228,6 +233,38 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             )
             """,
             [asdict(e) for e in batch.imports],
+        )
+
+        # Sprint 13a — Community nodes (one per detected cluster) and
+        # MEMBER_OF edges from each Function/Class to its community.
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (r:Repo {name: row.repo})
+            MERGE (c:Community {repo: row.repo, label: row.label})
+            SET c.tenant_id = row.tenant_id,
+                c.cohesion = row.cohesion,
+                c.size = row.size
+            """,
+            [asdict(c) for c in batch.communities],
+        )
+
+        # MemberOfEdge — member can be Function or Class. Use FOREACH/CASE
+        # to MERGE the edge against whichever type matched (mirrors how
+        # the inherits / calls writes pick between Function/Symbol).
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (c:Community {repo: row.repo, label: row.community_label})
+            OPTIONAL MATCH (fn:Function {repo: row.repo, qualified_name: row.member_qn})
+            OPTIONAL MATCH (cls:Class {repo: row.repo, qualified_name: row.member_qn})
+            FOREACH (m IN CASE WHEN fn IS NOT NULL THEN [fn]
+                               WHEN cls IS NOT NULL THEN [cls]
+                               ELSE [] END |
+              MERGE (m)-[:MEMBER_OF]->(c)
+            )
+            """,
+            [asdict(e) for e in batch.member_of],
         )
 
 

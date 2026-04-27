@@ -54,3 +54,14 @@ neo4j>=5.25,<7.0
 # ~5x faster than networkx end-to-end at GitNexus self-scan dimensions
 # and well under the 200ms budget.
 rustworkx>=0.16,<0.18
+# Sprint 13a — community detection (`phases/community_detect.py`).
+# We'd prefer `rustworkx.community.louvain_communities` (same dep we
+# already pull in for 12b) but rustworkx 0.17.1 — the latest pip-released
+# at Sprint 13a — does not expose a `community` module. Falling back to
+# `python-louvain`, which operates on a `networkx.Graph`. networkx
+# therefore comes along as a transitive dep; used ONLY by
+# community_detect, not by the resolver. Re-evaluate when rustworkx ships
+# Louvain (community_detect already has the rustworkx import-and-fallback
+# path stubbed in).
+python-louvain>=0.16,<1.0
+networkx>=3.0,<4.0
