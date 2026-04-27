@@ -22,6 +22,7 @@ ScopeTree invariant — same shape as a byte-range collision.
 from __future__ import annotations
 
 from ..actions import IndexBatch
+from .qualified_name_index import QualifiedNameIndex
 from .types import Declaration, Range, ScopeId
 
 
@@ -120,4 +121,33 @@ def to_scopes(batch: IndexBatch) -> list[ScopeId]:
     return out
 
 
-__all__ = ["to_declarations", "to_scopes"]
+def to_parent_relation(
+    batch: IndexBatch,
+    qn_index: QualifiedNameIndex,
+) -> dict[str, list[str]]:
+    """Build `child_qn -> [parent_qn, ...]` from `batch.inherits`.
+
+    Sprint 12c — input to `build_method_dispatch_index`. Edges whose
+    `parent_qn` doesn't resolve to a known class in `qn_index` are
+    skipped (those parents are external — third-party / stdlib / not yet
+    resolved through imports — and have no methods we can index from
+    repo data). Note this means parents that *would* resolve through
+    finalize's import chain but haven't been rewritten yet are also
+    skipped: dispatch resolution can't find inherited methods through
+    those edges. That gap is the first thing to revisit if Sprint 13's
+    MRO work moves the dispatch index after import-edge rewriting.
+
+    InheritsEdge order is preserved within the per-child list — first
+    `inherits` entry stays first — so "first parent wins" semantics in
+    the dispatch index are deterministic.
+    """
+    parent_relation: dict[str, list[str]] = {}
+    for edge in batch.inherits:
+        decl = qn_index.lookup(edge.parent_qn)
+        if decl is None or decl.kind != "class":
+            continue
+        parent_relation.setdefault(edge.child_qn, []).append(edge.parent_qn)
+    return parent_relation
+
+
+__all__ = ["to_declarations", "to_parent_relation", "to_scopes"]

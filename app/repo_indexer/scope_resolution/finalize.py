@@ -1,4 +1,6 @@
-"""Cross-file resolution — Sprint 12b's port of GitNexus's `finalize-algorithm.ts`.
+"""Cross-file resolution — Sprint 12b's port of GitNexus's `finalize-algorithm.ts`,
+extended in Sprint 12c with a method-dispatch index for `self.method()` /
+`super().method()` / inherited param-type methods.
 
 Public API: `finalize_batch(batch)`. Same signature + contract as the
 legacy `resolver.resolve_batch` — mutates the batch in place,
@@ -25,21 +27,42 @@ The pipeline:
      synthetic ImportEdges that follow the shape (kind="module" with
      local_name in ("", "*")). When extractor support lands, this code
      starts handling real wildcard imports without further changes.
-  7. Resolution — for every CallEdge / InheritsEdge:
+  7. Inheritance resolution — rewrite each `InheritsEdge.parent_qn`
+     (textual) into a resolved class qn via the same import chain used
+     for callees. Inherits land FIRST so the parent_relation feeding
+     the dispatch index reflects rewritten qns.
+  8. Method dispatch index (Sprint 12c) — `MethodDispatchIndex` keyed
+     on resolved class qns. For each class, an O(ancestors) walk
+     produces the merged `{method_name -> Declaration}` set.
+  9. Call resolution — for every CallEdge:
        a. direct qn lookup
        b. import-based bare-name lookup (`from x import y` + `y()`)
        c. module-prefix lookup (`import x.y` + `x.y.foo()`)
-       d. param-type method lookup (`def f(x: T): x.method()`)
+       d. param-type method lookup (`def f(x: T): x.method()`) —
+          tries `T.method` first, then walks T's ancestors via the
+          dispatch index (Sprint 12c).
        e. wildcard expansion (`from x import *` + `bar()`)
        f. closure-aware variant of (b)–(e) — if the resolution lands
           on a module qn inside a re-export SCC, search every closure
           member's exports for the symbol.
-  8. SymbolNode emission — anything that didn't resolve produces one
+       g. (Sprint 12c) `self.method()` — caller is a method of class
+          C; dispatch index resolves `method` walking C + ancestors.
+       h. (Sprint 12c) `super().method()` — caller is a method of C;
+          dispatch index walks `C`'s first parent + that parent's
+          ancestors. NOTE: today's extractor's `_flatten_attribute`
+          returns None on `super().X` chains (the inner `super()` is
+          a `call` node, not `identifier`/`attribute`), so no
+          CallEdge with `super().X` shape currently arrives here.
+          The branch fires defensively for synthetic input + future
+          extractor changes that emit `super().method` strings.
+ 10. SymbolNode emission — anything that didn't resolve produces one
      SymbolNode per unique unresolved qn.
 
-Parity guarantee: steps (a)–(d) replicate the legacy resolver, so the
-new path's resolved-edge count is >= legacy's on the same input. Steps
-(e)–(f) only add resolutions; they never remove them.
+Parity guarantee: steps (a)–(d), (f) replicate the 12b resolver — every
+edge that resolved before 12c still resolves after. Steps (g) and (h)
+only add resolutions; they never remove them. Step (d)'s ancestor
+fallback only activates after the local lookup misses, so cases where
+the legacy path resolved keep their answer.
 """
 from __future__ import annotations
 
@@ -53,6 +76,7 @@ from ..actions import (
     SymbolNode,
 )
 from . import _adapter
+from .method_dispatch_index import build_method_dispatch_index
 from .module_scope_index import build_module_scope_index
 from .position_index import build_position_index
 from .qualified_name_index import build_qualified_name_index
@@ -117,6 +141,13 @@ def finalize_batch(batch: IndexBatch) -> None:
     }
     func_file_path: dict[str, str] = {f.qualified_name: f.file_path for f in batch.functions}
     class_file_path: dict[str, str] = {c.qualified_name: c.file_path for c in batch.classes}
+    # Sprint 12c — caller_qn -> enclosing class qn (only set for methods).
+    # Used by `self.method()` / `super().method()` resolution.
+    caller_class_qn: dict[str, str] = {
+        f.qualified_name: f.parent_class_qn
+        for f in batch.functions
+        if f.is_method and f.parent_class_qn
+    }
 
     # Lookup closures over the indexes.
     def _is_function(qn: str) -> bool:
@@ -211,9 +242,22 @@ def finalize_batch(batch: IndexBatch) -> None:
         if head in param_types:
             type_qn = _resolve_type_name(file_path, param_types[head])
             if type_qn is not None:
+                # `rest` may itself be dotted (e.g. `param.attr.method()`);
+                # the dispatch index only resolves direct method names,
+                # so split off the leaf and check whether the leading
+                # segment is a method on `type_qn`. Most calls in the
+                # wild are single-segment.
                 candidate = f"{type_qn}.{rest}"
                 if _is_function(candidate):
                     return candidate
+                # Sprint 12c — `Type.method` not local; walk Type's
+                # ancestors via the dispatch index. Only fires for
+                # single-segment `rest` (`param.foo()`); chained
+                # `param.foo.bar()` falls through unchanged.
+                if "." not in rest:
+                    inherited = dispatch_index.resolve(type_qn, rest)
+                    if inherited is not None:
+                        return inherited.qualified_name
 
         # (c) imported_module.func — resolve module via imports, then look up func.
         if head in file_imports:
@@ -278,24 +322,10 @@ def finalize_batch(batch: IndexBatch) -> None:
 
     needs_symbol: set[str] = set()
 
-    # Rewrite calls.
-    new_calls = []
-    for edge in batch.calls:
-        resolved = _resolve_callee(edge.caller_qn, edge.callee_qn)
-        if resolved is not None:
-            new_calls.append(CallEdge(
-                repo=edge.repo,
-                caller_qn=edge.caller_qn,
-                callee_qn=resolved,
-                line=edge.line,
-            ))
-        else:
-            needs_symbol.add(edge.callee_qn)
-            new_calls.append(edge)
-    batch.calls.clear()
-    batch.calls.extend(new_calls)
-
-    # Rewrite inheritance.
+    # Rewrite inheritance FIRST (Sprint 12c reordering). The dispatch
+    # index needs resolved parent qns so it can chase ancestor methods;
+    # leaving inherits as raw textual qns would feed external/unresolved
+    # bases into `to_parent_relation` and break the walk.
     new_inherits = []
     for edge in batch.inherits:
         resolved = _resolve_parent(edge.child_qn, edge.parent_qn)
@@ -310,6 +340,85 @@ def finalize_batch(batch: IndexBatch) -> None:
             new_inherits.append(edge)
     batch.inherits.clear()
     batch.inherits.extend(new_inherits)
+
+    # Sprint 12c — method dispatch index. Built AFTER inheritance rewrite
+    # so `to_parent_relation` sees resolved parent qns and only includes
+    # edges whose parents the qn_index actually knows about (externals
+    # are filtered there).
+    parent_relation = _adapter.to_parent_relation(batch, qn_index)
+    method_decls = [d for d in deduped_decls if d.kind == "method"]
+    dispatch_index = build_method_dispatch_index(method_decls, parent_relation)
+
+    def _resolve_self_or_super(
+        caller_qn: str,
+        callee_dotted: str,
+    ) -> str | None:
+        """Sprint 12c — resolve `self.method` / `super().method` via the
+        dispatch index. Only the FIRST dotted segment is examined; chained
+        attribute calls like `self._tree.parent_of` are out of scope
+        (would need local-variable type inference).
+
+        Returns the resolved method qn, or None if either:
+          - the caller isn't a method, or
+          - the receiver isn't `self` / `super()`, or
+          - the method name doesn't exist on the class or any ancestor, or
+          - (super) the class has no resolvable parent.
+        """
+        class_qn = caller_class_qn.get(caller_qn)
+        if class_qn is None:
+            return None
+
+        if "." not in callee_dotted:
+            return None
+        head, rest = callee_dotted.split(".", 1)
+        # Only resolve the leaf method — `self.foo.bar` is a method on
+        # `self.foo`'s type, not on `self`'s class.
+        if "." in rest:
+            return None
+
+        if head == "self":
+            decl = dispatch_index.resolve(class_qn, rest)
+            return decl.qualified_name if decl is not None else None
+
+        # `super()` case — the extractor's `_flatten_attribute` returns
+        # None on `super().X` chains today (the inner `super()` is a
+        # tree-sitter `call` node, breaking the identifier-or-attribute
+        # recursion in extractor_python._flatten_attribute), so this
+        # branch is unreachable from real Python source as of 12c. It
+        # fires for synthetic `super().method` / `super.method` shapes
+        # that callers (tests, future extractor changes) might pass.
+        if head in ("super()", "super"):
+            parent_qn = dispatch_index.parent_of(class_qn)
+            if parent_qn is None:
+                return None
+            decl = dispatch_index.resolve(parent_qn, rest)
+            return decl.qualified_name if decl is not None else None
+
+        return None
+
+    # Rewrite calls.
+    new_calls = []
+    for edge in batch.calls:
+        resolved = _resolve_callee(edge.caller_qn, edge.callee_qn)
+        if resolved is None:
+            # Sprint 12c — self/super fallback after the import-based
+            # chain has tried and failed. Keeps 12b parity (anything the
+            # 12b chain resolves still resolves identically) while
+            # filling in the previously-Symbol self.method/super().method
+            # cases.
+            resolved = _resolve_self_or_super(edge.caller_qn, edge.callee_qn)
+        if resolved is not None:
+            new_calls.append(CallEdge(
+                repo=edge.repo,
+                caller_qn=edge.caller_qn,
+                callee_qn=resolved,
+                line=edge.line,
+            ))
+        else:
+            needs_symbol.add(edge.callee_qn)
+            new_calls.append(edge)
+    batch.calls.clear()
+    batch.calls.extend(new_calls)
 
     # Materialise Symbol nodes (deduped against any pre-existing Symbols).
     existing = {s.qualified_name for s in batch.symbols}

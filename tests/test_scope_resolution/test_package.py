@@ -6,6 +6,7 @@ def test_all_exports_importable_from_package_root():
     """Single import statement should pull every public name."""
     from app.repo_indexer.scope_resolution import (  # noqa: F401
         Declaration,
+        MethodDispatchIndex,
         ModuleScopeIndex,
         Position,
         PositionIndex,
@@ -14,6 +15,7 @@ def test_all_exports_importable_from_package_root():
         ScopeId,
         ScopeTree,
         ScopeTreeInvariantError,
+        build_method_dispatch_index,
         build_module_scope_index,
         build_position_index,
         build_qualified_name_index,
@@ -47,6 +49,8 @@ def test_dunder_all_matches_actual_exports():
         "build_module_scope_index",
         "QualifiedNameIndex",
         "build_qualified_name_index",
+        "MethodDispatchIndex",
+        "build_method_dispatch_index",
     }
     assert set(sr.__all__) == expected
 
@@ -74,6 +78,7 @@ def test_no_tree_sitter_required():
         "app.repo_indexer.scope_resolution.position_index",
         "app.repo_indexer.scope_resolution.module_scope_index",
         "app.repo_indexer.scope_resolution.qualified_name_index",
+        "app.repo_indexer.scope_resolution.method_dispatch_index",
     ]
     for name in submods:
         mod = sys.modules.get(name)

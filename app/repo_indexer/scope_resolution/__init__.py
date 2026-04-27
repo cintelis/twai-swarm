@@ -8,6 +8,7 @@ Sprint 12b's `finalize.py` (the actual resolver) and 12c's
 Mirrors the shape of GitNexus's `gitnexus-shared/src/scope-resolution/`
 package; see `repo-indexer-future-state.md` §2.2.
 """
+from .method_dispatch_index import MethodDispatchIndex, build_method_dispatch_index
 from .module_scope_index import ModuleScopeIndex, build_module_scope_index
 from .position_index import PositionIndex, build_position_index
 from .qualified_name_index import QualifiedNameIndex, build_qualified_name_index
@@ -45,4 +46,7 @@ __all__ = [
     # qualified name index
     "QualifiedNameIndex",
     "build_qualified_name_index",
+    # method dispatch index (Sprint 12c)
+    "MethodDispatchIndex",
+    "build_method_dispatch_index",
 ]
