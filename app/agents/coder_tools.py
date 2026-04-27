@@ -20,6 +20,10 @@ Tool surface:
         i.e. the Coder is working on an *existing* repo that's already
         been indexed by app.repo_indexer. These let the model navigate
         the call graph (Sprint 10c) instead of cold-reading every file.
+  - repo_find_processes / repo_find_modules
+        Same opt-in conditions. High-level discoverability (Sprint 13c):
+        list execution flows / Louvain communities so the Coder can ask
+        "what does this codebase do" before drilling in.
 """
 from __future__ import annotations
 
@@ -81,6 +85,8 @@ def build_tools(
         "repo_search_calls": 0,
         "repo_find_definition_calls": 0,
         "repo_find_callers_calls": 0,
+        "repo_find_processes_calls": 0,
+        "repo_find_modules_calls": 0,
         "bytes_written": 0,
         "last_verify_exit": None,
         "last_verify_stdout": "",
@@ -344,6 +350,82 @@ def build_tools(
                 for s in sites
             ])
 
-        tools.extend([repo_search, repo_find_definition, repo_find_callers])
+        @beta_async_tool
+        async def repo_find_processes(query: str = "", limit: int = 10) -> str:
+            """Find execution flows (processes) in the repo. A process is a
+            chain of function calls that crosses module boundaries — e.g. a
+            workflow run, a CLI command, an API handler.
+
+            Use this BEFORE drilling into specific files when you don't yet
+            know how the codebase is organised. The result names the major
+            flows by their first/last step, with the ordered chain of
+            qualified names so you can follow execution end-to-end.
+
+            Args:
+                query: Optional substring filter on process name or summary
+                    (case-insensitive). Empty string means no filter.
+                limit: Max processes to return (1-100, default 10).
+
+            Returns JSON: [{name, summary, step_count, member_qns}, ...]
+            ordered by step_count desc, then name asc. `member_qns` is the
+            chain in step order. Test-only flows are excluded by default —
+            they're noise from the Coder's perspective.
+            """
+            stats["repo_find_processes_calls"] += 1
+            limit = max(1, min(100, int(limit)))
+            q = (query or "").strip() or None
+            results = await asyncio.to_thread(
+                repo_query.find_processes, neo4j_driver, repo_name, q, limit, False,
+            )
+            return json.dumps([
+                {
+                    "name": p.name,
+                    "summary": p.summary,
+                    "step_count": p.step_count,
+                    "member_qns": list(p.member_qns),
+                }
+                for p in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_modules(limit: int = 20) -> str:
+            """List the major modules (community clusters) in this repo.
+
+            Modules are detected automatically by Louvain over the call /
+            import / inheritance graph — they don't necessarily match Python
+            packages or directories. Each row carries a label (heuristic top
+            token), a cohesion score, the member count, and up to 5 sample
+            qualified names so you know what the cluster contains.
+
+            Use this as the entry point on an unfamiliar repo: "what are the
+            major pieces here?" Then drill in with repo_search /
+            repo_find_definition on a cluster's sample members.
+
+            Args:
+                limit: Max modules to return (1-100, default 20).
+
+            Returns JSON: [{label, cohesion, size, sample_member_qns}, ...]
+            ordered by size desc, then label asc. Singleton clusters and
+            test-only clusters are excluded.
+            """
+            stats["repo_find_modules_calls"] += 1
+            limit = max(1, min(100, int(limit)))
+            results = await asyncio.to_thread(
+                repo_query.find_modules, neo4j_driver, repo_name, limit, False,
+            )
+            return json.dumps([
+                {
+                    "label": m.label,
+                    "cohesion": m.cohesion,
+                    "size": m.size,
+                    "sample_member_qns": list(m.sample_member_qns),
+                }
+                for m in results
+            ])
+
+        tools.extend([
+            repo_search, repo_find_definition, repo_find_callers,
+            repo_find_processes, repo_find_modules,
+        ])
 
     return tools, stats

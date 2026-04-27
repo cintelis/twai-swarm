@@ -48,14 +48,42 @@ def test_build_tools_returns_five_without_neo4j(tmp_path):
         assert stats[key] == 0
 
 
-def test_build_tools_adds_three_graph_tools_with_neo4j(tmp_path):
-    """When neo4j_driver + repo_name are passed, three repo_* tools join."""
+def test_build_tools_adds_graph_tools_with_neo4j(tmp_path):
+    """When neo4j_driver + repo_name are passed, the repo_* tool family joins.
+
+    Sprint 10c added 3 graph tools (search/find_definition/find_callers);
+    Sprint 13c added 2 more (find_processes/find_modules) for high-level
+    discoverability. So 5 sandbox + 5 graph = 10 total.
+    """
     sb = _sandbox(tmp_path)
     fake_driver = object()
     tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="repo")
-    assert len(tools) == 8
-    for key in ("repo_search_calls", "repo_find_definition_calls", "repo_find_callers_calls"):
+    assert len(tools) == 10
+    for key in (
+        "repo_search_calls", "repo_find_definition_calls", "repo_find_callers_calls",
+        "repo_find_processes_calls", "repo_find_modules_calls",
+    ):
         assert stats[key] == 0
+
+
+def test_repo_discoverability_tools_only_when_driver_and_repo_name(tmp_path):
+    """Sprint 13c: repo_find_processes / repo_find_modules must be opt-in.
+
+    Without a driver, build_tools returns only the 5 sandbox tools (no
+    repo_* tools at all). With both, the 5 graph tools — including the
+    two new discoverability ones — are present.
+    """
+    sb = _sandbox(tmp_path)
+
+    bare_tools, _ = build_tools(sb)
+    bare_names = {t.name for t in bare_tools}
+    assert "repo_find_processes" not in bare_names
+    assert "repo_find_modules" not in bare_names
+
+    full_tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="repo")
+    full_names = {t.name for t in full_tools}
+    assert "repo_find_processes" in full_names
+    assert "repo_find_modules" in full_names
 
 
 def test_build_tools_requires_repo_name_with_driver(tmp_path):
@@ -349,3 +377,138 @@ async def test_repo_find_callers_returns_json(tmp_path, monkeypatch):
     assert parsed[0]["caller_qn"] == "app.x.use_it"
     assert parsed[0]["line"] == 42
     assert stats["repo_find_callers_calls"] == 1
+
+
+# ─── Discoverability tools (Sprint 13c) ─────────────────────────────────────
+
+
+def _tools_by_name(tools):
+    return {t.name: t for t in tools}
+
+
+@pytest.mark.asyncio
+async def test_repo_find_processes_tool_calls_query_layer(tmp_path, monkeypatch):
+    """The Coder tool routes args through to repo_query.find_processes
+    and serialises the dataclass output as JSON the model can consume."""
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    captured: dict = {}
+
+    def fake_find_processes(driver, repo, query, limit, include_tests):
+        captured["args"] = (driver, repo, query, limit, include_tests)
+        return [
+            repo_query.ProcessSummary(
+                name="login -> handler",
+                summary="auth login flow",
+                step_count=3,
+                member_qns=("app.auth.login", "app.auth.verify", "app.auth.handler"),
+            ),
+        ]
+    monkeypatch.setattr(repo_query, "find_processes", fake_find_processes)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    tool = _tools_by_name(tools)["repo_find_processes"]
+
+    out = await _call(tool, query="auth", limit=5)
+    parsed = json.loads(out)
+
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "login -> handler"
+    assert parsed[0]["step_count"] == 3
+    assert parsed[0]["member_qns"] == ["app.auth.login", "app.auth.verify", "app.auth.handler"]
+    # include_tests must be False by default — the Coder shouldn't see noise.
+    assert captured["args"] == (fake_driver, "r", "auth", 5, False)
+    assert stats["repo_find_processes_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repo_find_processes_blank_query_passes_none(tmp_path, monkeypatch):
+    """Empty/whitespace query strings should reach the query layer as None
+    so the Cypher's substring filter is dropped entirely (not run with '')."""
+    sb = _sandbox(tmp_path)
+    from app import repo_query
+
+    seen: dict = {}
+    monkeypatch.setattr(repo_query, "find_processes",
+                        lambda d, r, q, lim, it: seen.setdefault("q", q) or [])
+
+    tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
+    tool = _tools_by_name(tools)["repo_find_processes"]
+
+    await _call(tool, query="   ", limit=10)
+    assert seen["q"] is None
+
+
+@pytest.mark.asyncio
+async def test_repo_find_processes_clamps_limit(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    from app import repo_query
+
+    seen: dict = {}
+    def fake(driver, repo, query, limit, include_tests):
+        seen["limit"] = limit
+        return []
+    monkeypatch.setattr(repo_query, "find_processes", fake)
+
+    tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
+    tool = _tools_by_name(tools)["repo_find_processes"]
+    await _call(tool, query="x", limit=10000)
+    assert seen["limit"] == 100
+
+
+@pytest.mark.asyncio
+async def test_repo_find_modules_tool_calls_query_layer(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    fake_driver = object()
+    from app import repo_query
+
+    captured: dict = {}
+
+    def fake_find_modules(driver, repo, limit, include_tests):
+        captured["args"] = (driver, repo, limit, include_tests)
+        return [
+            repo_query.ModuleSummary(
+                label="auth",
+                cohesion=0.82,
+                size=7,
+                sample_member_qns=("app.auth.login", "app.auth.logout", "app.auth.verify"),
+            ),
+        ]
+    monkeypatch.setattr(repo_query, "find_modules", fake_find_modules)
+
+    tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="r")
+    tool = _tools_by_name(tools)["repo_find_modules"]
+
+    out = await _call(tool, limit=15)
+    parsed = json.loads(out)
+
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["label"] == "auth"
+    assert parsed[0]["size"] == 7
+    assert parsed[0]["cohesion"] == pytest.approx(0.82)
+    assert parsed[0]["sample_member_qns"] == [
+        "app.auth.login", "app.auth.logout", "app.auth.verify",
+    ]
+    assert captured["args"] == (fake_driver, "r", 15, False)
+    assert stats["repo_find_modules_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repo_find_modules_clamps_limit(tmp_path, monkeypatch):
+    sb = _sandbox(tmp_path)
+    from app import repo_query
+
+    seen: dict = {}
+    def fake(driver, repo, limit, include_tests):
+        seen["limit"] = limit
+        return []
+    monkeypatch.setattr(repo_query, "find_modules", fake)
+
+    tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
+    tool = _tools_by_name(tools)["repo_find_modules"]
+    await _call(tool, limit=99999)
+    assert seen["limit"] == 100
