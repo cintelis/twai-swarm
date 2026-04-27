@@ -28,15 +28,18 @@ output "kms_key_id" {
   description = "Key ID — for backend.conf."
 }
 
-# Ready-to-paste config for deploy/terraform/backend.conf
+# Ready-to-paste config for deploy/terraform/backend.conf.
+# Sprint 2026-04: switched from DynamoDB-table locking to S3-native lockfile
+# (Terraform 1.11+). The DynamoDB `lock` table below is left in state as a
+# fallback — drop it once `use_lockfile` has run cleanly for a few weeks.
 output "backend_config_hcl" {
   value       = <<-EOT
-    bucket         = "${aws_s3_bucket.state.id}"
-    key            = "deploy/terraform.tfstate"
-    region         = "${var.aws_region}"
-    dynamodb_table = "${aws_dynamodb_table.lock.name}"
-    encrypt        = true
-    kms_key_id     = "${aws_kms_key.state.arn}"
+    bucket       = "${aws_s3_bucket.state.id}"
+    key          = "deploy/terraform.tfstate"
+    region       = "${var.aws_region}"
+    use_lockfile = true
+    encrypt      = true
+    kms_key_id   = "${aws_kms_key.state.arn}"
   EOT
   description = "Copy this into deploy/terraform/backend.conf (gitignored), then run `terraform init -reconfigure` in deploy/terraform/."
 }
