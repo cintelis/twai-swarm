@@ -8,7 +8,11 @@ temporalio==1.8.0
 # which landed after 0.40. 0.60 is the first release that ships both.
 anthropic>=0.60,<2.0
 openai>=1.60,<2.0
-fastapi==0.115.0
+# Bumped from 0.115.0 in Sprint 14c — the MCP SDK transitively pulls in
+# `sse-starlette>=3.4.1`, which requires `starlette>=0.49`. fastapi 0.115
+# pinned `starlette<0.39`, so we move forward to the 0.136 line which
+# accepts the modern starlette release. No FastAPI app code changes.
+fastapi>=0.116,<0.137
 uvicorn[standard]==0.32.0
 asyncpg==0.30.0
 pydantic==2.9.2
@@ -65,3 +69,11 @@ rustworkx>=0.16,<0.18
 # path stubbed in).
 python-louvain>=0.16,<1.0
 networkx>=3.0,<4.0
+
+# Sprint 14c — MCP server (`app/mcp_server/`).
+# Exposes the indexed repo data as MCP resources + tools so external
+# clients (Claude Code, Claude Desktop, other agents) can read the graph
+# without coupling to twai-swarm's internal Coder. Stdio transport only;
+# read-only; single-tenant per process. Mirrors GitNexus's resource shape.
+# The SDK ships precompiled wheels — no Rust toolchain in the worker image.
+mcp>=1.0,<2.0

@@ -23,6 +23,9 @@ __all__ = [
     "SymbolMatch",
     "ProcessSummary",
     "ModuleSummary",
+    "ModuleDetail",
+    "ProcessStep",
+    "ProcessDetail",
     "SemanticHit",
     "find_definition",
     "find_callers",
@@ -31,6 +34,8 @@ __all__ = [
     "find_symbol",
     "find_processes",
     "find_modules",
+    "find_module_detail",
+    "find_process_detail",
     "semantic_search",
 ]
 
@@ -87,6 +92,55 @@ class ModuleSummary:
     cohesion: float
     size: int
     sample_member_qns: tuple[str, ...]  # up to ~5 representative members
+
+
+# ─── Sprint 14c — MCP resource layer detail views ────────────────────────────
+#
+# `find_modules` / `find_processes` are the *list* views (samples + summaries).
+# The MCP resource layer also needs *detail* views for one-cluster-by-label
+# and one-process-by-name URIs — those want the full member list, not a
+# 5-element sample. Same dataclass-and-Cypher style as the list helpers.
+
+
+@dataclass(frozen=True)
+class ModuleDetail:
+    """Full detail for a single Community. Backs `twai://repo/{n}/cluster/{label}`.
+
+    Unlike `ModuleSummary`, `member_qns` is the complete list — sorted
+    lexicographically for determinism (graph member ordering is not stable
+    across runs).
+    """
+    label: str
+    cohesion: float
+    size: int
+    member_qns: tuple[str, ...]   # ALL members, lexicographically sorted
+
+
+@dataclass(frozen=True)
+class ProcessStep:
+    """One ordered step inside a Process flow.
+
+    `step` is the integer index from STEP_IN_PROCESS.step (0..N-1).
+    `member_qn` / `file_path` / `line_start` are the projected fields
+    from the underlying Function node — enough for an MCP client to
+    render a hyperlink to source.
+    """
+    step: int
+    member_qn: str
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class ProcessDetail:
+    """Full detail for a single Process. Backs `twai://repo/{n}/process/{name}`.
+
+    `steps` are in order — step 0, step 1, ..., step N-1 — so a client
+    can read the flow front-to-back without re-sorting.
+    """
+    name: str
+    summary: str
+    steps: tuple["ProcessStep", ...]
 
 
 # ─── Sprint 14b — hybrid semantic search ─────────────────────────────────────
@@ -421,6 +475,102 @@ def find_modules(
             sample_member_qns=sample,
         ))
     return out
+
+
+# ─── Sprint 14c — single-detail lookups for the MCP resource layer ──────────
+
+
+def find_module_detail(
+    driver: Driver,
+    repo: str,
+    label: str,
+) -> Optional[ModuleDetail]:
+    """Return the full detail of a single Community (cluster), or None.
+
+    Backs the `twai://repo/{name}/cluster/{label}` MCP resource. Unlike
+    `find_modules` (which returns a sample), this returns ALL members
+    of the cluster sorted lexicographically.
+
+    Returns None when no Community with that (repo, label) pair exists —
+    let the caller decide how to render "not found" to the MCP client.
+    """
+    cypher = """
+        MATCH (c:Community {repo: $repo, label: $label})
+        OPTIONAL MATCH (c)<-[:MEMBER_OF]-(m)
+        WITH c, collect(m.qualified_name) AS member_qns
+        RETURN c.label                       AS label,
+               coalesce(c.cohesion, 0.0)     AS cohesion,
+               coalesce(c.size, size(member_qns)) AS size,
+               member_qns                    AS member_qns
+        LIMIT 1
+    """
+    with driver.session() as session:
+        rec = session.run(cypher, repo=repo, label=label).single()
+    if rec is None:
+        return None
+    raw = list(rec["member_qns"] or [])
+    # Drop any None entries from the OPTIONAL MATCH (cluster with zero
+    # members shouldn't happen post-13a, but guard anyway).
+    raw = [qn for qn in raw if qn]
+    members = tuple(sorted(raw))
+    return ModuleDetail(
+        label=rec["label"],
+        cohesion=float(rec["cohesion"]),
+        size=int(rec["size"]),
+        member_qns=members,
+    )
+
+
+def find_process_detail(
+    driver: Driver,
+    repo: str,
+    name: str,
+) -> Optional[ProcessDetail]:
+    """Return the full ordered step trace of a single Process, or None.
+
+    Backs the `twai://repo/{name}/process/{name}` MCP resource. Steps come
+    out in `STEP_IN_PROCESS.step` order — i.e. 0, 1, 2, ... — so the MCP
+    client can render the chain in execution order without re-sorting.
+
+    Returns None when no Process with that (repo, name) pair exists.
+    """
+    cypher = """
+        MATCH (p:Process {repo: $repo, name: $name})
+        OPTIONAL MATCH (p)-[r:STEP_IN_PROCESS]->(fn:Function)
+        WITH p, r.step AS step, fn
+        ORDER BY step
+        WITH p, collect({step: step,
+                         qn: fn.qualified_name,
+                         file: coalesce(fn.file_path, ''),
+                         line_start: coalesce(fn.line_start, 0)}) AS steps
+        RETURN p.name                  AS name,
+               coalesce(p.summary, '') AS summary,
+               steps                   AS steps
+        LIMIT 1
+    """
+    with driver.session() as session:
+        rec = session.run(cypher, repo=repo, name=name).single()
+    if rec is None:
+        return None
+    raw_steps = list(rec["steps"] or [])
+    # OPTIONAL MATCH yields a single sentinel row when there are no steps;
+    # filter rows whose `qn` is None / empty.
+    cleaned: list[ProcessStep] = []
+    for s in raw_steps:
+        qn = s.get("qn") if isinstance(s, dict) else None
+        if not qn:
+            continue
+        cleaned.append(ProcessStep(
+            step=int(s.get("step") or 0),
+            member_qn=qn,
+            file_path=s.get("file") or "",
+            line_start=int(s.get("line_start") or 0),
+        ))
+    return ProcessDetail(
+        name=rec["name"],
+        summary=rec["summary"] or "",
+        steps=tuple(cleaned),
+    )
 
 
 # ─── Sprint 14b — semantic_search ────────────────────────────────────────────
