@@ -115,7 +115,16 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
 
     def _flatten_attribute(n: Any) -> str | None:
-        """`a.b.c` → "a.b.c"; returns None for anything not chainable."""
+        """`a.b.c` → "a.b.c"; returns None for anything not chainable.
+
+        Special case for `super()`: tree-sitter parses the receiver of
+        `super().method` as a `call` node whose function is the identifier
+        `super`. We collapse that to the bare token `super` so the head of
+        the dotted name matches what `scope_resolution.finalize._resolve_callee`
+        looks for in its super() resolution branch. Other call-typed receivers
+        (e.g. `foo().bar()`) stay None — chasing them through call returns
+        needs flow / return-type inference and is deferred.
+        """
         if n.type == "identifier":
             return _node_text(source, n)
         if n.type == "attribute":
@@ -125,6 +134,10 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
             if base is None or attr is None:
                 return None
             return f"{base}.{_node_text(source, attr)}"
+        if n.type == "call":
+            fn = n.child_by_field_name("function")
+            if fn is not None and fn.type == "identifier" and _node_text(source, fn) == "super":
+                return "super"
         return None
 
     def _visit(n: Any) -> None:
@@ -132,7 +145,13 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
             fn = n.child_by_field_name("function")
             if fn is not None:
                 dotted = _flatten_attribute(fn)
-                if dotted:
+                # Skip bare `super()` — the visitor recurses into every call
+                # node, so for `super().method()` we'd otherwise emit BOTH
+                # `super.method` (from the outer call) and `super` (from the
+                # inner super() call). The bare-super edge has no useful
+                # semantics; finalize.py's super branch only fires on
+                # dotted shapes.
+                if dotted and dotted != "super":
                     # tree-sitter Point uses 0-indexed rows; humans count from 1.
                     found.append((dotted, n.start_point[0] + 1))
         for child in n.children:

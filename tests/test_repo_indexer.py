@@ -250,6 +250,26 @@ def main():
     assert edge.callee_qn == "main.helper"
 
 
+def test_extractor_flattens_super_call_chain(parser):
+    """`super().method()` should produce a CallEdge with callee_qn = `super.method`
+    so finalize.py's super() resolution branch can pick it up. Pre-fix,
+    _flatten_attribute returned None on the inner `call` node, swallowing
+    the `.method` suffix entirely.
+    """
+    src = b"""class Child(Parent):
+    def __init__(self, name):
+        super().__init__(name)
+        super().validate()
+"""
+    batch = extract_python_file(REPO, "child.py", src, "sha-super", parser)
+
+    calls_by_callee = {edge.callee_qn for edge in batch.calls}
+    assert "super.__init__" in calls_by_callee
+    assert "super.validate" in calls_by_callee
+    # No bare-`super` callees — those would mean we lost the method name.
+    assert "super" not in calls_by_callee
+
+
 def test_extractor_external_call_no_symbol_until_resolver(parser):
     """Extractor records the dotted name verbatim; Symbols come from the
     resolver, not the extractor."""
