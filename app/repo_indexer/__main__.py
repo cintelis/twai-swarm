@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .actions import IndexBatch, RepoNode
 from .loader import driver_from_env, ensure_constraints, prune_stale, write_batch
-from .phases import DEFAULT_PHASES
+from .phases import DEFAULT_PHASES, EmbedPhase
 from .runner import PhaseContext, run_pipeline
 
 logger = logging.getLogger("repo_indexer")
@@ -73,6 +73,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     aggregate = IndexBatch(repo=repo)
 
+    # Sprint 14a — opt-in embeddings. Compose a new phase tuple rather than
+    # mutating DEFAULT_PHASES (so callers that import DEFAULT_PHASES directly
+    # see the unchanged default ordering). EmbedPhase runs LAST: it depends
+    # on resolved qualified names but doesn't feed any other phase.
+    embed_enabled = bool(getattr(args, "with_embeddings", False))
+    phases = DEFAULT_PHASES + (EmbedPhase(),) if embed_enabled else DEFAULT_PHASES
+
     if args.dry_run:
         ctx = PhaseContext(
             repo=repo,
@@ -83,8 +90,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             ts_parsers=ts_parsers,
             driver=None,
             parse_workers=parse_workers,
+            embed_enabled=embed_enabled,
         )
-        run_pipeline(ctx, DEFAULT_PHASES)
+        run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
         return 0
 
@@ -104,8 +112,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             ts_parsers=ts_parsers,
             driver=driver,
             parse_workers=parse_workers,
+            embed_enabled=embed_enabled,
         )
-        run_pipeline(ctx, DEFAULT_PHASES)
+        run_pipeline(ctx, phases)
         write_start = time.monotonic()
         write_batch(driver, aggregate)
         write_secs = time.monotonic() - write_start
@@ -137,6 +146,11 @@ def main(argv: list[str] | None = None) -> int:
         "--parse-workers", type=int, default=None,
         help="Parse files in N worker processes. Default: cpu_count()//2 "
              "(or 1 if cpu_count() is 1). Set to 1 to force sequential.",
+    )
+    scan.add_argument(
+        "--with-embeddings", action="store_true", default=False,
+        help="Embed every Function + Class symbol via app/embeddings.py and "
+             "write vectors to Neo4j. Skipped by default to keep scans fast.",
     )
     scan.set_defaults(func=cmd_scan)
 

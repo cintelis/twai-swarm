@@ -168,6 +168,25 @@ class StepInProcessEdge:
     step: int                 # 0-indexed position in the chain
 
 
+# ─── Sprint 14a — embeddings bridge ─────────────────────────────────────────
+
+@dataclass(frozen=True)
+class EmbeddingUpdate:
+    """Pending embedding write for the loader. Pairs a node's qualified
+    name with its vector. The loader matches the node by (repo, qn) and
+    SETs the `embedding` property.
+
+    `target_kind` lets the loader pick the right label (Function vs Class)
+    when SET-ing — same shape as the resolver's Function/Symbol fan-out
+    pattern in `loader.write_batch` for INHERITS_FROM and CALLS edges.
+    """
+    repo: str
+    tenant_id: str            # MANDATORY — see Cross-cutting invariants
+    target_kind: Literal["function", "class"]
+    qualified_name: str
+    embedding: tuple[float, ...]   # fixed-length, dim sourced from app.embeddings
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -195,6 +214,11 @@ class IndexBatch:
     # via STEP_IN_PROCESS edges. No-op when 13a's community phase didn't run.
     processes: list[ProcessNode] = field(default_factory=list)
     step_in_process: list[StepInProcessEdge] = field(default_factory=list)
+    # Sprint 14a — per-symbol embeddings. Populated by `phases.embed.EmbedPhase`
+    # (opt-in via --with-embeddings; not in DEFAULT_PHASES). The loader writes
+    # them as a `LIST<FLOAT>` property on the corresponding Function or Class
+    # node. Empty list ⇒ loader writes nothing (the embed query is a no-op).
+    embeddings: list[EmbeddingUpdate] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -212,6 +236,7 @@ class IndexBatch:
         self.member_of.extend(other.member_of)
         self.processes.extend(other.processes)
         self.step_in_process.extend(other.step_in_process)
+        self.embeddings.extend(other.embeddings)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -227,4 +252,5 @@ class IndexBatch:
             "member_of_edges": len(self.member_of),
             "processes": len(self.processes),
             "step_in_process_edges": len(self.step_in_process),
+            "embedding_updates": len(self.embeddings),
         }

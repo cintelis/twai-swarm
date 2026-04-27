@@ -333,4 +333,6 @@ def test_batch_counts():
         "communities", "member_of_edges",
         # Sprint 13b — process extraction.
         "processes", "step_in_process_edges",
+        # Sprint 14a — embeddings bridge.
+        "embedding_updates",
     }

@@ -45,6 +45,12 @@ class PhaseContext:
     # PhaseContext default stays 1 so existing call sites and unit tests don't
     # silently spawn pools.
     parse_workers: int = 1
+    # Sprint 14a: embeddings opt-in. False by default — the embed phase is
+    # network-bound and per-symbol, so default scans skip it. Set True via
+    # the `--with-embeddings` CLI flag, which also adds EmbedPhase to the
+    # phase tuple. The phase itself short-circuits when this is False, even
+    # if it's in the tuple — defense in depth against custom phase lists.
+    embed_enabled: bool = False
 
 
 class Phase(Protocol):

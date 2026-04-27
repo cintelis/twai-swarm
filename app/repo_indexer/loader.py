@@ -24,6 +24,24 @@ from .actions import IndexBatch
 logger = logging.getLogger(__name__)
 
 
+# Sprint 14a — embedding dimensionality for the Neo4j vector index.
+#
+# Source of truth: `app.embeddings.EMBEDDING_DIMS` (currently 1536, OpenAI
+# `text-embedding-3-small`). We import lazily inside `ensure_constraints`
+# to avoid forcing the openai client into the module's import path — tests
+# that touch only the loader's chunked-write helper shouldn't need an
+# OPENAI_API_KEY. The import is gated so a missing-openai-package install
+# still lets the constraint setup proceed (the vector index just won't be
+# created); the embed phase itself is opt-in and will raise its own clear
+# error if invoked without the dep.
+#
+# If `app.embeddings.EMBEDDING_DIMS` ever changes (different model), drop
+# the existing vector indexes (`DROP INDEX function_embedding`,
+# `DROP INDEX class_embedding`) before re-running ensure_constraints —
+# Neo4j can't resize a vector index in place.
+EMBEDDING_SIMILARITY_FUNCTION = "cosine"
+
+
 @contextmanager
 def driver_from_env() -> Iterator[Driver]:
     """Yield a Neo4j driver wired to the worker's NEO4J_URL/PASSWORD env.
@@ -45,7 +63,15 @@ def driver_from_env() -> Iterator[Driver]:
 
 
 def ensure_constraints(driver: Driver) -> None:
-    """Idempotent uniqueness constraints. Cheap to re-run on every scan."""
+    """Idempotent uniqueness constraints + indexes. Cheap to re-run on every scan.
+
+    Sprint 14a adds two vector indexes (Function.embedding, Class.embedding)
+    sized to `app.embeddings.EMBEDDING_DIMS`. Vector indexes require Neo4j
+    server >=5.13. The deployed `neo4j:5-community` image is well past that
+    (5.27+); local dev DBs older than 5.13 will fail this CREATE silently
+    via `IF NOT EXISTS` only if the syntax itself is rejected. Verify before
+    enabling `--with-embeddings` against an older instance.
+    """
     stmts = [
         # Composite uniqueness — same qualified_name across different repos
         # is allowed and expected (forks, multiple tenants, etc.).
@@ -67,6 +93,39 @@ def ensure_constraints(driver: Driver) -> None:
     with driver.session() as session:
         for stmt in stmts:
             session.run(stmt)
+
+        # Sprint 14a — vector indexes. Created here (not as constraints —
+        # they're indexes, not uniqueness rules) so the embed phase can
+        # write into them on the very first opt-in scan. Sourced dim from
+        # `app.embeddings.EMBEDDING_DIMS` to keep one source of truth; if
+        # the import fails (no openai installed), we skip the vector index
+        # creation rather than crashing the whole scan — without the embed
+        # phase the indexes aren't needed anyway.
+        try:
+            from app.embeddings import EMBEDDING_DIMS as _dim
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "skipping vector index creation — app.embeddings not importable (%s); "
+                "this is fine when not using --with-embeddings", exc,
+            )
+            return
+
+        # Cypher 5 vector index syntax. Backticked option keys per Neo4j
+        # 5.13+ docs. `IF NOT EXISTS` makes this idempotent across runs.
+        for label in ("Function", "Class"):
+            index_name = f"{label.lower()}_embedding"
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {index_name} IF NOT EXISTS
+                FOR (n:{label})
+                ON n.embedding
+                OPTIONS {{indexConfig: {{
+                    `vector.dimensions`: $dim,
+                    `vector.similarity_function`: $sim
+                }}}}
+                """,
+                dim=_dim, sim=EMBEDDING_SIMILARITY_FUNCTION,
+            )
 
 
 WRITE_CHUNK_SIZE = 1000
@@ -294,6 +353,26 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             SET r.step = row.step
             """,
             [asdict(e) for e in batch.step_in_process],
+        )
+
+        # Sprint 14a — embedding writes. SET the `embedding` property on
+        # the matching Function or Class node. Same Function/Class fan-out
+        # pattern as MEMBER_OF (loader picks the right label via OPTIONAL
+        # MATCH + FOREACH/CASE). `embedding` is a tuple of float in Python;
+        # asdict serializes it to a list, which Neo4j stores as a
+        # LIST<FLOAT> property the vector index can read.
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            OPTIONAL MATCH (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
+            OPTIONAL MATCH (cls:Class {repo: row.repo, qualified_name: row.qualified_name})
+            FOREACH (n IN CASE WHEN row.target_kind = 'function' AND fn IS NOT NULL THEN [fn]
+                               WHEN row.target_kind = 'class'    AND cls IS NOT NULL THEN [cls]
+                               ELSE [] END |
+              SET n.embedding = row.embedding
+            )
+            """,
+            [{**asdict(e), "embedding": list(e.embedding)} for e in batch.embeddings],
         )
 
 
