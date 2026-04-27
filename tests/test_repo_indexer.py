@@ -331,4 +331,6 @@ def test_batch_counts():
         "inherits_edges", "call_edges", "import_edges",
         # Sprint 13a — community detection.
         "communities", "member_of_edges",
+        # Sprint 13b — process extraction.
+        "processes", "step_in_process_edges",
     }

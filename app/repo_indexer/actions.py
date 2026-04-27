@@ -141,6 +141,33 @@ class MemberOfEdge:
     community_label: str      # FK to CommunityNode.label
 
 
+# ─── Sprint 13b — process (execution flow) extraction ───────────────────────
+
+@dataclass(frozen=True)
+class ProcessNode:
+    """A chain of CALLS edges that crosses community boundaries.
+
+    Derived data — recomputable from the resolved graph + community
+    assignments. `name` is `<first.short_name> -> <last.short_name>` plus
+    a `#N` suffix on collision; unique within (repo, tenant_id). `summary`
+    is a comma-separated list of the first few step short-names, truncated.
+    """
+    repo: str
+    tenant_id: str            # MANDATORY — see Cross-cutting invariants
+    name: str                 # e.g. "RepoTaskWorkflow.run -> resolve_batch"
+    summary: str              # comma-separated short names, ~200 chars max
+
+
+@dataclass(frozen=True)
+class StepInProcessEdge:
+    """Edge from a Process to a Function, with its position in the chain."""
+    repo: str
+    tenant_id: str
+    process_name: str         # FK to ProcessNode.name
+    member_qn: str            # qualified_name of the Function in this step
+    step: int                 # 0-indexed position in the chain
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -163,6 +190,11 @@ class IndexBatch:
     # loader writes them to the graph via MEMBER_OF edges.
     communities: list[CommunityNode] = field(default_factory=list)
     member_of: list[MemberOfEdge] = field(default_factory=list)
+    # Sprint 13b — derived processes (execution flows). Populated by
+    # `phases.process_extract.ProcessExtractPhase`; the loader writes them
+    # via STEP_IN_PROCESS edges. No-op when 13a's community phase didn't run.
+    processes: list[ProcessNode] = field(default_factory=list)
+    step_in_process: list[StepInProcessEdge] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -178,6 +210,8 @@ class IndexBatch:
         self.imports.extend(other.imports)
         self.communities.extend(other.communities)
         self.member_of.extend(other.member_of)
+        self.processes.extend(other.processes)
+        self.step_in_process.extend(other.step_in_process)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -191,4 +225,6 @@ class IndexBatch:
             "import_edges": len(self.imports),
             "communities": len(self.communities),
             "member_of_edges": len(self.member_of),
+            "processes": len(self.processes),
+            "step_in_process_edges": len(self.step_in_process),
         }

@@ -60,6 +60,9 @@ def ensure_constraints(driver: Driver) -> None:
         # (the multi-tenant gap is tracked in
         # `production-multitenant-architecture.md` and is a separate fix).
         "CREATE CONSTRAINT community_id IF NOT EXISTS FOR (c:Community) REQUIRE (c.repo, c.label) IS UNIQUE",
+        # Sprint 13b — Process nodes (execution flows). Same tenant_id
+        # convention as Community: on the node, not in the uniqueness key.
+        "CREATE CONSTRAINT process_id IF NOT EXISTS FOR (p:Process) REQUIRE (p.repo, p.name) IS UNIQUE",
     ]
     with driver.session() as session:
         for stmt in stmts:
@@ -265,6 +268,32 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             )
             """,
             [asdict(e) for e in batch.member_of],
+        )
+
+        # Sprint 13b — Process nodes (execution flows: chains of CALLS that
+        # cross community boundaries) + STEP_IN_PROCESS edges with `step`
+        # index. Process points to Function (per the schema in
+        # repo-indexer-future-state.md §4.1).
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (r:Repo {name: row.repo})
+            MERGE (p:Process {repo: row.repo, name: row.name})
+            SET p.tenant_id = row.tenant_id,
+                p.summary = row.summary
+            """,
+            [asdict(p) for p in batch.processes],
+        )
+
+        _chunked_write(session,
+            """
+            UNWIND $rows AS row
+            MATCH (p:Process {repo: row.repo, name: row.process_name})
+            MATCH (fn:Function {repo: row.repo, qualified_name: row.member_qn})
+            MERGE (p)-[r:STEP_IN_PROCESS]->(fn)
+            SET r.step = row.step
+            """,
+            [asdict(e) for e in batch.step_in_process],
         )
 
 
