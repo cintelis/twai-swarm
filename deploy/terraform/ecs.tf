@@ -186,6 +186,18 @@ resource "aws_ecs_service" "worker" {
 # Note: unlike the worker service, we pass container config directly to the
 # module -- Express owns the task definition lifecycle.
 #-----------------------------------------------------------------------------
+#
+# Known drift on every `terraform plan` (do not apply blindly):
+#   - primary_container.image: `:<sha>` vs `:latest`. deploy.yml pushes
+#     both tags to the same digest (deploy.yml:62-64), so this is a no-op
+#     image-wise but TF treats the strings as different.
+#   - network_configuration.security_groups: an Express-Mode-managed SG
+#     gets attached live; TF wants it gone.
+#   - ingress_paths / service_revision_arn: AWS-managed, change on every
+#     deploy.
+# We can't `ignore_changes` these because the resource is inside a registry
+# module with no lifecycle hook exposed. Vendoring the module to add one
+# isn't worth the maintenance burden — the diffs are cosmetic.
 module "api_express" {
   # Exact pin. `~> 7.5` would allow 7.6/7.7 which have historically broken
   # this module's inputs. Bump manually after verifying a new release.

@@ -112,6 +112,9 @@ resource "aws_secretsmanager_secret_version" "langfuse_secret_key" {
 # its own ACM cert, its own autoscaling. Single task for dev; bump api_min_tasks
 # if trace volume justifies it.
 #-----------------------------------------------------------------------------
+# See ecs.tf::module.api_express for the known-drift rationale — same module,
+# same cosmetic diffs (image tag, AWS-managed SG, ingress_paths). Don't apply
+# this module's diffs without checking they're still in the known set.
 module "langfuse_express" {
   source  = "terraform-aws-modules/ecs/aws//modules/express-service"
   version = "= 7.5.0"
