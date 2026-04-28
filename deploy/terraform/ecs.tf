@@ -166,9 +166,12 @@ resource "aws_ecs_service" "worker" {
     rollback = true
   }
 
-  # Don't re-deploy on every apply unless the task def actually changes.
+  # deploy.yml registers new task def revisions out-of-band via
+  # aws ecs deploy-task-definition. Ignoring task_definition here prevents
+  # `terraform apply` from rolling the service back to whatever revision
+  # was current at the last apply.
   lifecycle {
-    ignore_changes = [desired_count]
+    ignore_changes = [desired_count, task_definition]
   }
 }
 
