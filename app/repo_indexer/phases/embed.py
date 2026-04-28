@@ -69,14 +69,6 @@ async def _embed_batch_async(texts: list[str]) -> list[list[float]]:
     return await asyncio.gather(*(embed_text(t) for t in texts))
 
 
-def _embed_batch_sync(texts: list[str]) -> list[list[float]]:
-    """Sync entry-point for the phase. Wraps the async embedder in a
-    fresh event loop per batch — `asyncio.run` raises if a loop is
-    already running, which is fine: the indexer pipeline is sync.
-    """
-    return asyncio.run(_embed_batch_async(texts))
-
-
 class EmbedPhase:
     """Generate embeddings for every Function + Class in the batch."""
 
@@ -93,6 +85,14 @@ class EmbedPhase:
         if not ctx.batch.functions and not ctx.batch.classes:
             return
 
+        # All chunks run under one asyncio.run so the cached AsyncOpenAI
+        # client's connection pool stays bound to a single event loop.
+        # A previous version did asyncio.run per-chunk, which left the
+        # cached client referencing closed-loop sockets on chunk N+1 →
+        # "Event loop is closed" once SDK retries spilled across chunks.
+        asyncio.run(self._run(ctx))
+
+    async def _run(self, ctx: PhaseContext) -> None:
         start = time.monotonic()
 
         # Build parallel arrays of (kind, qn, text). Maintaining order
@@ -124,7 +124,7 @@ class EmbedPhase:
             chunk_kinds = kinds[offset:offset + EMBED_BATCH_SIZE]
             chunk_qns = qns[offset:offset + EMBED_BATCH_SIZE]
 
-            vectors = _embed_batch_sync(chunk_texts)
+            vectors = await _embed_batch_async(chunk_texts)
 
             for kind, qn, vec in zip(chunk_kinds, chunk_qns, vectors):
                 ctx.batch.embeddings.append(EmbeddingUpdate(

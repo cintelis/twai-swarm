@@ -255,20 +255,20 @@ def test_phase_chunks_large_batch():
 
     fake_embed = AsyncMock(side_effect=_spy)
     with patch("app.embeddings.embed_text", fake_embed):
-        # Patch _embed_batch_sync so we can inspect chunk sizes directly.
+        # Patch _embed_batch_async so we can inspect chunk sizes directly.
         # Wrapping with side_effect lets us assert chunk sizes per call.
         from app.repo_indexer.phases import embed as embed_mod
-        original = embed_mod._embed_batch_sync
+        original = embed_mod._embed_batch_async
         chunk_sizes: list[int] = []
 
-        def _spy_sync(texts: list[str]) -> list[list[float]]:
+        async def _spy_async(texts: list[str]) -> list[list[float]]:
             chunk_sizes.append(len(texts))
             assert len(texts) <= EMBED_BATCH_SIZE, (
                 f"phase did not chunk: got {len(texts)} > {EMBED_BATCH_SIZE}"
             )
-            return original(texts)
+            return await original(texts)
 
-        with patch.object(embed_mod, "_embed_batch_sync", _spy_sync):
+        with patch.object(embed_mod, "_embed_batch_async", _spy_async):
             EmbedPhase().run(_ctx(batch))
 
     # We should have one EmbeddingUpdate per input symbol.
