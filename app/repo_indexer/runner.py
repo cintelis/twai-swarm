@@ -62,6 +62,11 @@ class PhaseContext:
     # self-scans to skip `templates/` (bundled scaffolds whose Python files
     # aren't the agent's own code). Default empty preserves existing scans.
     additional_skip_dirs: frozenset = field(default_factory=frozenset)
+    # Sprint 15a — opt-in domain extractors. Each flag adds detection
+    # of a specific framework pattern family. Default off so basic
+    # scans stay fast; heavy frameworks like Django (15a.2) and ORM
+    # walkers (15b) only fire when explicitly requested.
+    extract_routes: bool = False
 
 
 class Phase(Protocol):

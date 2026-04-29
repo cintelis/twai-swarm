@@ -323,6 +323,39 @@ def _walk_module_level_assignments(
     return found
 
 
+def _unwrap_decorated(node: Any) -> Any:
+    """If `node` is a `decorated_definition`, return the inner
+    `function_definition` or `class_definition`. Otherwise return
+    `node` unchanged. Returns None if `node` is None or unwrap fails.
+
+    Sprint 15a/15c prerequisite — pre-fix, the top-level dispatcher
+    in `extract_python_file` only handled bare `function_definition` /
+    `class_definition`, silently dropping `@app.get(...) def handler()`
+    style decorated routes and `@mcp.tool() def my_tool()` handlers.
+    """
+    if node is None:
+        return None
+    if node.type != "decorated_definition":
+        return node
+    for child in node.children:
+        if child.type in ("function_definition", "class_definition"):
+            return child
+    return None
+
+
+def _decorators_of(node: Any) -> list:
+    """Return the `decorator` children of a `decorated_definition`, or
+    an empty list for bare definitions.
+
+    Sprint 15a — supplies the decorator subtree to the routes
+    extractor without re-walking the AST. The same data feeds future
+    Sprint 15c MCP-tool detection.
+    """
+    if node is None or node.type != "decorated_definition":
+        return []
+    return [c for c in node.children if c.type == "decorator"]
+
+
 def _walk_self_field_assignments(
     source: bytes, body_node: Any,
 ) -> list[tuple[str, str, int]]:
@@ -447,11 +480,17 @@ def extract_python_file(
     sha: str,
     parser: Any,
     package_roots: tuple = (),
+    extract_routes: bool = False,
 ) -> IndexBatch:
     """Parse one .py file and return its IndexBatch fragment.
 
     `package_roots` (Sprint 14e) corrects module qns on monorepos. See
     `_module_qn_from_path`.
+
+    `extract_routes` (Sprint 15a) opts in to HTTP route extraction —
+    `@app.get("/x") def handler():` patterns become RouteNodes with
+    HANDLED_BY edges to the function. Default False to keep scans fast
+    when the caller doesn't need route data.
     """
     batch = IndexBatch(repo=repo)
 
@@ -478,7 +517,16 @@ def extract_python_file(
         parent_class_qn: str = "",
         parent_class_line_start: int = 0,
         parent_class_line_end: int = 0,
+        decorator_nodes: list = None,
     ) -> None:
+        """Emit FunctionNode + all its derived edges. `decorator_nodes`
+        is the list of `decorator` AST children of the wrapping
+        `decorated_definition` (empty list for bare `def`s). Used by
+        the routes-extraction hook (Sprint 15a) and future MCP-tool
+        detection (Sprint 15c).
+        """
+        if decorator_nodes is None:
+            decorator_nodes = []
         is_async = _is_async_function(node)
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
@@ -546,6 +594,19 @@ def extract_python_file(
                     type_raw_name=return_type_raw,
                     line=node.start_point[0] + 1,
                 ))
+        # Sprint 15a — HTTP route extraction. Decorators are scanned for
+        # FastAPI/Flask patterns; matching ones produce RouteNode +
+        # HANDLED_BY edges. Free this hook from the decorated_definition
+        # check — we already received the decorators from the caller.
+        if extract_routes and decorator_nodes:
+            from .domain_extractors.routes_python import extract_routes_from_decorators
+            for route_node, route_edge in extract_routes_from_decorators(
+                source, decorator_nodes, qn, rel_path,
+                repo.name, repo.tenant_id,
+            ):
+                batch.routes.append(route_node)
+                batch.route_edges.append(route_edge)
+
         # Calls inside this function become CallEdges. Same-file local calls
         # resolve here; everything else is left as the raw dotted name and
         # the resolver decides post-pass whether it lands on a Function
@@ -628,24 +689,37 @@ def extract_python_file(
                     batch.inherits.append(InheritsEdge(
                         repo=repo.name, child_qn=qn, parent_qn=parent_dotted,
                     ))
-        # Methods.
+        # Methods. Unwrap `decorated_definition` so `@property` /
+        # `@staticmethod` / etc. methods aren't silently dropped.
         class_line_start = node.start_point[0] + 1
         class_line_end = node.end_point[0] + 1
         if body is not None:
             for child in body.children:
-                if child.type == "function_definition":
+                decorators = _decorators_of(child)
+                inner = _unwrap_decorated(child)
+                if inner is not None and inner.type == "function_definition":
                     _emit_function(
-                        child,
+                        inner,
                         parent_class_qn=qn,
                         parent_class_line_start=class_line_start,
                         parent_class_line_end=class_line_end,
+                        decorator_nodes=decorators,
                     )
 
     for child in root.children:
-        if child.type == "function_definition":
-            _emit_function(child)
-        elif child.type == "class_definition":
-            _emit_class(child)
+        # Unwrap `decorated_definition` wrappers — `@app.get("/x") def
+        # handler():` should produce a FunctionNode just like the bare
+        # form. Pre-fix the dispatcher silently skipped decorated
+        # top-level defs, dropping every FastAPI/Flask route and every
+        # `@mcp.tool`-decorated handler from the graph.
+        decorators = _decorators_of(child)
+        inner = _unwrap_decorated(child)
+        if inner is None:
+            continue
+        if inner.type == "function_definition":
+            _emit_function(inner, decorator_nodes=decorators)
+        elif inner.type == "class_definition":
+            _emit_class(inner)
 
     # Sprint 14i — module-level typeBindings. `app = FastAPI()` at the
     # top of the file becomes a binding on the module scope so any

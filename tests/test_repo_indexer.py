@@ -376,6 +376,9 @@ def test_batch_counts():
         "embedding_updates",
         # Sprint 14g — local variable type bindings (resolution-only state).
         "local_var_bindings",
+        # Sprint 15a — HTTP route definitions and HANDLED_BY edges.
+        "routes",
+        "route_edges",
     }
 
 

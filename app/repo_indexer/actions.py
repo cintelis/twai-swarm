@@ -221,6 +221,50 @@ class LocalVarBinding:
     line: int                       # 1-based line of the assignment
 
 
+@dataclass(frozen=True)
+class RouteNode:
+    """Sprint 15a — HTTP route definition.
+
+    Emitted by the routes domain-extractor when it recognises a framework
+    pattern like `@app.get("/users")`, `@router.post(...)`, Express'
+    `app.get("/x", handler)`, or a Next.js `route.ts` exporting a verb.
+
+    Multi-tenant from day one (`tenant_id` on every node, same convention
+    as the rest of the schema). The composite uniqueness key is
+    `(repo, tenant_id, path, method)` — handler_qn is on the edge, not
+    the node, so re-resolution doesn't cause duplicate route nodes.
+
+    `framework` distinguishes detection sources for queries like
+    "show only FastAPI routes". `raw_path` keeps the unnormalised source
+    token for debug — `path` is the normalised form used as the key.
+    """
+    repo: str
+    tenant_id: str
+    path: str               # normalised: lower-case, trailing-slash stripped, {param} placeholders
+    method: str             # uppercase: 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', '*' for ANY
+    framework: str          # 'fastapi' | 'flask' | 'django' | 'express' | 'hono' | 'nextjs' | 'nestjs'
+    handler_qn: str         # qualified name of the handling Function; "" if unresolved (inline lambda etc.)
+    file_path: str
+    line_start: int
+    raw_path: str           # the literal as it appeared in source
+
+
+@dataclass(frozen=True)
+class RouteEdge:
+    """Sprint 15a — links a Route to its handling Function.
+
+    Emitted alongside RouteNode when the handler resolves to a known
+    Function. Inline handlers (`app.get("/x", c => ...)`) skip this
+    edge — the RouteNode keeps `handler_qn=""` so the Coder still sees
+    the route but knows the implementation is inline.
+    """
+    repo: str
+    tenant_id: str
+    path: str
+    method: str
+    handler_qn: str
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -258,6 +302,12 @@ class IndexBatch:
     # resolver's LocalVarTypeIndex. Not persisted to Neo4j (resolution-only
     # state). Empty list ⇒ no extra typeBinding-driven resolutions happen.
     local_var_bindings: list[LocalVarBinding] = field(default_factory=list)
+    # Sprint 15a — HTTP route definitions and their handler edges.
+    # Populated by `domain_extractors/routes_*.py` when the relevant
+    # `--with-routes` CLI flag (or its programmatic equivalent) is on.
+    # Empty in default scans.
+    routes: list[RouteNode] = field(default_factory=list)
+    route_edges: list[RouteEdge] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -277,6 +327,8 @@ class IndexBatch:
         self.step_in_process.extend(other.step_in_process)
         self.embeddings.extend(other.embeddings)
         self.local_var_bindings.extend(other.local_var_bindings)
+        self.routes.extend(other.routes)
+        self.route_edges.extend(other.route_edges)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -294,4 +346,6 @@ class IndexBatch:
             "step_in_process_edges": len(self.step_in_process),
             "embedding_updates": len(self.embeddings),
             "local_var_bindings": len(self.local_var_bindings),
+            "routes": len(self.routes),
+            "route_edges": len(self.route_edges),
         }

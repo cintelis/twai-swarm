@@ -89,6 +89,11 @@ def ensure_constraints(driver: Driver) -> None:
         # Sprint 13b — Process nodes (execution flows). Same tenant_id
         # convention as Community: on the node, not in the uniqueness key.
         "CREATE CONSTRAINT process_id IF NOT EXISTS FOR (p:Process) REQUIRE (p.repo, p.name) IS UNIQUE",
+        # Sprint 15a — HTTP route nodes. Composite key is (repo, path, method)
+        # so re-indexing the same route definition (across runs, across
+        # different handler_qn resolutions) doesn't fan out into multiple
+        # Route nodes. handler_qn lives on the HANDLED_BY edge, not the key.
+        "CREATE CONSTRAINT route_id IF NOT EXISTS FOR (r:Route) REQUIRE (r.repo, r.path, r.method) IS UNIQUE",
     ]
     with driver.session() as session:
         for stmt in stmts:
@@ -371,6 +376,47 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             """,
             [asdict(e) for e in batch.step_in_process],
         )
+
+        # Sprint 15a — Route nodes + HANDLED_BY edges + DEFINES edges
+        # (File→Route for discoverability). MERGE on (repo, path, method)
+        # so re-indexing collapses to one node per route definition.
+        if batch.routes:
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MERGE (r:Route {repo: row.repo, path: row.path, method: row.method})
+                SET r.tenant_id = row.tenant_id,
+                    r.framework = row.framework,
+                    r.raw_path = row.raw_path,
+                    r.file_path = row.file_path,
+                    r.line_start = row.line_start
+                """,
+                [asdict(r) for r in batch.routes],
+            )
+            # File→Route edge (matches the `(File)-[:DEFINES]->(Module|Class|Function)`
+            # convention the rest of the schema uses).
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo: row.repo, path: row.file_path})
+                MATCH (r:Route {repo: row.repo, path: row.path, method: row.method})
+                MERGE (f)-[:DEFINES]->(r)
+                """,
+                [asdict(r) for r in batch.routes],
+            )
+        if batch.route_edges:
+            # HANDLED_BY edges. Skip rows where handler_qn is empty
+            # (inline lambdas / unresolvable handlers — RouteNode still
+            # carries file_path + line_start for jump-to-source).
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (r:Route {repo: row.repo, path: row.path, method: row.method})
+                MATCH (fn:Function {repo: row.repo, qualified_name: row.handler_qn})
+                MERGE (r)-[:HANDLED_BY]->(fn)
+                """,
+                [asdict(e) for e in batch.route_edges if e.handler_qn],
+            )
 
         # Sprint 14a — embedding writes. Delegated to _write_embeddings so
         # the --embed-only path can reuse the same Cypher.

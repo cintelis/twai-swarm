@@ -65,14 +65,14 @@ def _pool_init() -> None:
 
 def _pool_extract(args: tuple) -> tuple:
     """Worker-side per-file extraction. Args:
-        (rel_path, source, language, sha, repo, repo_files, package_roots)
+        (rel_path, source, language, sha, repo, repo_files, package_roots, extract_routes)
 
     Returns `(rel_path, fragment_or_None, error_str_or_None)`. Catches all
     exceptions so one weird file never crashes the pool. The `args` tuple
     is everything we need to be picklable — parsers come from module
     globals populated by `_pool_init`.
     """
-    rel_path, source, language, sha, repo, repo_files, package_roots = args
+    rel_path, source, language, sha, repo, repo_files, package_roots, extract_routes = args
     try:
         # Lazy-import inside the worker — keeps the parent process from
         # paying the import cost when sequential mode is used.
@@ -81,6 +81,7 @@ def _pool_extract(args: tuple) -> tuple:
             fragment = extract_python_file(
                 repo, rel_path, source, sha, _PY_PARSER,
                 package_roots=package_roots,
+                extract_routes=extract_routes,
             )
         elif language in ("typescript", "javascript"):
             from ..extractor_typescript import extract_typescript_file
@@ -144,6 +145,7 @@ class ParsePhase:
                         fragment = extract_python_file(
                             ctx.repo, rel_path, source, sha, ctx.py_parser,
                             package_roots=ctx.package_roots,
+                            extract_routes=ctx.extract_routes,
                         )
                     elif language in ("typescript", "javascript"):
                         # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
@@ -177,7 +179,8 @@ class ParsePhase:
             # list — source bytes for 13K files would balloon RSS. Pool's
             # imap_unordered consumes lazily (with internal buffering).
             args_iter = (
-                (rel_path, source, language, sha, ctx.repo, ctx.repo_files, ctx.package_roots)
+                (rel_path, source, language, sha, ctx.repo, ctx.repo_files,
+                 ctx.package_roots, ctx.extract_routes)
                 for (rel_path, source, language, sha) in _work_items()
             )
 

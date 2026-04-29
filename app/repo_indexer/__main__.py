@@ -127,6 +127,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             embed_enabled=embed_enabled,
             package_roots=package_roots,
             additional_skip_dirs=additional_skip_dirs,
+            extract_routes=bool(getattr(args, "with_routes", False)),
         )
         run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -151,6 +152,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             embed_enabled=embed_enabled,
             package_roots=package_roots,
             additional_skip_dirs=additional_skip_dirs,
+            extract_routes=bool(getattr(args, "with_routes", False)),
         )
         run_pipeline(ctx, phases)
         write_start = time.monotonic()
@@ -247,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
              "Augments the built-in denylist (.venv, node_modules, etc.). "
              "Use for self-scans where bundled scaffolds (e.g. `templates`) "
              "shouldn't be indexed alongside the agent's own code.",
+    )
+    scan.add_argument(
+        "--with-routes", action="store_true", default=False,
+        help="Sprint 15a — extract HTTP route definitions (FastAPI, Flask) "
+             "into Route nodes with HANDLED_BY edges to the handler "
+             "Function. Disabled by default to keep scans fast when "
+             "the caller doesn't need framework-pattern data.",
     )
     scan.set_defaults(func=cmd_scan)
 
