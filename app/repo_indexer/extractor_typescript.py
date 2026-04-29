@@ -80,8 +80,15 @@ def _resolve_relative_import(
     against the actual file set in the repo. Returns the resolved repo-
     relative path (with extension), or None if nothing matches.
 
-    Tries: <spec>.ts, <spec>.tsx, <spec>.js, <spec>.jsx, <spec>/index.ts,
-    <spec>/index.tsx, <spec>/index.js, <spec>/index.jsx — in that order.
+    Strips an explicit `.ts` / `.tsx` / `.js` / `.jsx` suffix on the
+    specifier before extension probing — TypeScript's `"moduleResolution":
+    "node16"` and ESM-on-Node both REQUIRE explicit `.js` in imports
+    even when the source is `.ts`, so `from '../foo.js'` must resolve to
+    `../foo.ts` on disk. Without this strip we'd probe `foo.js.ts`,
+    `foo.js.tsx`, etc. and miss the actual file.
+
+    Tries: <stem>.ts, <stem>.tsx, <stem>.js, <stem>.jsx, <stem>/index.ts,
+    <stem>/index.tsx, <stem>/index.js, <stem>/index.jsx — in that order.
     """
     if not specifier.startswith("."):
         return None
@@ -98,6 +105,13 @@ def _resolve_relative_import(
             continue
         parent.append(seg)
     base = "/".join(parent)
+    # Strip a source extension if the specifier already has one. TS-ESM
+    # requires `.js` in imports even when the source is `.ts`; without
+    # this strip we'd append another extension and never find the file.
+    for ext in _SRC_EXTS:
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+            break
     # Try direct file extensions first, then index variants.
     for ext in _SRC_EXTS:
         candidate = base + ext

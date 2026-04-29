@@ -85,6 +85,30 @@ def test_resolve_relative_returns_none_when_not_in_set():
     assert _resolve_relative_import("app/foo.ts", "./missing", {"app/foo.ts"}) is None
 
 
+def test_resolve_relative_strips_js_extension_for_ts_esm():
+    """TS-ESM requires explicit `.js` in imports even when the source is
+    `.ts`. The resolver must strip the `.js` (or `.jsx`) and probe with
+    the actual source extensions. Without this, GitNexus-style imports
+    `from '../../lib/utils.js'` always fail to resolve."""
+    files = {"app/foo.ts", "lib/utils.ts"}
+    assert _resolve_relative_import("app/foo.ts", "../lib/utils.js", files) == "lib/utils.ts"
+
+
+def test_resolve_relative_strips_jsx_extension():
+    """Same for `.jsx` → `.tsx` substitution."""
+    files = {"app/foo.tsx", "components/Button.tsx"}
+    assert _resolve_relative_import(
+        "app/foo.tsx", "../components/Button.jsx", files,
+    ) == "components/Button.tsx"
+
+
+def test_resolve_relative_explicit_ts_extension_works():
+    """Explicit `.ts` in the specifier should also work (some configs use
+    this; should round-trip cleanly)."""
+    files = {"app/foo.ts", "lib/utils.ts"}
+    assert _resolve_relative_import("app/foo.ts", "../lib/utils.ts", files) == "lib/utils.ts"
+
+
 # ─── extractor — top-level shape ────────────────────────────────────────────
 
 def test_extracts_top_level_function(ts_parser):
