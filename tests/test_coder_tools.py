@@ -53,13 +53,14 @@ def test_build_tools_adds_graph_tools_with_neo4j(tmp_path):
 
     Sprint 10c added 3 graph tools (search/find_definition/find_callers);
     Sprint 13c added 2 more (find_processes/find_modules) for high-level
-    discoverability; Sprint 14b added repo_semantic_search. So 5 sandbox
-    + 6 graph = 11 total.
+    discoverability; Sprint 14b added repo_semantic_search; Sprint 15d
+    added 5 domain-extractor surface tools (routes + MCP tools/resources).
+    So 5 sandbox + 6 graph (from earlier sprints) + 5 domain = 16 total.
     """
     sb = _sandbox(tmp_path)
     fake_driver = object()
     tools, stats = build_tools(sb, neo4j_driver=fake_driver, repo_name="repo")
-    assert len(tools) == 11
+    assert len(tools) == 16
     for key in (
         "repo_search_calls", "repo_find_definition_calls", "repo_find_callers_calls",
         "repo_find_processes_calls", "repo_find_modules_calls",
@@ -580,13 +581,18 @@ async def test_semantic_tool_added_only_when_driver_and_repo_name_provided(tmp_p
 
 
 def test_semantic_tool_count_matches_expected_total(tmp_path):
-    """build_tools(sandbox, driver, repo) returns 11 tools after 14b
-    (was 10 after 13c). Lock the count so future additions / removals
-    are an explicit decision rather than a silent drift."""
+    """build_tools(sandbox, driver, repo) returns 16 tools after 15d
+    (was 11 after 14b). Sprint 15d added 5 domain-extractor surface
+    tools — repo_find_routes, repo_find_route_handler,
+    repo_find_routes_by_handler, repo_find_mcp_tools,
+    repo_find_mcp_resources. Lock the count so future additions /
+    removals are an explicit decision rather than a silent drift."""
     sb = _sandbox(tmp_path)
     tools, _ = build_tools(sb, neo4j_driver=object(), repo_name="r")
-    assert len(tools) == 11
+    assert len(tools) == 16
     assert "repo_semantic_search" in {t.name for t in tools}
+    assert "repo_find_routes" in {t.name for t in tools}
+    assert "repo_find_mcp_tools" in {t.name for t in tools}
 
 
 @pytest.mark.asyncio

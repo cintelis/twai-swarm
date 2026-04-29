@@ -844,3 +844,219 @@ def semantic_search(
             rrf_score=float(entry["rrf"]),
         ))
     return out
+
+
+# ─── Sprint 15d — domain-extractor surface (routes, MCP tools) ──────────────
+
+@dataclass(frozen=True)
+class RouteHit:
+    """One row from `find_routes`."""
+    path: str
+    method: str
+    framework: str
+    handler_qn: str
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class MCPToolHit:
+    """One row from `find_mcp_tools`."""
+    name: str
+    description: str
+    handler_qn: str
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class MCPResourceHit:
+    """One row from `find_mcp_resources`."""
+    uri_template: str
+    description: str
+    handler_qn: str
+    file_path: str
+    line_start: int
+
+
+def find_routes(
+    driver: Driver,
+    repo: str,
+    method: Optional[str] = None,
+    path_substring: Optional[str] = None,
+    framework: Optional[str] = None,
+    limit: int = 200,
+) -> list[RouteHit]:
+    """List HTTP routes registered in `repo`. Optional filters narrow
+    by HTTP method, path substring (case-insensitive), or framework
+    (`fastapi` / `flask` / `express` / `nextjs` / etc.).
+
+    Sprint 15a + 15a.2 emit Route nodes from FastAPI/Flask decorators
+    on the Python side and Express/Hono call patterns + Next.js App
+    Router file conventions on the TS side. This is the read surface
+    the Coder uses for "where is `POST /users` handled?".
+    """
+    where_parts = ["r.repo = $repo"]
+    params: dict[str, object] = {"repo": repo, "limit": int(limit)}
+    if method:
+        where_parts.append("r.method = $method")
+        params["method"] = method.upper()
+    if path_substring:
+        where_parts.append("toLower(r.path) CONTAINS toLower($pathsub)")
+        params["pathsub"] = path_substring
+    if framework:
+        where_parts.append("r.framework = $framework")
+        params["framework"] = framework
+    where = " AND ".join(where_parts)
+    cypher = f"""
+        MATCH (r:Route)
+        WHERE {where}
+        RETURN r.path AS path, r.method AS method, r.framework AS framework,
+               r.handler_qn AS handler_qn, r.file_path AS file_path,
+               r.line_start AS line_start
+        ORDER BY r.path, r.method
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(cypher, params)
+        out: list[RouteHit] = []
+        for row in result.data():
+            out.append(RouteHit(
+                path=row["path"],
+                method=row["method"],
+                framework=row["framework"] or "",
+                handler_qn=row["handler_qn"] or "",
+                file_path=row["file_path"] or "",
+                line_start=int(row["line_start"] or 0),
+            ))
+        return out
+
+
+def find_route_handler(
+    driver: Driver, repo: str, method: str, path: str,
+) -> Optional[Definition]:
+    """Resolve `(method, path)` to the handler Function's definition
+    (file + lines + docstring). Returns None if the route doesn't
+    exist in the repo or the handler couldn't be linked."""
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (r:Route {repo: $repo, path: $path, method: $method})-[:HANDLED_BY]->(fn:Function)
+            RETURN fn.qualified_name AS qn, fn.file_path AS file_path,
+                   fn.line_start AS line_start, fn.line_end AS line_end,
+                   coalesce(fn.docstring, '') AS docstring
+            LIMIT 1
+            """,
+            repo=repo, path=path, method=method.upper(),
+        )
+        row = result.single()
+        if row is None:
+            return None
+        return Definition(
+            qualified_name=row["qn"],
+            file_path=row["file_path"] or "",
+            line_start=int(row["line_start"] or 0),
+            line_end=int(row["line_end"] or 0),
+            docstring=row["docstring"],
+        )
+
+
+def find_routes_by_handler(
+    driver: Driver, repo: str, handler_qn: str,
+) -> list[RouteHit]:
+    """Inverse of `find_route_handler`: given a Function's qn, return
+    every Route that points at it. Useful for impact analysis ("if I
+    rename this handler, which URLs break?")."""
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (r:Route {repo: $repo})-[:HANDLED_BY]->(fn:Function {repo: $repo, qualified_name: $qn})
+            RETURN r.path AS path, r.method AS method, r.framework AS framework,
+                   r.handler_qn AS handler_qn, r.file_path AS file_path,
+                   r.line_start AS line_start
+            ORDER BY r.path, r.method
+            """,
+            repo=repo, qn=handler_qn,
+        )
+        out: list[RouteHit] = []
+        for row in result.data():
+            out.append(RouteHit(
+                path=row["path"],
+                method=row["method"],
+                framework=row["framework"] or "",
+                handler_qn=row["handler_qn"] or "",
+                file_path=row["file_path"] or "",
+                line_start=int(row["line_start"] or 0),
+            ))
+        return out
+
+
+def find_mcp_tools(
+    driver: Driver, repo: str, name_filter: Optional[str] = None, limit: int = 100,
+) -> list[MCPToolHit]:
+    """List MCP tools registered in `repo`. `name_filter` is a
+    case-insensitive substring; None returns all tools (capped at
+    `limit`).
+
+    Sprint 15c — the Coder uses this to introspect "what tools does
+    this MCP server expose?" without parsing source.
+    """
+    where = "t.repo = $repo"
+    params: dict[str, object] = {"repo": repo, "limit": int(limit)}
+    if name_filter:
+        where += " AND toLower(t.name) CONTAINS toLower($q)"
+        params["q"] = name_filter
+    cypher = f"""
+        MATCH (t:MCPTool)
+        WHERE {where}
+        RETURN t.name AS name, t.description AS description,
+               t.handler_qn AS handler_qn, t.file_path AS file_path,
+               t.line_start AS line_start
+        ORDER BY t.name
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(cypher, params)
+        out: list[MCPToolHit] = []
+        for row in result.data():
+            out.append(MCPToolHit(
+                name=row["name"],
+                description=row["description"] or "",
+                handler_qn=row["handler_qn"] or "",
+                file_path=row["file_path"] or "",
+                line_start=int(row["line_start"] or 0),
+            ))
+        return out
+
+
+def find_mcp_resources(
+    driver: Driver, repo: str, uri_filter: Optional[str] = None, limit: int = 100,
+) -> list[MCPResourceHit]:
+    """List MCP resources registered in `repo`. `uri_filter` is a
+    case-insensitive substring on uri_template."""
+    where = "r.repo = $repo"
+    params: dict[str, object] = {"repo": repo, "limit": int(limit)}
+    if uri_filter:
+        where += " AND toLower(r.uri_template) CONTAINS toLower($q)"
+        params["q"] = uri_filter
+    cypher = f"""
+        MATCH (r:MCPResource)
+        WHERE {where}
+        RETURN r.uri_template AS uri_template, r.description AS description,
+               r.handler_qn AS handler_qn, r.file_path AS file_path,
+               r.line_start AS line_start
+        ORDER BY r.uri_template
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(cypher, params)
+        out: list[MCPResourceHit] = []
+        for row in result.data():
+            out.append(MCPResourceHit(
+                uri_template=row["uri_template"],
+                description=row["description"] or "",
+                handler_qn=row["handler_qn"] or "",
+                file_path=row["file_path"] or "",
+                line_start=int(row["line_start"] or 0),
+            ))
+        return out

@@ -470,9 +470,141 @@ def build_tools(
                 for r in results
             ])
 
+        # ─── Sprint 15d — domain-extractor surface ─────────────────────
+
+        @beta_async_tool
+        async def repo_find_routes(
+            method: str = "", path_substring: str = "", framework: str = "",
+            limit: int = 200,
+        ) -> str:
+            """List HTTP routes registered in this repo.
+
+            Available when the repo was scanned with `--with-routes`.
+            Recognises FastAPI / Flask decorators on Python; Express /
+            Hono call patterns + Next.js App Router on TypeScript.
+
+            Args:
+                method: Optional HTTP method filter (`GET`, `POST`, ...).
+                    Empty string disables the filter.
+                path_substring: Optional case-insensitive substring filter
+                    on the route path. Empty string disables.
+                framework: Optional framework filter
+                    (`fastapi` | `flask` | `express` | `nextjs` | ...).
+                limit: Max rows (default 200).
+
+            Returns JSON: [{path, method, framework, handler_qn,
+            file_path, line_start}, ...].
+            """
+            stats["repo_find_routes_calls"] = stats.get("repo_find_routes_calls", 0) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_routes,
+                neo4j_driver, repo_name,
+                method or None, path_substring or None, framework or None,
+                int(limit),
+            )
+            return json.dumps([
+                {
+                    "path": r.path, "method": r.method,
+                    "framework": r.framework, "handler_qn": r.handler_qn,
+                    "file_path": r.file_path, "line_start": r.line_start,
+                }
+                for r in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_route_handler(method: str, path: str) -> str:
+            """Resolve `(method, path)` to its handler Function.
+
+            Returns the handler's definition (file + lines + docstring)
+            or null when no Route matches.
+            """
+            stats["repo_find_route_handler_calls"] = stats.get("repo_find_route_handler_calls", 0) + 1
+            result = await asyncio.to_thread(
+                repo_query.find_route_handler,
+                neo4j_driver, repo_name, method, path,
+            )
+            if result is None:
+                return "null"
+            return json.dumps({
+                "qualified_name": result.qualified_name,
+                "file_path": result.file_path,
+                "line_start": result.line_start,
+                "line_end": result.line_end,
+                "docstring": result.docstring,
+            })
+
+        @beta_async_tool
+        async def repo_find_routes_by_handler(qualified_name: str) -> str:
+            """Inverse of `repo_find_route_handler`. Given a handler's
+            qualified_name, return every Route that points at it.
+
+            Use for impact analysis ("if I rename this handler, which
+            URLs break?")."""
+            stats["repo_find_routes_by_handler_calls"] = stats.get("repo_find_routes_by_handler_calls", 0) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_routes_by_handler,
+                neo4j_driver, repo_name, qualified_name,
+            )
+            return json.dumps([
+                {
+                    "path": r.path, "method": r.method,
+                    "framework": r.framework, "handler_qn": r.handler_qn,
+                    "file_path": r.file_path, "line_start": r.line_start,
+                }
+                for r in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_mcp_tools(name_filter: str = "", limit: int = 100) -> str:
+            """List MCP tools registered in this repo. Available when
+            the repo was scanned with `--with-mcp-tools`.
+
+            Args:
+                name_filter: Case-insensitive substring on the tool name.
+                    Empty disables.
+                limit: Max rows (default 100).
+
+            Returns JSON: [{name, description, handler_qn, file_path,
+            line_start}, ...].
+            """
+            stats["repo_find_mcp_tools_calls"] = stats.get("repo_find_mcp_tools_calls", 0) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_mcp_tools,
+                neo4j_driver, repo_name, name_filter or None, int(limit),
+            )
+            return json.dumps([
+                {
+                    "name": t.name, "description": t.description,
+                    "handler_qn": t.handler_qn, "file_path": t.file_path,
+                    "line_start": t.line_start,
+                }
+                for t in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_mcp_resources(uri_filter: str = "", limit: int = 100) -> str:
+            """List MCP resources (URI templates) registered in this repo."""
+            stats["repo_find_mcp_resources_calls"] = stats.get("repo_find_mcp_resources_calls", 0) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_mcp_resources,
+                neo4j_driver, repo_name, uri_filter or None, int(limit),
+            )
+            return json.dumps([
+                {
+                    "uri_template": r.uri_template,
+                    "description": r.description,
+                    "handler_qn": r.handler_qn,
+                    "file_path": r.file_path, "line_start": r.line_start,
+                }
+                for r in results
+            ])
+
         tools.extend([
             repo_search, repo_find_definition, repo_find_callers,
             repo_find_processes, repo_find_modules, repo_semantic_search,
+            repo_find_routes, repo_find_route_handler,
+            repo_find_routes_by_handler,
+            repo_find_mcp_tools, repo_find_mcp_resources,
         ])
 
     return tools, stats
