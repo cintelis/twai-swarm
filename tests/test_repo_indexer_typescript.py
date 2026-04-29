@@ -241,3 +241,123 @@ export function Hello({ name }: { name: string }) {
     batch = extract_typescript_file(REPO, "Hello.tsx", src, "sha13", tsx_parser, repo_files=set())
     fn_names = {f.name for f in batch.functions}
     assert "Hello" in fn_names
+
+
+# ─── Sprint 14j — TS typeBinding extraction ─────────────────────────────────
+
+def test_ts_const_with_new_expression_emits_binding(ts_parser):
+    """`const x = new Foo()` produces a function-scope binding when
+    inside a function. Constructor-inferred."""
+    src = b"function use() {\n  const builder = new StateGraph();\n}\n"
+    batch = extract_typescript_file(REPO, "u.ts", src, "sha", ts_parser, repo_files=set())
+    fn_bindings = [b for b in batch.local_var_bindings
+                   if b.enclosing_scope_kind == "function"]
+    assert len(fn_bindings) == 1
+    assert fn_bindings[0].var_name == "builder"
+    assert fn_bindings[0].type_raw_name == "StateGraph"
+
+
+def test_ts_const_with_annotation_wins_over_inference(ts_parser):
+    """`const x: Foo = new Bar()` — annotation wins (mirrors GitNexus's
+    interpret-layer ordering)."""
+    src = b"function use() {\n  const x: Foo = new Bar();\n}\n"
+    batch = extract_typescript_file(REPO, "u.ts", src, "sha", ts_parser, repo_files=set())
+    fn_bindings = [b for b in batch.local_var_bindings
+                   if b.enclosing_scope_kind == "function"]
+    assert len(fn_bindings) == 1
+    assert fn_bindings[0].type_raw_name == "Foo"   # annotation, NOT Bar
+
+
+def test_ts_module_level_const_with_new_emits_module_binding(ts_parser):
+    """Module-level `const app = new FastAPI()` — module-scope binding."""
+    src = b"const app = new FastAPI();\n\nexport function use() { app.get(); }\n"
+    batch = extract_typescript_file(REPO, "main.ts", src, "sha", ts_parser, repo_files=set())
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert len(mod_bindings) == 1
+    assert mod_bindings[0].var_name == "app"
+    assert mod_bindings[0].type_raw_name == "FastAPI"
+
+
+def test_ts_class_field_annotation_emits_class_binding(ts_parser):
+    """`class S { client: Client }` — annotation-only class field
+    becomes a class-scope binding."""
+    src = b"class Service {\n  client: ApiClient;\n}\n"
+    batch = extract_typescript_file(REPO, "s.ts", src, "sha", ts_parser, repo_files=set())
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+    assert len(cls_bindings) == 1
+    assert cls_bindings[0].var_name == "client"
+    assert cls_bindings[0].type_raw_name == "ApiClient"
+
+
+def test_ts_class_field_with_initializer_emits_binding(ts_parser):
+    """`class S { client = new Client() }` — initializer-typed field."""
+    src = b"class Service {\n  client = new ApiClient();\n}\n"
+    batch = extract_typescript_file(REPO, "s.ts", src, "sha", ts_parser, repo_files=set())
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+    assert len(cls_bindings) == 1
+    assert cls_bindings[0].type_raw_name == "ApiClient"
+
+
+def test_ts_constructor_this_assignment_emits_class_binding(ts_parser):
+    """`class S { constructor() { this.x = new X() } }` — Python's
+    `self.x = X()` analog. The binding hoists to the class scope."""
+    src = (
+        b"class Service {\n"
+        b"  constructor() {\n"
+        b"    this.client = new ApiClient();\n"
+        b"  }\n"
+        b"}\n"
+    )
+    batch = extract_typescript_file(REPO, "s.ts", src, "sha", ts_parser, repo_files=set())
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+    assert any(b.var_name == "client" and b.type_raw_name == "ApiClient"
+               for b in cls_bindings)
+
+
+def test_ts_method_return_annotation_emits_class_binding(ts_parser):
+    """`class S { compile(): CompiledStateGraph { ... } }` — return
+    annotation hoists to a class-scope binding keyed by method name."""
+    src = (
+        b"class StateGraph {\n"
+        b"  compile(): CompiledStateGraph {\n"
+        b"    return new CompiledStateGraph();\n"
+        b"  }\n"
+        b"}\n"
+    )
+    batch = extract_typescript_file(REPO, "g.ts", src, "sha", ts_parser, repo_files=set())
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+    by_name = {b.var_name: b for b in cls_bindings}
+    assert "compile" in by_name
+    assert by_name["compile"].type_raw_name == "CompiledStateGraph"
+
+
+def test_ts_function_return_type_strip_promise(ts_parser):
+    """`function fetchUser(): Promise<User>` — Promise<X> single-arg
+    generic strip. Result: `User`."""
+    src = b"function fetchUser(): Promise<User> { return Promise.resolve(new User()); }\n"
+    batch = extract_typescript_file(REPO, "u.ts", src, "sha", ts_parser, repo_files=set())
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert any(b.var_name == "fetchUser" and b.type_raw_name == "User"
+               for b in mod_bindings)
+
+
+def test_ts_normalize_array_suffix():
+    """`User[]` → `User`."""
+    from app.repo_indexer.extractor_typescript import _normalize_ts_type
+    assert _normalize_ts_type("User[]") == "User"
+    assert _normalize_ts_type("readonly User[]") == "User"
+
+
+def test_ts_normalize_nullable():
+    """`User | null` / `User | undefined` strip."""
+    from app.repo_indexer.extractor_typescript import _normalize_ts_type
+    assert _normalize_ts_type("User | null") == "User"
+    assert _normalize_ts_type("User | undefined") == "User"
+    assert _normalize_ts_type("null | User") == "User"
+

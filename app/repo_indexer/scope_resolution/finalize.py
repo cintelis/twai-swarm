@@ -568,7 +568,9 @@ def finalize_batch(batch: IndexBatch) -> None:
         method_name = parts[-1]
 
         # Step 1: find head's class.
-        if head == "self":
+        # Sprint 14j — accept `this` alongside `self` so the same
+        # compound-receiver dispatcher serves both Python and TypeScript.
+        if head in ("self", "this"):
             current_class_qn = caller_class_qn.get(caller_qn)
         else:
             caller_scope = func_scope_id.get(caller_qn)
@@ -638,7 +640,9 @@ def finalize_batch(batch: IndexBatch) -> None:
         if "." in rest:
             return None
 
-        if head == "self":
+        # Sprint 14j — `this.method()` (TypeScript) goes through the
+        # same dispatch as Python's `self.method()`.
+        if head in ("self", "this"):
             decl = dispatch_index.resolve(class_qn, rest)
             return decl.qualified_name if decl is not None else None
 
