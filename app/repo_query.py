@@ -643,8 +643,13 @@ def _bm25_leg(
     """
     try:
         with driver.session() as session:
+            # Parameters passed as a dict to avoid colliding with
+            # session.run's own `query` positional parameter (the cypher
+            # string). Passing `query=query` as kwarg would re-bind that
+            # positional and raise TypeError("multiple values for query").
             result = session.run(
-                cypher, repo=repo, query=query, candidate_limit=int(candidate_limit),
+                cypher,
+                {"repo": repo, "query": query, "candidate_limit": int(candidate_limit)},
             )
             rows = result.data()
     except Exception as exc:  # noqa: BLE001

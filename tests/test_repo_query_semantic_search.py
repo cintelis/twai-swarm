@@ -58,8 +58,14 @@ class _FakeSession:
 
     def run(self, *args, **params):
         cypher = args[0] if args else ""
+        # Mirror neo4j.Session.run: accept parameters either as a dict
+        # in args[1] or as kwargs. The real driver merges both.
+        merged: dict[str, Any] = {}
+        if len(args) >= 2 and isinstance(args[1], dict):
+            merged.update(args[1])
+        merged.update(params)
         self.queries_seen.append(cypher)
-        self.params_seen.append(dict(params))
+        self.params_seen.append(merged)
 
         if "db.index.fulltext.queryNodes" in cypher:
             if self._bm25_raises is not None:
