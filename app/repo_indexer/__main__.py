@@ -14,7 +14,14 @@ import time
 from pathlib import Path
 
 from .actions import IndexBatch, RepoNode
-from .loader import driver_from_env, ensure_constraints, prune_stale, write_batch
+from .loader import (
+    driver_from_env,
+    ensure_constraints,
+    fetch_unembedded_symbols,
+    prune_stale,
+    write_batch,
+    write_embeddings_only,
+)
 from .phases import DEFAULT_PHASES, EmbedPhase
 from .runner import PhaseContext, run_pipeline
 
@@ -56,6 +63,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
         commit_sha=args.commit_sha or "",
         tenant_id=args.tenant_id,
     )
+
+    # --embed-only: backfill embeddings on an already-scanned repo without
+    # re-running the file pipeline. Bypasses the per-file SHA short-circuit
+    # that would otherwise skip every file when the commit-sha matches.
+    if getattr(args, "embed_only", False):
+        return cmd_embed_only(repo, repo_name)
 
     print(f"[indexer] scanning {repo_root}  ->  Neo4j repo={repo_name!r}")
 
@@ -122,6 +135,50 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_embed_only(repo: RepoNode, repo_name: str) -> int:
+    """Backfill embeddings on an already-scanned repo.
+
+    Workflow:
+    1. Open Neo4j driver.
+    2. Query Function / Class nodes that lack `embedding`.
+    3. Reconstruct FunctionNode / ClassNode dataclasses.
+    4. Run EmbedPhase only — same code path as a full scan, but the batch
+       has no Files / Modules / etc. to write.
+    5. write_embeddings_only persists the new vectors. The Repo node's
+       commit_sha is left untouched.
+    """
+    print(f"[indexer] embed-only: targeting Neo4j repo={repo_name!r}")
+    aggregate = IndexBatch(repo=repo)
+    with driver_from_env() as driver:
+        ensure_constraints(driver)
+        fns, classes = fetch_unembedded_symbols(driver, repo_name, repo.tenant_id)
+        if not fns and not classes:
+            print("[indexer] embed-only: 0 symbols need embedding (repo already covered)")
+            return 0
+        aggregate.functions.extend(fns)
+        aggregate.classes.extend(classes)
+        print(f"[indexer] embed-only: {len(fns)} functions + {len(classes)} classes to embed")
+
+        ctx = PhaseContext(
+            repo=repo,
+            repo_root=Path("."),  # unused — no file pipeline
+            languages=(),
+            batch=aggregate,
+            py_parser=None,
+            ts_parsers={},
+            driver=driver,
+            parse_workers=1,
+            embed_enabled=True,
+        )
+        EmbedPhase().run(ctx)
+
+        write_start = time.monotonic()
+        write_embeddings_only(driver, aggregate)
+        print(f"[indexer] wrote {len(aggregate.embeddings)} embeddings to Neo4j in "
+              f"{time.monotonic() - write_start:.1f}s")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -151,6 +208,13 @@ def main(argv: list[str] | None = None) -> int:
         "--with-embeddings", action="store_true", default=False,
         help="Embed every Function + Class symbol via app/embeddings.py and "
              "write vectors to Neo4j. Skipped by default to keep scans fast.",
+    )
+    scan.add_argument(
+        "--embed-only", action="store_true", default=False,
+        help="Skip the file pipeline entirely; query Function/Class nodes "
+             "in Neo4j that lack `embedding` and embed them in place. "
+             "Useful for adding embeddings to an already-scanned repo "
+             "without forcing a full re-scan via prune_stale.",
     )
     scan.set_defaults(func=cmd_scan)
 

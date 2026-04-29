@@ -19,7 +19,7 @@ from typing import Iterator
 
 from neo4j import Driver, GraphDatabase, basic_auth
 
-from .actions import IndexBatch
+from .actions import ClassNode, FunctionNode, IndexBatch
 
 logger = logging.getLogger(__name__)
 
@@ -372,25 +372,45 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
             [asdict(e) for e in batch.step_in_process],
         )
 
-        # Sprint 14a — embedding writes. SET the `embedding` property on
-        # the matching Function or Class node. Same Function/Class fan-out
-        # pattern as MEMBER_OF (loader picks the right label via OPTIONAL
-        # MATCH + FOREACH/CASE). `embedding` is a tuple of float in Python;
-        # asdict serializes it to a list, which Neo4j stores as a
-        # LIST<FLOAT> property the vector index can read.
-        _chunked_write(session,
-            """
-            UNWIND $rows AS row
-            OPTIONAL MATCH (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
-            OPTIONAL MATCH (cls:Class {repo: row.repo, qualified_name: row.qualified_name})
-            FOREACH (n IN CASE WHEN row.target_kind = 'function' AND fn IS NOT NULL THEN [fn]
-                               WHEN row.target_kind = 'class'    AND cls IS NOT NULL THEN [cls]
-                               ELSE [] END |
-              SET n.embedding = row.embedding
-            )
-            """,
-            [{**asdict(e), "embedding": list(e.embedding)} for e in batch.embeddings],
-        )
+        # Sprint 14a — embedding writes. Delegated to _write_embeddings so
+        # the --embed-only path can reuse the same Cypher.
+        _write_embeddings(session, batch)
+
+
+# Sprint 14a — embedding writes. SET the `embedding` property on the
+# matching Function or Class node. Same Function/Class fan-out pattern as
+# MEMBER_OF (loader picks the right label via OPTIONAL MATCH + FOREACH/CASE).
+# `embedding` is a tuple of float in Python; asdict serializes it to a list,
+# which Neo4j stores as a LIST<FLOAT> property the vector index can read.
+_EMBEDDING_WRITE_CYPHER = """
+UNWIND $rows AS row
+OPTIONAL MATCH (fn:Function {repo: row.repo, qualified_name: row.qualified_name})
+OPTIONAL MATCH (cls:Class {repo: row.repo, qualified_name: row.qualified_name})
+FOREACH (n IN CASE WHEN row.target_kind = 'function' AND fn IS NOT NULL THEN [fn]
+                   WHEN row.target_kind = 'class'    AND cls IS NOT NULL THEN [cls]
+                   ELSE [] END |
+  SET n.embedding = row.embedding
+)
+"""
+
+
+def _write_embeddings(session, batch: IndexBatch) -> None:
+    """Persist `batch.embeddings` as `embedding` properties on existing
+    Function / Class nodes. Caller owns the session."""
+    _chunked_write(
+        session,
+        _EMBEDDING_WRITE_CYPHER,
+        [{**asdict(e), "embedding": list(e.embedding)} for e in batch.embeddings],
+    )
+
+
+def write_embeddings_only(driver: Driver, batch: IndexBatch) -> None:
+    """Public entry point for the --embed-only path: writes the embedding
+    payload without touching any other graph state. Assumes the Function /
+    Class nodes already exist (otherwise the OPTIONAL MATCH pair returns
+    null and the SET is a no-op for that row)."""
+    with driver.session() as session:
+        _write_embeddings(session, batch)
 
 
 def fetch_file_shas(driver: Driver, repo_name: str, tenant_id: str = "default") -> dict[str, str]:
@@ -414,6 +434,87 @@ def fetch_file_shas(driver: Driver, repo_name: str, tenant_id: str = "default") 
                 continue
             out[path] = sha
     return out
+
+
+def fetch_unembedded_symbols(
+    driver: Driver, repo_name: str, tenant_id: str = "default",
+) -> tuple[list[FunctionNode], list[ClassNode]]:
+    """Return (functions, classes) for nodes in `repo_name` that lack the
+    `embedding` property. Used by the `--embed-only` CLI path to backfill
+    embeddings on an already-scanned repo without re-running parse / resolve
+    / community / process.
+
+    `param_types` isn't persisted on Function nodes (the resolver consumes
+    it during scan, then it's discarded), so the reconstructed FunctionNode
+    has `param_types=()`. Embedding text generation doesn't use it, so the
+    output is byte-identical to a fresh scan's embedding text.
+
+    Methods' `parent_class_qn` is recovered via the `(Class)-[:DEFINES]->(Function)`
+    edge — it's not a Function-node property today, but the relationship
+    carries the same information.
+    """
+    fns: list[FunctionNode] = []
+    classes: list[ClassNode] = []
+    with driver.session() as session:
+        fn_rows = session.run(
+            """
+            MATCH (f:Function {repo: $repo})
+            WHERE f.embedding IS NULL
+            OPTIONAL MATCH (parent:Class {repo: $repo})-[:DEFINES]->(f)
+            RETURN f.qualified_name AS qualified_name,
+                   f.name           AS name,
+                   coalesce(f.file_path, '')  AS file_path,
+                   coalesce(f.line_start, 0)  AS line_start,
+                   coalesce(f.line_end, 0)    AS line_end,
+                   coalesce(f.is_async, false)   AS is_async,
+                   coalesce(f.is_method, false)  AS is_method,
+                   coalesce(parent.qualified_name, '') AS parent_class_qn,
+                   coalesce(f.params, [])     AS params,
+                   coalesce(f.docstring, '')  AS docstring
+            """,
+            repo=repo_name,
+        ).data()
+        for row in fn_rows:
+            fns.append(FunctionNode(
+                repo=repo_name,
+                qualified_name=row["qualified_name"],
+                name=row["name"],
+                file_path=row["file_path"],
+                line_start=int(row["line_start"]),
+                line_end=int(row["line_end"]),
+                is_async=bool(row["is_async"]),
+                is_method=bool(row["is_method"]),
+                parent_class_qn=row["parent_class_qn"],
+                params=tuple(row["params"]),
+                param_types=(),  # not persisted; not needed for embedding text
+                docstring=row["docstring"],
+            ))
+
+        cls_rows = session.run(
+            """
+            MATCH (c:Class {repo: $repo})
+            WHERE c.embedding IS NULL
+            RETURN c.qualified_name AS qualified_name,
+                   c.name           AS name,
+                   coalesce(c.file_path, '')  AS file_path,
+                   coalesce(c.line_start, 0)  AS line_start,
+                   coalesce(c.line_end, 0)    AS line_end,
+                   coalesce(c.docstring, '')  AS docstring
+            """,
+            repo=repo_name,
+        ).data()
+        for row in cls_rows:
+            classes.append(ClassNode(
+                repo=repo_name,
+                qualified_name=row["qualified_name"],
+                name=row["name"],
+                file_path=row["file_path"],
+                line_start=int(row["line_start"]),
+                line_end=int(row["line_end"]),
+                docstring=row["docstring"],
+            ))
+    _ = tenant_id  # forward-compat for the multi-tenant fix
+    return fns, classes
 
 
 def prune_stale(driver: Driver, repo_name: str, current_commit_sha: str) -> int:
