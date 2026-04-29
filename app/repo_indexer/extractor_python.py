@@ -36,9 +36,19 @@ from .actions import (
 )
 
 
-def _module_qn_from_path(rel_path: str) -> str:
+def _module_qn_from_path(rel_path: str, package_roots: tuple = ()) -> str:
     """`app/repo_indexer/walker.py` → `app.repo_indexer.walker`. `__init__.py`
-    files map to their containing package."""
+    files map to their containing package.
+
+    `package_roots` is a tuple of `PackageRoot` from `package_roots.py`.
+    When provided, files under a declared package root are addressed
+    relative to that root (Sprint 14e — fixes monorepo qn construction).
+    Default `()` falls back to the dotted repo-relative path so existing
+    callers and tests keep working unchanged.
+    """
+    if package_roots:
+        from .package_roots import module_qn_for
+        return module_qn_for(rel_path, list(package_roots))
     parts = rel_path.removesuffix(".py").split("/")
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
@@ -235,11 +245,16 @@ def extract_python_file(
     source: bytes,
     sha: str,
     parser: Any,
+    package_roots: tuple = (),
 ) -> IndexBatch:
-    """Parse one .py file and return its IndexBatch fragment."""
+    """Parse one .py file and return its IndexBatch fragment.
+
+    `package_roots` (Sprint 14e) corrects module qns on monorepos. See
+    `_module_qn_from_path`.
+    """
     batch = IndexBatch(repo=repo)
 
-    module_qn = _module_qn_from_path(rel_path)
+    module_qn = _module_qn_from_path(rel_path, package_roots)
     batch.files.append(FileNode(repo=repo.name, path=rel_path, language="python", sha=sha))
     if module_qn:
         batch.modules.append(ModuleNode(repo=repo.name, qualified_name=module_qn, file_path=rel_path))

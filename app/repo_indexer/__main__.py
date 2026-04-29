@@ -22,6 +22,7 @@ from .loader import (
     write_batch,
     write_embeddings_only,
 )
+from .package_roots import detect_package_roots
 from .phases import DEFAULT_PHASES, EmbedPhase
 from .runner import PhaseContext, run_pipeline
 
@@ -72,6 +73,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     print(f"[indexer] scanning {repo_root}  ->  Neo4j repo={repo_name!r}")
 
+    package_roots = tuple(detect_package_roots(repo_root))
+    if package_roots:
+        summary = ", ".join(r.fs_root or "<repo root>" for r in package_roots[:5])
+        if len(package_roots) > 5:
+            summary += f", +{len(package_roots) - 5} more"
+        print(f"[indexer] detected {len(package_roots)} Python package root(s): {summary}")
+    else:
+        print("[indexer] no Python package roots detected — using repo-relative qns")
+
     py_parser = _parser_for_python()
     ts_parsers = _parsers_for_typescript()
 
@@ -104,6 +114,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             driver=None,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
+            package_roots=package_roots,
         )
         run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -126,6 +137,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             driver=driver,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
+            package_roots=package_roots,
         )
         run_pipeline(ctx, phases)
         write_start = time.monotonic()

@@ -51,6 +51,12 @@ class PhaseContext:
     # phase tuple. The phase itself short-circuits when this is False, even
     # if it's in the tuple — defense in depth against custom phase lists.
     embed_enabled: bool = False
+    # Sprint 14e: monorepo package-root detection. CLI populates from
+    # detect_package_roots(repo_root) before the pipeline runs; ParsePhase
+    # forwards to the Python extractor for qn construction. Default `()`
+    # falls back to the pre-14e dotted-repo-relative qns (single-package
+    # repos and unit tests with synthetic batches keep working unchanged).
+    package_roots: tuple = ()
 
 
 class Phase(Protocol):
