@@ -455,3 +455,82 @@ def test_extractor_emits_per_function_independently(parser):
     assert bindings[1].type_raw_name == "ClassB"
     # Per-function enclosing ranges should differ.
     assert bindings[0].enclosing_line_start != bindings[1].enclosing_line_start
+
+
+# ─── Sprint 14g.2 — class-field typeBinding extraction (self.x = ...) ────────
+
+def test_extractor_emits_class_field_binding_from_init(parser):
+    """`self.x = SomeClass()` in __init__ produces a class-scoped
+    binding so other methods can resolve `self.x.method()`."""
+    src = (
+        b"class Service:\n"
+        b"    def __init__(self):\n"
+        b"        self.client = ApiClient()\n"
+        b"        self.cache = Cache()\n"
+    )
+    batch = extract_python_file(REPO, "svc.py", src, "sha", parser)
+
+    # Field bindings stored on the CLASS scope, not __init__'s function scope.
+    field_bindings = [b for b in batch.local_var_bindings
+                      if b.enclosing_scope_kind == "class"]
+    assert len(field_bindings) == 2
+    by_name = {b.var_name: b for b in field_bindings}
+    assert by_name["client"].type_raw_name == "ApiClient"
+    assert by_name["cache"].type_raw_name == "Cache"
+    # Both share the class's line range (1..4 inclusive → 1..4).
+    assert by_name["client"].enclosing_line_start == 1
+    assert by_name["client"].enclosing_line_end == 4
+
+
+def test_extractor_class_field_binding_has_field_name_only(parser):
+    """`self.client = ApiClient()` produces var_name="client", NOT
+    "self.client". The receiver-resolver does `find(class_scope,
+    "client", tree)` for `self.client.method()` lookups."""
+    src = (
+        b"class S:\n"
+        b"    def __init__(self):\n"
+        b"        self.thing = Thing()\n"
+    )
+    batch = extract_python_file(REPO, "s.py", src, "sha", parser)
+    field_bindings = [b for b in batch.local_var_bindings
+                      if b.enclosing_scope_kind == "class"]
+    assert len(field_bindings) == 1
+    assert field_bindings[0].var_name == "thing"  # NOT "self.thing"
+
+
+def test_extractor_skips_class_field_outside_method(parser):
+    """Top-level `def f(): self.x = X()` is meaningless (no enclosing
+    class) and shouldn't emit a class-scoped binding. Should pass since
+    the extraction only runs when is_method=True."""
+    src = b"def f(self):\n    self.x = X()\n"
+    batch = extract_python_file(REPO, "f.py", src, "sha", parser)
+    # No class-scoped bindings; only the function-scope ones (none for
+    # this shape since LHS is `self.x`, not a bare identifier).
+    field_bindings = [b for b in batch.local_var_bindings
+                      if b.enclosing_scope_kind == "class"]
+    assert field_bindings == []
+
+
+def test_extractor_emits_both_local_and_field_bindings(parser):
+    """A method can have BOTH local-var bindings and class-field
+    bindings. They live at different scopes."""
+    src = (
+        b"class S:\n"
+        b"    def setup(self):\n"
+        b"        self.client = ApiClient()\n"   # class-scope binding
+        b"        helper = Helper()\n"           # function-scope binding
+    )
+    batch = extract_python_file(REPO, "s.py", src, "sha", parser)
+
+    fn_bindings = [b for b in batch.local_var_bindings
+                   if b.enclosing_scope_kind == "function"]
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+
+    assert len(fn_bindings) == 1
+    assert fn_bindings[0].var_name == "helper"
+    assert fn_bindings[0].type_raw_name == "Helper"
+
+    assert len(cls_bindings) == 1
+    assert cls_bindings[0].var_name == "client"
+    assert cls_bindings[0].type_raw_name == "ApiClient"

@@ -147,6 +147,13 @@ def finalize_batch(batch: IndexBatch) -> None:
     }
     func_file_path: dict[str, str] = {f.qualified_name: f.file_path for f in batch.functions}
     class_file_path: dict[str, str] = {c.qualified_name: c.file_path for c in batch.classes}
+    # Sprint 14g — file -> module qn. Lets `_resolve_type_name` fall back
+    # to same-module class lookup when a bare type name isn't imported
+    # (e.g., `class A: pass; b = A()` in the same file). Pre-14g this
+    # didn't matter because param-type annotations almost always come
+    # from an imported type; with constructor inference, intra-module
+    # types are common.
+    module_qn_by_file: dict[str, str] = {m.file_path: m.qualified_name for m in batch.modules}
     # Sprint 14g — caller_qn -> ScopeId of the caller's enclosing function.
     # Used by `_resolve_var_binding` to look up local-var typeBindings via
     # the LocalVarTypeIndex's scope-chain walk.
@@ -205,9 +212,17 @@ def finalize_batch(batch: IndexBatch) -> None:
         if not candidates:
             return None
         file_imports = imports_by_file.get(file_path, {})
+        same_module_qn = module_qn_by_file.get(file_path)
         for head in candidates:
             if _is_class(head):
                 return head
+            # Sprint 14g — same-module class lookup. `class A: pass; b = A()`
+            # in the same file: the bare type name `"A"` resolves via
+            # `<this-module>.A` without any import edge being involved.
+            if same_module_qn is not None:
+                candidate = f"{same_module_qn}.{head}"
+                if _is_class(candidate):
+                    return candidate
             if head in file_imports:
                 target_qn, _kind = file_imports[head]
                 if _is_class(target_qn):
@@ -414,6 +429,93 @@ def finalize_batch(batch: IndexBatch) -> None:
             return inherited.qualified_name
         return None
 
+    # Map class qn -> ScopeId of the class body. Used by the compound-
+    # receiver resolver to walk a class's typeBindings for field types.
+    class_scope_id: dict[str, ScopeId] = {
+        c.qualified_name: ScopeId(
+            file_path=c.file_path,
+            range=Range(
+                file_path=c.file_path,
+                start_byte=c.line_start,
+                end_byte=c.line_end + 1,
+            ),
+            kind="class",
+        )
+        for c in batch.classes
+    }
+
+    def _resolve_compound_receiver(
+        caller_qn: str,
+        callee_dotted: str,
+    ) -> str | None:
+        """Sprint 14g.2 — Case 0 from GitNexus's dispatcher. Resolve
+        `obj.attr.method()` and `self.attr.method()` chains by:
+            1. Finding `obj`'s class via local-var typeBindings (or
+               caller's `self` if obj=='self')
+            2. Walking `.attr1.attr2…` segments by looking up each
+               attribute as a field on the current class's scope
+               (class fields are stored as typeBindings on the class
+               scope; same LocalVarTypeIndex that holds local vars)
+            3. Resolving the leaf method on the final class via dispatch
+               index
+
+        Bounded to depth 3 (two attribute hops + the method); deeper
+        chains fall through to Symbol. Mirrors GitNexus's
+        COMPOUND_RECEIVER_MAX_DEPTH=4 with one fewer hop because we
+        don't yet handle return-type bindings from method calls in the
+        chain (`f().g().h()` style).
+        """
+        parts = callee_dotted.split(".")
+        if len(parts) < 3:
+            return None  # not compound — handled by case (i)
+        if len(parts) > 4:
+            return None  # depth-cap; deferred
+
+        head = parts[0]
+        attrs = parts[1:-1]   # intermediate attribute hops
+        method_name = parts[-1]
+
+        # Step 1: find head's class.
+        if head == "self":
+            current_class_qn = caller_class_qn.get(caller_qn)
+        else:
+            caller_scope = func_scope_id.get(caller_qn)
+            if caller_scope is None:
+                return None
+            type_ref = local_var_index.find(caller_scope, head, scope_tree)
+            if type_ref is None:
+                return None
+            current_class_qn = _resolve_type_name(
+                type_ref.declared_at_scope.file_path, type_ref.raw_name,
+            )
+
+        if current_class_qn is None:
+            return None
+
+        # Step 2: walk attribute hops via class-scope field bindings.
+        for attr in attrs:
+            cls_scope = class_scope_id.get(current_class_qn)
+            if cls_scope is None:
+                return None
+            field_type_ref = local_var_index.find(cls_scope, attr, scope_tree)
+            if field_type_ref is None:
+                return None
+            current_class_qn = _resolve_type_name(
+                field_type_ref.declared_at_scope.file_path,
+                field_type_ref.raw_name,
+            )
+            if current_class_qn is None:
+                return None
+
+        # Step 3: resolve the method on the final class.
+        candidate = f"{current_class_qn}.{method_name}"
+        if _is_function(candidate):
+            return candidate
+        inherited = dispatch_index.resolve(current_class_qn, method_name)
+        if inherited is not None:
+            return inherited.qualified_name
+        return None
+
     def _resolve_self_or_super(
         caller_qn: str,
         callee_dotted: str,
@@ -479,6 +581,11 @@ def finalize_batch(batch: IndexBatch) -> None:
             # (`x = SomeClass(...)`). Last resort before SymbolNode
             # emission so existing 12b/12c resolutions stay untouched.
             resolved = _resolve_var_binding(edge.caller_qn, edge.callee_qn)
+        if resolved is None:
+            # Sprint 14g.2 — compound receiver chains. `obj.attr.method()`
+            # and `self.attr.method()` resolved via class-field
+            # typeBindings stored on the class scope.
+            resolved = _resolve_compound_receiver(edge.caller_qn, edge.callee_qn)
         if resolved is not None:
             new_calls.append(CallEdge(
                 repo=edge.repo,

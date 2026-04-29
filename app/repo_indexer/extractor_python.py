@@ -214,6 +214,56 @@ def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int
     return found
 
 
+def _walk_self_field_assignments(
+    source: bytes, body_node: Any,
+) -> list[tuple[str, str, int]]:
+    """Sprint 14g.2 — return [(field_name, type_raw_name, line)] for every
+    `self.<field> = SomeClass(...)` assignment in `body_node`.
+
+    Caller emits these as LocalVarBindings ON THE CLASS SCOPE (not the
+    method's function scope), so methods later doing `self.<field>.method()`
+    find the binding via the scope-chain walk from method scope up to
+    class scope. Mirrors GitNexus's class-field typeBindings (stored
+    on the class scope's `typeBindings` map).
+
+    Same constructor-only restriction as `_walk_assignments`. Pattern:
+
+        self.x = SomeClass(...)         ✓ emitted
+        self.x = obj.method()           ✗ deferred (return-type tracking)
+        self.x = models.User(...)       ✗ deferred (case 5 — namespace)
+        self.x: SomeClass = ...         ✗ deferred (annotated; needs separate visitor)
+
+    `var_name` is the field name only ("x"), NOT "self.x" — so the
+    receiver-resolution branch can do `find(class_scope, "x", tree)` to
+    look up `self.x`'s type from a method.
+    """
+    found: list[tuple[str, str, int]] = []
+
+    def _visit(n: Any) -> None:
+        if n.type == "assignment":
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if (left is not None and left.type == "attribute"
+                    and right is not None and right.type == "call"):
+                obj = left.child_by_field_name("object")
+                attr = left.child_by_field_name("attribute")
+                callee = right.child_by_field_name("function")
+                if (obj is not None and obj.type == "identifier"
+                        and _node_text(source, obj) == "self"
+                        and attr is not None and attr.type == "identifier"
+                        and callee is not None and callee.type == "identifier"):
+                    field_name = _node_text(source, attr)
+                    type_raw_name = _node_text(source, callee)
+                    line = n.start_point[0] + 1
+                    found.append((field_name, type_raw_name, line))
+        for child in n.children:
+            _visit(child)
+
+    if body_node is not None:
+        _visit(body_node)
+    return found
+
+
 def _walk_imports(source: bytes, root: Any) -> list[tuple[str, str, str]]:
     """Return [(target_qn, local_name, kind)] for every import in the file.
 
@@ -314,7 +364,12 @@ def extract_python_file(
         return any(c.type == "async" for c in node.children)
 
     # First pass: defined classes + functions (top-level + methods).
-    def _emit_function(node: Any, parent_class_qn: str = "") -> None:
+    def _emit_function(
+        node: Any,
+        parent_class_qn: str = "",
+        parent_class_line_start: int = 0,
+        parent_class_line_end: int = 0,
+    ) -> None:
         is_async = _is_async_function(node)
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
@@ -376,6 +431,26 @@ def extract_python_file(
                 line=assign_line,
             ))
 
+        # Sprint 14g.2 — class-field typeBindings. `self.x = SomeClass(...)`
+        # in __init__ (or anywhere in a method) gets stored on the
+        # ENCLOSING CLASS scope, not this function's scope. Lookups from
+        # other methods walk parent_of(method_scope) → class_scope and
+        # find the field there; that mirrors GitNexus's class-field
+        # storage (typeBindings on the class scope itself).
+        if is_method and parent_class_line_start > 0:
+            for field_name, type_raw_name, assign_line in _walk_self_field_assignments(source, body):
+                batch.local_var_bindings.append(LocalVarBinding(
+                    repo=repo.name,
+                    tenant_id=repo.tenant_id,
+                    file_path=rel_path,
+                    enclosing_scope_kind="class",
+                    enclosing_line_start=parent_class_line_start,
+                    enclosing_line_end=parent_class_line_end,
+                    var_name=field_name,
+                    type_raw_name=type_raw_name,
+                    line=assign_line,
+                ))
+
     def _emit_class(node: Any) -> None:
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
@@ -405,10 +480,17 @@ def extract_python_file(
                         repo=repo.name, child_qn=qn, parent_qn=parent_dotted,
                     ))
         # Methods.
+        class_line_start = node.start_point[0] + 1
+        class_line_end = node.end_point[0] + 1
         if body is not None:
             for child in body.children:
                 if child.type == "function_definition":
-                    _emit_function(child, parent_class_qn=qn)
+                    _emit_function(
+                        child,
+                        parent_class_qn=qn,
+                        parent_class_line_start=class_line_start,
+                        parent_class_line_end=class_line_end,
+                    )
 
     for child in root.children:
         if child.type == "function_definition":
