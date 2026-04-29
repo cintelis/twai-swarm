@@ -94,6 +94,9 @@ def ensure_constraints(driver: Driver) -> None:
         # different handler_qn resolutions) doesn't fan out into multiple
         # Route nodes. handler_qn lives on the HANDLED_BY edge, not the key.
         "CREATE CONSTRAINT route_id IF NOT EXISTS FOR (r:Route) REQUIRE (r.repo, r.path, r.method) IS UNIQUE",
+        # Sprint 15c — MCP tool / resource registrations.
+        "CREATE CONSTRAINT mcp_tool_id IF NOT EXISTS FOR (t:MCPTool) REQUIRE (t.repo, t.name) IS UNIQUE",
+        "CREATE CONSTRAINT mcp_resource_id IF NOT EXISTS FOR (r:MCPResource) REQUIRE (r.repo, r.uri_template) IS UNIQUE",
     ]
     with driver.session() as session:
         for stmt in stmts:
@@ -416,6 +419,70 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
                 MERGE (r)-[:HANDLED_BY]->(fn)
                 """,
                 [asdict(e) for e in batch.route_edges if e.handler_qn],
+            )
+
+        # Sprint 15c — MCP tool / resource registrations.
+        if batch.mcp_tools:
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MERGE (t:MCPTool {repo: row.repo, name: row.name})
+                SET t.tenant_id = row.tenant_id,
+                    t.description = row.description,
+                    t.handler_qn = row.handler_qn,
+                    t.file_path = row.file_path,
+                    t.line_start = row.line_start
+                """,
+                [asdict(t) for t in batch.mcp_tools],
+            )
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo: row.repo, path: row.file_path})
+                MATCH (t:MCPTool {repo: row.repo, name: row.name})
+                MERGE (f)-[:DEFINES]->(t)
+                """,
+                [asdict(t) for t in batch.mcp_tools],
+            )
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (t:MCPTool {repo: row.repo, name: row.name})
+                MATCH (fn:Function {repo: row.repo, qualified_name: row.handler_qn})
+                MERGE (t)-[:HANDLED_BY]->(fn)
+                """,
+                [asdict(t) for t in batch.mcp_tools if t.handler_qn],
+            )
+        if batch.mcp_resources:
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MERGE (r:MCPResource {repo: row.repo, uri_template: row.uri_template})
+                SET r.tenant_id = row.tenant_id,
+                    r.description = row.description,
+                    r.handler_qn = row.handler_qn,
+                    r.file_path = row.file_path,
+                    r.line_start = row.line_start
+                """,
+                [asdict(r) for r in batch.mcp_resources],
+            )
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo: row.repo, path: row.file_path})
+                MATCH (r:MCPResource {repo: row.repo, uri_template: row.uri_template})
+                MERGE (f)-[:DEFINES]->(r)
+                """,
+                [asdict(r) for r in batch.mcp_resources],
+            )
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (r:MCPResource {repo: row.repo, uri_template: row.uri_template})
+                MATCH (fn:Function {repo: row.repo, qualified_name: row.handler_qn})
+                MERGE (r)-[:HANDLED_BY]->(fn)
+                """,
+                [asdict(r) for r in batch.mcp_resources if r.handler_qn],
             )
 
         # Sprint 14a — embedding writes. Delegated to _write_embeddings so

@@ -128,6 +128,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             package_roots=package_roots,
             additional_skip_dirs=additional_skip_dirs,
             extract_routes=bool(getattr(args, "with_routes", False)),
+            extract_mcp_tools=bool(getattr(args, "with_mcp_tools", False)),
         )
         run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -153,6 +154,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             package_roots=package_roots,
             additional_skip_dirs=additional_skip_dirs,
             extract_routes=bool(getattr(args, "with_routes", False)),
+            extract_mcp_tools=bool(getattr(args, "with_mcp_tools", False)),
         )
         run_pipeline(ctx, phases)
         write_start = time.monotonic()
@@ -252,10 +254,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     scan.add_argument(
         "--with-routes", action="store_true", default=False,
-        help="Sprint 15a — extract HTTP route definitions (FastAPI, Flask) "
-             "into Route nodes with HANDLED_BY edges to the handler "
-             "Function. Disabled by default to keep scans fast when "
-             "the caller doesn't need framework-pattern data.",
+        help="Sprint 15a — extract HTTP route definitions (FastAPI, Flask, "
+             "Express, Hono, Next.js App Router) into Route nodes with "
+             "HANDLED_BY edges to the handler Function. Disabled by "
+             "default to keep scans fast when the caller doesn't need "
+             "framework-pattern data.",
+    )
+    scan.add_argument(
+        "--with-mcp-tools", action="store_true", default=False,
+        help="Sprint 15c — extract MCP tool/resource registrations "
+             "(@app.tool, @mcp.resource) into MCPTool/MCPResource nodes. "
+             "Disabled by default.",
     )
     scan.set_defaults(func=cmd_scan)
 

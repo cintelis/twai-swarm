@@ -379,6 +379,9 @@ def test_batch_counts():
         # Sprint 15a — HTTP route definitions and HANDLED_BY edges.
         "routes",
         "route_edges",
+        # Sprint 15c — MCP tool / resource registrations.
+        "mcp_tools",
+        "mcp_resources",
     }
 
 

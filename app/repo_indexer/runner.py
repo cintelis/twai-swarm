@@ -67,6 +67,7 @@ class PhaseContext:
     # scans stay fast; heavy frameworks like Django (15a.2) and ORM
     # walkers (15b) only fire when explicitly requested.
     extract_routes: bool = False
+    extract_mcp_tools: bool = False
 
 
 class Phase(Protocol):

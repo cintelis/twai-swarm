@@ -356,6 +356,50 @@ def _decorators_of(node: Any) -> list:
     return [c for c in node.children if c.type == "decorator"]
 
 
+def _walk_for_nested_decorated(body_node: Any) -> list:
+    """Recursively walk `body_node` collecting nested
+    `decorated_definition` instances that wrap a `function_definition`.
+
+    Returns `[(decorators_list, inner_function_node), ...]`.
+
+    Sprint 15c — twai-swarm's MCP server registers tools inside
+    `def main():`:
+
+        def main() -> None:
+            app = FastMCP(...)
+            @app.tool(name="query")
+            def _query(...): ...
+
+    The top-level dispatcher only sees `def main()`, so without this
+    walker the inner `@app.tool(...)` decorator is invisible. Same
+    applies to FastAPI apps that build routes inside a factory
+    function.
+    """
+    out: list = []
+    if body_node is None:
+        return out
+
+    def _visit(n: Any) -> None:
+        if n.type == "decorated_definition":
+            decorators = [c for c in n.children if c.type == "decorator"]
+            inner = None
+            for c in n.children:
+                if c.type == "function_definition":
+                    inner = c
+                    break
+            if inner is not None and decorators:
+                out.append((decorators, inner))
+            # Don't recurse INTO this decorated_definition — its inner
+            # function will be processed as a unit. Recursing would
+            # double-emit if the inner body had nested decorated defs.
+            return
+        for child in n.children:
+            _visit(child)
+
+    _visit(body_node)
+    return out
+
+
 def _walk_self_field_assignments(
     source: bytes, body_node: Any,
 ) -> list[tuple[str, str, int]]:
@@ -481,16 +525,18 @@ def extract_python_file(
     parser: Any,
     package_roots: tuple = (),
     extract_routes: bool = False,
+    extract_mcp_tools: bool = False,
 ) -> IndexBatch:
     """Parse one .py file and return its IndexBatch fragment.
 
     `package_roots` (Sprint 14e) corrects module qns on monorepos. See
     `_module_qn_from_path`.
 
-    `extract_routes` (Sprint 15a) opts in to HTTP route extraction —
-    `@app.get("/x") def handler():` patterns become RouteNodes with
-    HANDLED_BY edges to the function. Default False to keep scans fast
-    when the caller doesn't need route data.
+    `extract_routes` (Sprint 15a) opts in to HTTP route extraction.
+    `extract_mcp_tools` (Sprint 15c) opts in to MCP tool/resource
+    extraction — `@app.tool()` and `@app.resource(...)` decorators
+    become MCPToolNode / MCPResourceNode records. Both default off to
+    keep scans fast.
     """
     batch = IndexBatch(repo=repo)
 
@@ -606,6 +652,56 @@ def extract_python_file(
             ):
                 batch.routes.append(route_node)
                 batch.route_edges.append(route_edge)
+
+        # Sprint 15c — MCP tool / resource extraction. Same decorator
+        # pipeline as routes; different patterns (`@app.tool(...)` /
+        # `@app.resource(...)`).
+        if extract_mcp_tools and decorator_nodes:
+            from .domain_extractors.mcp_tools_python import extract_mcp_from_decorators
+            fn_docstring = _docstring(source, body)
+            tool_nodes, resource_nodes = extract_mcp_from_decorators(
+                source, decorator_nodes, name, qn, rel_path, fn_docstring,
+                repo.name, repo.tenant_id,
+            )
+            batch.mcp_tools.extend(tool_nodes)
+            batch.mcp_resources.extend(resource_nodes)
+
+        # Sprint 15c — also scan nested decorated functions inside this
+        # body. twai-swarm's MCP server registers all its tools inside
+        # `def main():` so a top-level-only walk misses them. Same
+        # rationale applies to FastAPI factory-style apps.
+        if (extract_routes or extract_mcp_tools) and body is not None:
+            for nested_decorators, nested_inner in _walk_for_nested_decorated(body):
+                nested_name_node = nested_inner.child_by_field_name("name")
+                if nested_name_node is None:
+                    continue
+                nested_name = _node_text(source, nested_name_node)
+                # Nested function qns chain off the enclosing function's
+                # qn — `module.outer_fn.inner_handler`. The HANDLED_BY
+                # edge in the loader expects this name to match a real
+                # Function node; nested fn nodes aren't currently emitted
+                # so the edge silently doesn't fire — Route/MCPTool node
+                # still appears with file_path + line_start for jump-to.
+                nested_qn = f"{qn}.{nested_name}"
+                nested_body = nested_inner.child_by_field_name("body")
+                nested_docstring = _docstring(source, nested_body)
+                if extract_routes:
+                    from .domain_extractors.routes_python import extract_routes_from_decorators
+                    for r_node, r_edge in extract_routes_from_decorators(
+                        source, nested_decorators, nested_qn, rel_path,
+                        repo.name, repo.tenant_id,
+                    ):
+                        batch.routes.append(r_node)
+                        batch.route_edges.append(r_edge)
+                if extract_mcp_tools:
+                    from .domain_extractors.mcp_tools_python import extract_mcp_from_decorators
+                    nested_tool_nodes, nested_resource_nodes = extract_mcp_from_decorators(
+                        source, nested_decorators, nested_name, nested_qn,
+                        rel_path, nested_docstring,
+                        repo.name, repo.tenant_id,
+                    )
+                    batch.mcp_tools.extend(nested_tool_nodes)
+                    batch.mcp_resources.extend(nested_resource_nodes)
 
         # Calls inside this function become CallEdges. Same-file local calls
         # resolve here; everything else is left as the raw dotted name and

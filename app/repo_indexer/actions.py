@@ -265,6 +265,48 @@ class RouteEdge:
     handler_qn: str
 
 
+@dataclass(frozen=True)
+class MCPToolNode:
+    """Sprint 15c — registered MCP tool.
+
+    Emitted when the extractor sees `@app.tool(...)`, `@mcp.tool()`,
+    or `@server.tool` on a function. The decorated function IS the
+    handler; `handler_qn` always populated.
+
+    `description` falls through: decorator `description=` kwarg →
+    positional string arg → function docstring → empty.
+
+    `name` defaults to the function's bare name when no `name=` kwarg
+    is given — matches FastMCP's runtime convention.
+    """
+    repo: str
+    tenant_id: str
+    name: str
+    description: str
+    handler_qn: str
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class MCPResourceNode:
+    """Sprint 15c — registered MCP resource (typically a URI template).
+
+    Emitted for `@app.resource("twai://...")` decorators. The
+    `uri_template` may contain f-string interpolations; in that case we
+    store the raw source token so the Coder still has the template
+    shape even if `${...}` substitutions can't be resolved at index
+    time.
+    """
+    repo: str
+    tenant_id: str
+    uri_template: str
+    description: str
+    handler_qn: str
+    file_path: str
+    line_start: int
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -308,6 +350,10 @@ class IndexBatch:
     # Empty in default scans.
     routes: list[RouteNode] = field(default_factory=list)
     route_edges: list[RouteEdge] = field(default_factory=list)
+    # Sprint 15c — MCP tool / resource registrations. Populated when
+    # `--with-mcp-tools` is on. Empty in default scans.
+    mcp_tools: list[MCPToolNode] = field(default_factory=list)
+    mcp_resources: list[MCPResourceNode] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -329,6 +375,8 @@ class IndexBatch:
         self.local_var_bindings.extend(other.local_var_bindings)
         self.routes.extend(other.routes)
         self.route_edges.extend(other.route_edges)
+        self.mcp_tools.extend(other.mcp_tools)
+        self.mcp_resources.extend(other.mcp_resources)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -348,4 +396,6 @@ class IndexBatch:
             "local_var_bindings": len(self.local_var_bindings),
             "routes": len(self.routes),
             "route_edges": len(self.route_edges),
+            "mcp_tools": len(self.mcp_tools),
+            "mcp_resources": len(self.mcp_resources),
         }
