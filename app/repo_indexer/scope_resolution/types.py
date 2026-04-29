@@ -81,11 +81,45 @@ class Declaration:
     scope_id: Optional[ScopeId] = None
 
 
+@dataclass(frozen=True)
+class TypeRef:
+    """Sprint 14g — a receiver-type binding, anchored to its declaration scope.
+
+    Mirrors GitNexus's `TypeRef` (gitnexus-shared/src/scope-resolution/types.ts).
+    The key fields:
+
+    * `raw_name` — the type name as it was written in source. NOT a
+      qualified name. `"StateGraph"` for `x = StateGraph(...)`,
+      `"models.User"` for `x: models.User`. Resolved to a real qn at
+      lookup time via the importing file's import chain.
+
+    * `declared_at_scope` — the scope where the binding was declared.
+      Anchors `raw_name`'s resolution: `"User"` resolves through THIS
+      scope's imports, not the call-site's. Matters when the call site
+      is a different file.
+
+    * `source` — provenance. Determines edge cases:
+        - "param"               — parameter annotation `def f(x: User)`
+        - "self"                — methods' implicit `self` typing
+        - "constructor"         — `x = User()` (case 7's bread and butter)
+        - "return"              — `x = func()` where func has a return
+                                  annotation (deferred — Sprint 14h)
+        - "class_field"         — `self.attr = User()` in __init__ (14g.2)
+
+    `type_args` is reserved for V2 (generic type arguments). V1 ignores;
+    twai-swarm doesn't currently need them.
+    """
+    raw_name: str
+    declared_at_scope: ScopeId
+    source: Literal["param", "self", "constructor", "return", "class_field"]
+
+
 __all__ = [
     "Position",
     "Range",
     "ScopeId",
     "Declaration",
+    "TypeRef",
     "ScopeKind",
     "DeclarationKind",
 ]

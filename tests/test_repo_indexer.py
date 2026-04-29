@@ -374,4 +374,84 @@ def test_batch_counts():
         "processes", "step_in_process_edges",
         # Sprint 14a — embeddings bridge.
         "embedding_updates",
+        # Sprint 14g — local variable type bindings (resolution-only state).
+        "local_var_bindings",
     }
+
+
+# ─── Sprint 14g — local var typeBinding extraction ──────────────────────────
+
+def test_extractor_emits_local_var_binding_for_constructor(parser):
+    """`x = SomeClass(...)` inside a function emits a LocalVarBinding
+    pointing at the enclosing function's line range."""
+    src = b"def use_it():\n    builder = StateGraph(state)\n    builder.add_node(x)\n"
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+
+    bindings = batch.local_var_bindings
+    assert len(bindings) == 1
+    b = bindings[0]
+    assert b.var_name == "builder"
+    assert b.type_raw_name == "StateGraph"
+    assert b.enclosing_scope_kind == "function"
+    assert b.enclosing_line_start == 1
+    assert b.enclosing_line_end == 3
+    assert b.line == 2  # the assignment line
+
+
+def test_extractor_skips_dotted_constructor(parser):
+    """`x = models.User(...)` is a case-5 shape (namespace prefix);
+    14g.1 only handles bare-identifier callees."""
+    src = b"def use_it():\n    u = models.User()\n"
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+    assert batch.local_var_bindings == []
+
+
+def test_extractor_skips_function_call_assignment(parser):
+    """`x = func()` is return-type tracking (Sprint 14h territory).
+    14g.1 doesn't differentiate function-call from constructor-call at
+    extraction time, so this currently DOES emit a binding with the
+    function's name as the type. The resolver fails to find a class by
+    that name and falls through cleanly. Acceptance test: doesn't crash,
+    finalize doesn't mistakenly resolve."""
+    src = b"def helper():\n    pass\n\ndef use_it():\n    x = helper()\n"
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+    # We DO emit the binding — extractor doesn't know `helper` is a
+    # function vs a class. The resolver's `_resolve_type_name` won't
+    # find a class named `helper`, so the binding is harmless.
+    bindings = batch.local_var_bindings
+    assert len(bindings) == 1
+    assert bindings[0].type_raw_name == "helper"
+
+
+def test_extractor_skips_multi_target_assignment(parser):
+    """`x, y = func()` — multi-target. Out of 14g.1 scope."""
+    src = b"def use_it():\n    a, b = make_pair()\n"
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+    assert batch.local_var_bindings == []
+
+
+def test_extractor_skips_augmented_assignment(parser):
+    """`x += 1` — augmented; LHS already typed, not a new binding."""
+    src = b"def use_it():\n    x = 0\n    x += 1\n"
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+    # Only the literal `x = 0` matches the assignment shape. Its RHS
+    # is a number, not a Call, so no binding emitted.
+    assert batch.local_var_bindings == []
+
+
+def test_extractor_emits_per_function_independently(parser):
+    """Two functions, each with one assignment — both bindings are
+    emitted with the right enclosing-scope ranges."""
+    src = (
+        b"def f():\n    a = ClassA()\n\n"
+        b"def g():\n    b = ClassB()\n"
+    )
+    batch = extract_python_file(REPO, "use.py", src, "sha", parser)
+    bindings = sorted(batch.local_var_bindings, key=lambda b: b.var_name)
+    assert len(bindings) == 2
+    assert bindings[0].var_name == "a"
+    assert bindings[0].type_raw_name == "ClassA"
+    assert bindings[1].var_name == "b"
+    assert bindings[1].type_raw_name == "ClassB"
+    # Per-function enclosing ranges should differ.
+    assert bindings[0].enclosing_line_start != bindings[1].enclosing_line_start

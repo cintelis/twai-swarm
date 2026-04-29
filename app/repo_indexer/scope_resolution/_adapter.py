@@ -22,8 +22,9 @@ ScopeTree invariant — same shape as a byte-range collision.
 from __future__ import annotations
 
 from ..actions import IndexBatch
+from .local_var_type_index import LocalVarTypeIndex
 from .qualified_name_index import QualifiedNameIndex
-from .types import Declaration, Range, ScopeId
+from .types import Declaration, Range, ScopeId, TypeRef
 
 
 def _range_for(file_path: str, line_start: int, line_end: int) -> Range:
@@ -150,4 +151,36 @@ def to_parent_relation(
     return parent_relation
 
 
-__all__ = ["to_declarations", "to_parent_relation", "to_scopes"]
+def build_local_var_type_index(batch: IndexBatch) -> LocalVarTypeIndex:
+    """Sprint 14g — convert `batch.local_var_bindings` into a populated
+    `LocalVarTypeIndex`.
+
+    The binding's `enclosing_line_start`/`enclosing_line_end` reconstructs
+    the enclosing scope's `ScopeId` (line numbers as monotonic ints —
+    same encoding `to_scopes` uses). The TypeRef's `declared_at_scope`
+    is THIS scope (where the assignment was written) so the resolver
+    later anchors the type-name resolution against the right file's
+    imports.
+    """
+    index = LocalVarTypeIndex()
+    for b in batch.local_var_bindings:
+        scope_id = ScopeId(
+            file_path=b.file_path,
+            range=_range_for(b.file_path, b.enclosing_line_start, b.enclosing_line_end),
+            kind=b.enclosing_scope_kind,
+        )
+        type_ref = TypeRef(
+            raw_name=b.type_raw_name,
+            declared_at_scope=scope_id,
+            source="constructor" if b.enclosing_scope_kind == "function" else "class_field",
+        )
+        index.add(scope_id, b.var_name, type_ref)
+    return index
+
+
+__all__ = [
+    "build_local_var_type_index",
+    "to_declarations",
+    "to_parent_relation",
+    "to_scopes",
+]

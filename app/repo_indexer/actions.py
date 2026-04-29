@@ -187,6 +187,35 @@ class EmbeddingUpdate:
     embedding: tuple[float, ...]   # fixed-length, dim sourced from app.embeddings
 
 
+@dataclass(frozen=True)
+class LocalVarBinding:
+    """Sprint 14g — receiver-type binding for a local variable.
+
+    Emitted by the extractor when it sees `x = SomeClass(...)` inside a
+    function body (case 7: simple typeBinding, "constructor-inferred")
+    or `self.x = SomeClass(...)` in `__init__` (case 0: class-field
+    binding). The resolver builds a `LocalVarTypeIndex` from these and
+    consults it when a method call's receiver is a bare local-name with
+    no parameter annotation.
+
+    `enclosing_scope_kind` is "function" or "class" — methods of a class
+    that bind `self.x` produce class-scoped bindings (kind="class") so
+    every method on the class sees them via the scope-chain walk.
+    `type_raw_name` is the constructor name as written ("StateGraph"),
+    NOT a resolved qn — finalize resolves it through the file's import
+    chain at lookup time.
+    """
+    repo: str
+    tenant_id: str
+    file_path: str
+    enclosing_scope_kind: Literal["function", "class"]
+    enclosing_line_start: int       # 1-based inclusive line of the enclosing scope
+    enclosing_line_end: int         # 1-based inclusive line of the enclosing scope
+    var_name: str                   # local var name, or "self.x" for class-field bindings
+    type_raw_name: str              # constructor / RHS type name, as-written
+    line: int                       # 1-based line of the assignment
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -219,6 +248,11 @@ class IndexBatch:
     # them as a `LIST<FLOAT>` property on the corresponding Function or Class
     # node. Empty list ⇒ loader writes nothing (the embed query is a no-op).
     embeddings: list[EmbeddingUpdate] = field(default_factory=list)
+    # Sprint 14g — local variable + class-field type bindings. Populated by
+    # the extractor for `x = SomeClass(...)` patterns; consumed by the
+    # resolver's LocalVarTypeIndex. Not persisted to Neo4j (resolution-only
+    # state). Empty list ⇒ no extra typeBinding-driven resolutions happen.
+    local_var_bindings: list[LocalVarBinding] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -237,6 +271,7 @@ class IndexBatch:
         self.processes.extend(other.processes)
         self.step_in_process.extend(other.step_in_process)
         self.embeddings.extend(other.embeddings)
+        self.local_var_bindings.extend(other.local_var_bindings)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -253,4 +288,5 @@ class IndexBatch:
             "processes": len(self.processes),
             "step_in_process_edges": len(self.step_in_process),
             "embedding_updates": len(self.embeddings),
+            "local_var_bindings": len(self.local_var_bindings),
         }

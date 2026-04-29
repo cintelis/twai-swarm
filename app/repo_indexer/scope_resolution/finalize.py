@@ -81,6 +81,7 @@ from .module_scope_index import build_module_scope_index
 from .position_index import build_position_index
 from .qualified_name_index import build_qualified_name_index
 from .scope_tree import build_scope_tree
+from .types import Range, ScopeId
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,11 @@ def finalize_batch(batch: IndexBatch) -> None:
     # propagate (mirrors 12a contract).
     scope_tree = build_scope_tree(scopes)
     _position_index = build_position_index(scope_tree)  # noqa: F841 — held for 12c
+
+    # Sprint 14g — typeBinding index for variable-method-call resolution.
+    # Empty when batch.local_var_bindings is empty (pre-14g batches stay
+    # byte-identical in resolution behaviour).
+    local_var_index = _adapter.build_local_var_type_index(batch)
 
     # qualified_name_index would raise on QN collision. The IndexBatch can
     # legitimately contain the same module qn twice (one ModuleNode per
@@ -141,6 +147,21 @@ def finalize_batch(batch: IndexBatch) -> None:
     }
     func_file_path: dict[str, str] = {f.qualified_name: f.file_path for f in batch.functions}
     class_file_path: dict[str, str] = {c.qualified_name: c.file_path for c in batch.classes}
+    # Sprint 14g — caller_qn -> ScopeId of the caller's enclosing function.
+    # Used by `_resolve_var_binding` to look up local-var typeBindings via
+    # the LocalVarTypeIndex's scope-chain walk.
+    func_scope_id: dict[str, ScopeId] = {
+        f.qualified_name: ScopeId(
+            file_path=f.file_path,
+            range=Range(
+                file_path=f.file_path,
+                start_byte=f.line_start,
+                end_byte=f.line_end + 1,
+            ),
+            kind="function",
+        )
+        for f in batch.functions
+    }
     # Sprint 12c — caller_qn -> enclosing class qn (only set for methods).
     # Used by `self.method()` / `super().method()` resolution.
     caller_class_qn: dict[str, str] = {
@@ -349,6 +370,50 @@ def finalize_batch(batch: IndexBatch) -> None:
     method_decls = [d for d in deduped_decls if d.kind == "method"]
     dispatch_index = build_method_dispatch_index(method_decls, parent_relation)
 
+    def _resolve_var_binding(
+        caller_qn: str,
+        callee_dotted: str,
+    ) -> str | None:
+        """Sprint 14g — resolve `var.method()` where `var` was bound by an
+        in-function assignment (`var = SomeClass(...)`).
+
+        Walks the LocalVarTypeIndex from the caller's scope upward; if a
+        TypeRef is found, resolves `raw_name` through the binding's
+        declared-at-scope file imports, then dispatches `method` via
+        MethodDispatchIndex (same machinery `_resolve_callee` case (d)
+        uses for parameter-typed receivers).
+
+        Only fires when the leaf is a single segment (`var.method`); chained
+        attribute access (`var.attr.method`) is case 0 territory and goes
+        through the compound-receiver resolver in 14g.2.
+        """
+        if "." not in callee_dotted:
+            return None
+        head, rest = callee_dotted.split(".", 1)
+        if "." in rest:
+            return None  # chained — defer to compound resolver
+
+        caller_scope = func_scope_id.get(caller_qn)
+        if caller_scope is None:
+            return None
+        type_ref = local_var_index.find(caller_scope, head, scope_tree)
+        if type_ref is None:
+            return None
+        type_qn = _resolve_type_name(
+            type_ref.declared_at_scope.file_path, type_ref.raw_name,
+        )
+        if type_qn is None:
+            return None
+
+        candidate = f"{type_qn}.{rest}"
+        if _is_function(candidate):
+            return candidate
+        # Walk ancestors via dispatch index (same as case (d)).
+        inherited = dispatch_index.resolve(type_qn, rest)
+        if inherited is not None:
+            return inherited.qualified_name
+        return None
+
     def _resolve_self_or_super(
         caller_qn: str,
         callee_dotted: str,
@@ -407,6 +472,13 @@ def finalize_batch(batch: IndexBatch) -> None:
             # filling in the previously-Symbol self.method/super().method
             # cases.
             resolved = _resolve_self_or_super(edge.caller_qn, edge.callee_qn)
+        if resolved is None:
+            # Sprint 14g — variable-binding fallback. Receiver is a bare
+            # local name (not a parameter, not self/super, not an import)
+            # whose type was inferred from a constructor assignment
+            # (`x = SomeClass(...)`). Last resort before SymbolNode
+            # emission so existing 12b/12c resolutions stay untouched.
+            resolved = _resolve_var_binding(edge.caller_qn, edge.callee_qn)
         if resolved is not None:
             new_calls.append(CallEdge(
                 repo=edge.repo,

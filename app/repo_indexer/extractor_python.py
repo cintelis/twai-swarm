@@ -31,6 +31,7 @@ from .actions import (
     ImportEdge,
     IndexBatch,
     InheritsEdge,
+    LocalVarBinding,
     ModuleNode,
     RepoNode,
 )
@@ -164,6 +165,47 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
                 if dotted and dotted != "super":
                     # tree-sitter Point uses 0-indexed rows; humans count from 1.
                     found.append((dotted, n.start_point[0] + 1))
+        for child in n.children:
+            _visit(child)
+
+    if body_node is not None:
+        _visit(body_node)
+    return found
+
+
+def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int]]:
+    """Sprint 14g — return [(var_name, type_raw_name, line)] for every
+    `var = SomeClass(...)` constructor assignment in `body_node`.
+
+    Case 7 (simple typeBinding) only: bare-name LHS, bare-identifier
+    callee. Skips:
+      - Multi-target (`x, y = ...`)
+      - Augmented (`x += ...`)
+      - Dotted callee (`x = models.User()`) — case 5; deferred
+      - Function-call returns (`x = func()`) — return-type tracking; deferred
+      - Method calls (`x = obj.method()`) — compound chain; deferred to 14g.2
+
+    The returned tuples feed `LocalVarBinding` records on the IndexBatch;
+    the resolver's `LocalVarTypeIndex` consumes them.
+    """
+    found: list[tuple[str, str, int]] = []
+
+    def _visit(n: Any) -> None:
+        # Walk INTO function and class bodies so nested scopes also get
+        # their bindings extracted. The CALLER (`_emit_function`) limits
+        # the body it passes us to a single function's body, so we don't
+        # cross function boundaries here.
+        if n.type == "assignment":
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if (left is not None and left.type == "identifier"
+                    and right is not None and right.type == "call"):
+                callee = right.child_by_field_name("function")
+                if callee is not None and callee.type == "identifier":
+                    var_name = _node_text(source, left)
+                    type_raw_name = _node_text(source, callee)
+                    line = n.start_point[0] + 1
+                    found.append((var_name, type_raw_name, line))
         for child in n.children:
             _visit(child)
 
@@ -316,6 +358,22 @@ def extract_python_file(
                 caller_qn=qn,
                 callee_qn=callee_qn,
                 line=line,
+            ))
+
+        # Sprint 14g — local var typeBindings. Constructor-style assignments
+        # `x = SomeClass(...)` become LocalVarBinding records the resolver
+        # uses to dispatch `x.method(...)` through MethodDispatchIndex.
+        for var_name, type_raw_name, assign_line in _walk_assignments(source, body):
+            batch.local_var_bindings.append(LocalVarBinding(
+                repo=repo.name,
+                tenant_id=repo.tenant_id,
+                file_path=rel_path,
+                enclosing_scope_kind="function",
+                enclosing_line_start=node.start_point[0] + 1,
+                enclosing_line_end=node.end_point[0] + 1,
+                var_name=var_name,
+                type_raw_name=type_raw_name,
+                line=assign_line,
             ))
 
     def _emit_class(node: Any) -> None:
