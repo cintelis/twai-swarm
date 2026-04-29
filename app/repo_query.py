@@ -272,7 +272,8 @@ def subclass_tree(driver: Driver, repo: str, root_class_qn: str) -> list[str]:
 # discoverability filter, not a security boundary. (Sprint 13c.)
 _TEST_PATH_PREDICATE = (
     "(fp STARTS WITH 'tests/' OR fp STARTS WITH 'test/' "
-    "OR fp CONTAINS '/tests/' OR fp CONTAINS '/test_' "
+    "OR fp CONTAINS '/tests/' OR fp CONTAINS '/test/' "
+    "OR fp CONTAINS '/test_' "
     "OR fp STARTS WITH 'test_')"
 )
 
@@ -289,7 +290,8 @@ def _test_path_predicate_for(var: str) -> str:
     """
     return (
         f"({var} STARTS WITH 'tests/' OR {var} STARTS WITH 'test/' "
-        f"OR {var} CONTAINS '/tests/' OR {var} CONTAINS '/test_' "
+        f"OR {var} CONTAINS '/tests/' OR {var} CONTAINS '/test/' "
+        f"OR {var} CONTAINS '/test_' "
         f"OR {var} STARTS WITH 'test_')"
     )
 

@@ -257,6 +257,7 @@ def test_semantic_search_emits_test_path_predicate_in_cypher():
     assert "STARTS WITH 'tests/'" in cyphers
     assert "STARTS WITH 'test/'" in cyphers
     assert "CONTAINS '/tests/'" in cyphers
+    assert "CONTAINS '/test/'" in cyphers
     assert "CONTAINS '/test_'" in cyphers
     assert "STARTS WITH 'test_'" in cyphers
 
