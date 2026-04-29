@@ -1,0 +1,171 @@
+# Sprint 14 exit criterion #1 — hand-rated relevance set.
+#
+# 20 queries against the twai-swarm self-scan with embeddings populated
+# (run `python -m app.repo_indexer scan . --with-embeddings` first).
+# Each entry has:
+#   query          — the user-style natural-language input
+#   kind           — concept | known_name | mixed (informational; not used in scoring)
+#   relevant_qns   — hand-picked qualified names that should appear in top-10.
+#                    Conservative: borderline matches are excluded so hit@10
+#                    stays honest. Order doesn't matter.
+#   top_choice     — the single best match, used for MRR.
+#   notes          — why these qns; optional.
+#
+# Pass criteria for hybrid (semantic_search) vs Cypher (find_symbol):
+#   - aggregate hybrid MRR > Cypher MRR
+#   - aggregate hybrid hit@10 >= Cypher hit@10
+
+# ─── Concept queries (hybrid expected to win) ────────────────────────────────
+
+- query: skip files that haven't changed since last index
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.loader.fetch_file_shas
+    - app.repo_indexer.phases.parse.ParsePhase
+  top_choice: app.repo_indexer.loader.fetch_file_shas
+  notes: SHA short-circuit (Sprint 11b). The qn name doesn't contain "skip" or "shas".
+
+- query: build community clusters from a call graph
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.phases.community_detect.CommunityDetectPhase
+    - app.repo_indexer.phases.community_detect._label_for
+  top_choice: app.repo_indexer.phases.community_detect.CommunityDetectPhase
+  notes: Sprint 13a Louvain phase.
+
+- query: find chains of function calls that span multiple modules
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.phases.process_extract.ProcessExtractPhase
+    - app.repo_indexer.phases.process_extract._enumerate_chains
+    - app.repo_indexer.phases.process_extract._build_call_graph
+  top_choice: app.repo_indexer.phases.process_extract.ProcessExtractPhase
+  notes: Sprint 13b process extraction.
+
+- query: Tarjan strongly connected components for cross-file resolution
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.scope_resolution.finalize.finalize_batch
+  top_choice: app.repo_indexer.scope_resolution.finalize.finalize_batch
+  notes: Sprint 12b. Tarjan is in the docstring/text, not the function name.
+
+- query: method resolution through Python class inheritance
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex
+    - app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex.resolve
+    - app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex.methods_for
+  top_choice: app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex
+  notes: Sprint 12c.
+
+- query: hybrid keyword and vector search with rank fusion
+  kind: concept
+  relevant_qns:
+    - app.repo_query.semantic_search
+    - app.repo_query._bm25_leg
+    - app.repo_query._vector_leg
+  top_choice: app.repo_query.semantic_search
+  notes: Sprint 14b. Function name is "semantic_search" — query terms don't appear in name.
+
+- query: verify GitHub webhook signature with HMAC
+  kind: concept
+  relevant_qns:
+    - app.github_webhook.verify_signature
+    - app.github_webhook.handle_event
+  top_choice: app.github_webhook.verify_signature
+  notes: Both BM25 (name match on "verify_signature") and vector should help.
+
+- query: pick the best matching project template for a brief
+  kind: concept
+  relevant_qns:
+    - app.agents.template_matcher.pick_template
+    - app.agents.template_matcher._score_template
+  top_choice: app.agents.template_matcher.pick_template
+  notes: Sprint 9 template-matching path.
+
+- query: walk a repo on disk respecting gitignore
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.walker.walk_repo
+    - app.repo_indexer.walker._read_gitignore_patterns
+    - app.repo_indexer.walker._matches_gitignore
+  top_choice: app.repo_indexer.walker.walk_repo
+  notes: Walker fundamentals.
+
+- query: generate the embedding text for a function or class
+  kind: concept
+  relevant_qns:
+    - app.repo_indexer.embed_text.embedding_text_for_function
+    - app.repo_indexer.embed_text.embedding_text_for_class
+    - app.repo_indexer.phases.embed.EmbedPhase
+  top_choice: app.repo_indexer.embed_text.embedding_text_for_function
+  notes: Sprint 14a. Both names contain "embedding_text" so BM25 should also score.
+
+# ─── Known-name queries (Cypher's home turf — bare-name substring match) ─────
+
+- query: ParsePhase
+  kind: known_name
+  relevant_qns:
+    - app.repo_indexer.phases.parse.ParsePhase
+  top_choice: app.repo_indexer.phases.parse.ParsePhase
+
+- query: MethodDispatchIndex
+  kind: known_name
+  relevant_qns:
+    - app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex
+  top_choice: app.repo_indexer.scope_resolution.method_dispatch_index.MethodDispatchIndex
+
+- query: fetch_file_shas
+  kind: known_name
+  relevant_qns:
+    - app.repo_indexer.loader.fetch_file_shas
+  top_choice: app.repo_indexer.loader.fetch_file_shas
+
+- query: build_tools
+  kind: known_name
+  relevant_qns:
+    - app.agents.coder_tools.build_tools
+  top_choice: app.agents.coder_tools.build_tools
+
+- query: verify_signature
+  kind: known_name
+  relevant_qns:
+    - app.github_webhook.verify_signature
+  top_choice: app.github_webhook.verify_signature
+
+- query: finalize_batch
+  kind: known_name
+  relevant_qns:
+    - app.repo_indexer.scope_resolution.finalize.finalize_batch
+  top_choice: app.repo_indexer.scope_resolution.finalize.finalize_batch
+
+# ─── Mixed (technical phrase + partial name overlap) ─────────────────────────
+
+- query: Louvain clustering with a deterministic seed
+  kind: mixed
+  relevant_qns:
+    - app.repo_indexer.phases.community_detect.CommunityDetectPhase
+  top_choice: app.repo_indexer.phases.community_detect.CommunityDetectPhase
+  notes: 'Louvain is in the docstring; name is CommunityDetectPhase.'
+
+- query: tree-sitter Python AST extractor
+  kind: mixed
+  relevant_qns:
+    - app.repo_indexer.extractor_python.extract_python_file
+    - app.repo_indexer.extractor_python._walk_calls
+    - app.repo_indexer.extractor_python._walk_imports
+  top_choice: app.repo_indexer.extractor_python.extract_python_file
+
+- query: MCP resource handler that lists clusters
+  kind: mixed
+  relevant_qns:
+    - app.mcp_server.resources.build_clusters_yaml
+    - app.mcp_server.resources.build_cluster_detail_yaml
+  top_choice: app.mcp_server.resources.build_clusters_yaml
+
+- query: get a JWT to authenticate the GitHub App
+  kind: mixed
+  relevant_qns:
+    - app.github_app._generate_app_jwt
+    - app.github_app.get_installation_token
+  top_choice: app.github_app._generate_app_jwt
