@@ -123,7 +123,9 @@ class ParsePhase:
         # or hand items to a pool.
         def _work_items():
             for rel_path, source, language, sha in walker.walk_repo(
-                ctx.repo_root, languages=ctx.languages
+                ctx.repo_root,
+                languages=ctx.languages,
+                additional_skip_dirs=ctx.additional_skip_dirs,
             ):
                 prior = ctx.prior_shas.get(rel_path)
                 if prior == sha:

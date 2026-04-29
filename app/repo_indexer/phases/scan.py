@@ -19,7 +19,11 @@ class ScanPhase:
     def run(self, ctx: PhaseContext) -> None:
         pre_start = time.monotonic()
         if any(lang in ctx.languages for lang in ("typescript", "javascript")):
-            for rel_path, _lang in walker.walk_paths(ctx.repo_root, languages=ctx.languages):
+            for rel_path, _lang in walker.walk_paths(
+                ctx.repo_root,
+                languages=ctx.languages,
+                additional_skip_dirs=ctx.additional_skip_dirs,
+            ):
                 ctx.repo_files.add(rel_path)
         pre_secs = time.monotonic() - pre_start
         if ctx.repo_files:

@@ -80,16 +80,26 @@ def _matches_gitignore(rel_path: str, patterns: list[str]) -> bool:
 MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB; generated bundles past this aren't worth indexing.
 
 
-def _walk_disk(repo_root: Path) -> Iterator[Path]:
+def _walk_disk(
+    repo_root: Path,
+    additional_skip_dirs: frozenset[str] = frozenset(),
+) -> Iterator[Path]:
     """Yield every regular file under repo_root, pruning SKIP_DIRS in-place
-    so we never recurse into them. No file reads here — pure tree walk."""
+    so we never recurse into them. No file reads here — pure tree walk.
+
+    `additional_skip_dirs` augments the built-in denylist with caller-
+    supplied directory names (e.g. `templates` for twai-swarm self-scans
+    where the bundled scaffold isn't part of the agent's own code).
+    """
+    skip = SKIP_DIRS | additional_skip_dirs
+
     def _recurse(d: Path) -> Iterator[Path]:
         try:
             entries = list(d.iterdir())
         except OSError:
             return
         for entry in entries:
-            if entry.name in SKIP_DIRS:
+            if entry.name in skip:
                 continue
             if entry.is_dir():
                 yield from _recurse(entry)
@@ -101,6 +111,7 @@ def _walk_disk(repo_root: Path) -> Iterator[Path]:
 def walk_paths(
     repo_root: Path,
     languages: tuple[Language, ...] = ("python", "typescript", "javascript"),
+    additional_skip_dirs: frozenset[str] = frozenset(),
 ) -> Iterator[tuple[str, Language]]:
     """Yield (rel_path, language) for every parseable file. PATH-ONLY —
     no file reads, no SHA, no parsing. Used by the TS pre-walk that just
@@ -115,7 +126,7 @@ def walk_paths(
     gi_patterns = _read_gitignore_patterns(repo_root)
     allowed_exts = {ext for ext, lang in EXT_LANGUAGE.items() if lang in languages}
 
-    for path in _walk_disk(repo_root):
+    for path in _walk_disk(repo_root, additional_skip_dirs):
         ext = path.suffix.lower()
         if ext not in allowed_exts:
             continue
@@ -128,6 +139,7 @@ def walk_paths(
 def walk_repo(
     repo_root: Path,
     languages: tuple[Language, ...] = ("python", "typescript", "javascript"),
+    additional_skip_dirs: frozenset[str] = frozenset(),
 ) -> Iterator[tuple[str, bytes, Language, str]]:
     """Yield (rel_path, source_bytes, language, sha) for every parseable file.
 
@@ -145,7 +157,7 @@ def walk_repo(
     gi_patterns = _read_gitignore_patterns(repo_root)
     allowed_exts = {ext for ext, lang in EXT_LANGUAGE.items() if lang in languages}
 
-    for path in _walk_disk(repo_root):
+    for path in _walk_disk(repo_root, additional_skip_dirs):
         ext = path.suffix.lower()
         if ext not in allowed_exts:
             continue

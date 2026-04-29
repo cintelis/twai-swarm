@@ -57,6 +57,11 @@ class PhaseContext:
     # falls back to the pre-14e dotted-repo-relative qns (single-package
     # repos and unit tests with synthetic batches keep working unchanged).
     package_roots: tuple = ()
+    # Per-scan extra skip-dir names (`--exclude-dirs` CLI flag). Augments
+    # the walker's built-in SKIP_DIRS for this run only. Used by twai-swarm
+    # self-scans to skip `templates/` (bundled scaffolds whose Python files
+    # aren't the agent's own code). Default empty preserves existing scans.
+    additional_skip_dirs: frozenset = field(default_factory=frozenset)
 
 
 class Phase(Protocol):

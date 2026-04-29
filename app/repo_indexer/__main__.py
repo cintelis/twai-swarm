@@ -73,7 +73,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     print(f"[indexer] scanning {repo_root}  ->  Neo4j repo={repo_name!r}")
 
+    additional_skip_dirs = frozenset(args.exclude_dirs or ())
+    if additional_skip_dirs:
+        print(f"[indexer] excluding dirs: {', '.join(sorted(additional_skip_dirs))}")
+
     package_roots = tuple(detect_package_roots(repo_root))
+    # Filter package roots that fall under excluded dirs — otherwise we'd
+    # detect a pyproject in templates/ but never actually scan files there.
+    if additional_skip_dirs:
+        package_roots = tuple(
+            r for r in package_roots
+            if not any(part in additional_skip_dirs for part in r.fs_root.split("/"))
+        )
     if package_roots:
         summary = ", ".join(r.fs_root or "<repo root>" for r in package_roots[:5])
         if len(package_roots) > 5:
@@ -115,6 +126,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
             package_roots=package_roots,
+            additional_skip_dirs=additional_skip_dirs,
         )
         run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -138,6 +150,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
             package_roots=package_roots,
+            additional_skip_dirs=additional_skip_dirs,
         )
         run_pipeline(ctx, phases)
         write_start = time.monotonic()
@@ -227,6 +240,13 @@ def main(argv: list[str] | None = None) -> int:
              "in Neo4j that lack `embedding` and embed them in place. "
              "Useful for adding embeddings to an already-scanned repo "
              "without forcing a full re-scan via prune_stale.",
+    )
+    scan.add_argument(
+        "--exclude-dirs", nargs="+", default=None,
+        help="Extra directory NAMES (not paths) to skip during the walk. "
+             "Augments the built-in denylist (.venv, node_modules, etc.). "
+             "Use for self-scans where bundled scaffolds (e.g. `templates`) "
+             "shouldn't be indexed alongside the agent's own code.",
     )
     scan.set_defaults(func=cmd_scan)
 
