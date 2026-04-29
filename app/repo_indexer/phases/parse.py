@@ -91,6 +91,7 @@ def _pool_extract(args: tuple) -> tuple:
             fragment = extract_typescript_file(
                 repo, rel_path, source, sha, parser,
                 repo_files=repo_files, language=language,
+                extract_routes=extract_routes,
             )
         else:
             return (rel_path, None, None)
@@ -154,6 +155,7 @@ class ParsePhase:
                         fragment = extract_typescript_file(
                             ctx.repo, rel_path, source, sha, parser,
                             repo_files=ctx.repo_files, language=language,
+                            extract_routes=ctx.extract_routes,
                         )
                     else:
                         continue

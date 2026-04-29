@@ -466,8 +466,14 @@ def extract_typescript_file(
     parser: Any,
     repo_files: set[str],
     language: Language = "typescript",
+    extract_routes: bool = False,
 ) -> IndexBatch:
-    """Parse one .ts/.tsx/.js/.jsx file and return its IndexBatch fragment."""
+    """Parse one .ts/.tsx/.js/.jsx file and return its IndexBatch fragment.
+
+    `extract_routes` (Sprint 15a.2) opts in to HTTP route extraction —
+    Express/Hono `app.get("/x", handler)` calls and Next.js App Router
+    `app/.../route.ts` exported verbs become RouteNodes. Default off.
+    """
     batch = IndexBatch(repo=repo)
 
     module_qn = module_qn_from_path(rel_path)
@@ -686,6 +692,38 @@ def extract_typescript_file(
                         _emit_arrow_const(sub)
 
     _walk_top_level(root.children)
+
+    # Sprint 15a.2 — HTTP routes. Two paths run when --with-routes is on:
+    #   1. Walk every CallExpression in the file looking for
+    #      Express/Hono `app.get("/x", handler)` patterns
+    #   2. If this file is an App Router `route.ts`, parse the path from
+    #      its filename and emit one Route per exported verb function
+    if extract_routes:
+        from .domain_extractors.routes_typescript import (
+            extract_routes_from_call,
+            extract_routes_nextjs_app_router,
+            is_nextjs_route_file,
+        )
+
+        # (1) Express/Hono call-pattern walk over the whole tree.
+        def _walk_for_routes(n: Any) -> None:
+            if n.type == "call_expression":
+                for route_node, route_edge in extract_routes_from_call(
+                    source, n, "", rel_path, repo.name, repo.tenant_id,
+                ):
+                    batch.routes.append(route_node)
+                    batch.route_edges.append(route_edge)
+            for child in n.children:
+                _walk_for_routes(child)
+        _walk_for_routes(root)
+
+        # (2) Next.js App Router file-based detection.
+        if is_nextjs_route_file(rel_path):
+            for route_node, route_edge in extract_routes_nextjs_app_router(
+                source, root, rel_path, repo.name, repo.tenant_id, module_qn,
+            ):
+                batch.routes.append(route_node)
+                batch.route_edges.append(route_edge)
 
     # Sprint 14j — module-level lexical declarations with constructor
     # values or annotations. `const app = new FastAPI()` at file top
