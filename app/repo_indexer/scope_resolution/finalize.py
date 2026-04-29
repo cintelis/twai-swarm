@@ -385,6 +385,93 @@ def finalize_batch(batch: IndexBatch) -> None:
     method_decls = [d for d in deduped_decls if d.kind == "method"]
     dispatch_index = build_method_dispatch_index(method_decls, parent_relation)
 
+    def _resolve_type_chain(
+        raw_name: str,
+        declared_at_scope: ScopeId,
+        depth: int = 0,
+    ) -> str | None:
+        """Sprint 14h — resolve a possibly-dotted type expression to a
+        class qn, following typeBinding chains as needed.
+
+        Handles three cases unified through the same recursion:
+
+        1. Bare name resolves directly as a class (`StateGraph`).
+        2. Bare name is a function whose return type is a typeBinding
+           on the function's enclosing scope (`make_user` → `User`).
+           Recurses with the bound type.
+        3. Dotted name is a method-call chain (`builder.compile`):
+           resolve head's class, then look up the method's return-type
+           binding on the class scope. Recurses for each segment.
+
+        Depth-capped at 8 to mirror GitNexus's `RECHAIN_MAX_DEPTH`. The
+        cap exists for cyclic alias safety (`a = b()` and `b = a()`
+        synthetic edge cases) — production fixtures stay well below.
+        """
+        if depth > 8:
+            return None
+
+        parts = raw_name.split(".")
+        if len(parts) == 1:
+            # Bare name. Try direct class resolution first.
+            type_qn = _resolve_type_name(declared_at_scope.file_path, raw_name)
+            if type_qn is not None:
+                return type_qn
+            # Try as a typeBinding chain — `raw_name` might be a function
+            # whose return-type binding lives on declared_at_scope's chain.
+            chained_ref = local_var_index.find(declared_at_scope, raw_name, scope_tree)
+            if chained_ref is not None:
+                return _resolve_type_chain(
+                    chained_ref.raw_name, chained_ref.declared_at_scope, depth + 1,
+                )
+            return None
+
+        # Dotted: head.middle…tail. Resolve head's class, walk middle,
+        # treat tail as a method whose return type we want.
+        head = parts[0]
+        middle = parts[1:-1]
+        tail = parts[-1]
+
+        # Resolve head — try as a typeBinding first, then as a class name.
+        head_class_qn: str | None = None
+        head_ref = local_var_index.find(declared_at_scope, head, scope_tree)
+        if head_ref is not None:
+            head_class_qn = _resolve_type_chain(
+                head_ref.raw_name, head_ref.declared_at_scope, depth + 1,
+            )
+        if head_class_qn is None:
+            head_class_qn = _resolve_type_name(declared_at_scope.file_path, head)
+        if head_class_qn is None:
+            return None
+
+        # Walk middle attributes as class-field bindings.
+        current = head_class_qn
+        for mid in middle:
+            cls_scope = class_scope_id.get(current)
+            if cls_scope is None:
+                return None
+            mid_ref = local_var_index.find(cls_scope, mid, scope_tree)
+            if mid_ref is None:
+                return None
+            current = _resolve_type_chain(
+                mid_ref.raw_name, mid_ref.declared_at_scope, depth + 1,
+            )
+            if current is None:
+                return None
+
+        # Tail is a method on `current`'s class — its typeBinding holds
+        # the return type. Same lookup as the field walk; the binding
+        # was emitted at extraction time by _emit_function for any
+        # method that has a `-> X:` annotation.
+        cls_scope = class_scope_id.get(current)
+        if cls_scope is None:
+            return None
+        tail_ref = local_var_index.find(cls_scope, tail, scope_tree)
+        if tail_ref is None:
+            return None
+        return _resolve_type_chain(
+            tail_ref.raw_name, tail_ref.declared_at_scope, depth + 1,
+        )
+
     def _resolve_var_binding(
         caller_qn: str,
         callee_dotted: str,
@@ -414,8 +501,13 @@ def finalize_batch(batch: IndexBatch) -> None:
         type_ref = local_var_index.find(caller_scope, head, scope_tree)
         if type_ref is None:
             return None
-        type_qn = _resolve_type_name(
-            type_ref.declared_at_scope.file_path, type_ref.raw_name,
+        # Sprint 14h — chain-resolve handles dotted raw_names
+        # (`g = builder.compile()` → "builder.compile" → CompiledStateGraph)
+        # and bare-name function references (`x = make_user()` → "make_user"
+        # → User via the return-type binding on the function's module
+        # scope). Pre-14h this was just `_resolve_type_name`.
+        type_qn = _resolve_type_chain(
+            type_ref.raw_name, type_ref.declared_at_scope,
         )
         if type_qn is None:
             return None
@@ -485,8 +577,10 @@ def finalize_batch(batch: IndexBatch) -> None:
             type_ref = local_var_index.find(caller_scope, head, scope_tree)
             if type_ref is None:
                 return None
-            current_class_qn = _resolve_type_name(
-                type_ref.declared_at_scope.file_path, type_ref.raw_name,
+            # Sprint 14h — chain-resolve for dotted raw_names + return
+            # types. Same swap as in `_resolve_var_binding`.
+            current_class_qn = _resolve_type_chain(
+                type_ref.raw_name, type_ref.declared_at_scope,
             )
 
         if current_class_qn is None:
@@ -500,9 +594,10 @@ def finalize_batch(batch: IndexBatch) -> None:
             field_type_ref = local_var_index.find(cls_scope, attr, scope_tree)
             if field_type_ref is None:
                 return None
-            current_class_qn = _resolve_type_name(
-                field_type_ref.declared_at_scope.file_path,
-                field_type_ref.raw_name,
+            # Sprint 14h — chain-resolve handles fields whose declared
+            # types are themselves dotted (`self.x: pkg.User`).
+            current_class_qn = _resolve_type_chain(
+                field_type_ref.raw_name, field_type_ref.declared_at_scope,
             )
             if current_class_qn is None:
                 return None

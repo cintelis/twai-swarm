@@ -66,6 +66,11 @@ class FunctionNode:
     # Captured as observed (no normalisation); resolution maps the bare
     # type name through the file's imports.
     param_types: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    # Sprint 14h — return type annotation, normalized.
+    # `def compile(self) -> CompiledStateGraph:` ⇒ `"CompiledStateGraph"`.
+    # Empty string when no annotation. Drives the return-type binding
+    # the resolver uses to chain `g = builder.compile(); g.invoke()`.
+    return_type_raw: str = ""
     docstring: str = ""
 
 

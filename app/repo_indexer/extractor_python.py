@@ -173,17 +173,38 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
     return found
 
 
-def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int]]:
-    """Sprint 14g — return [(var_name, type_raw_name, line)] for every
-    `var = SomeClass(...)` constructor assignment in `body_node`.
+def _flatten_attribute_for_assignment(source: bytes, n: Any) -> str | None:
+    """Flatten `a.b.c` into "a.b.c" for the RHS of an assignment.
+    Mirrors `_walk_calls`'s `_flatten_attribute`. Returns None for
+    non-flattenable shapes (call-typed receivers, lambdas, etc.).
+    """
+    if n.type == "identifier":
+        return _node_text(source, n)
+    if n.type == "attribute":
+        obj = n.child_by_field_name("object")
+        attr = n.child_by_field_name("attribute")
+        base = _flatten_attribute_for_assignment(source, obj) if obj is not None else None
+        if base is None or attr is None:
+            return None
+        return f"{base}.{_node_text(source, attr)}"
+    return None
 
-    Case 7 (simple typeBinding) only: bare-name LHS, bare-identifier
-    callee. Skips:
+
+def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int]]:
+    """Sprint 14g/14h — return [(var_name, type_raw_name, line)] for every
+    `var = <call>` assignment in `body_node`. Bare-name LHS only.
+
+    Sprint 14g handled identifier-callees (`x = SomeClass(...)`).
+    Sprint 14h adds dotted-callees (`g = builder.compile()`,
+    `x = obj.method()`) — the resolver interprets the dotted
+    `type_raw_name` as a method-call chain and looks up the method's
+    return-type binding on the receiver class's scope.
+
+    Skips (still):
       - Multi-target (`x, y = ...`)
       - Augmented (`x += ...`)
-      - Dotted callee (`x = models.User()`) — case 5; deferred
-      - Function-call returns (`x = func()`) — return-type tracking; deferred
-      - Method calls (`x = obj.method()`) — compound chain; deferred to 14g.2
+      - Call-typed receivers (`f().method()` chains) — defer until
+        depth-3+ chains become a real bottleneck
 
     The returned tuples feed `LocalVarBinding` records on the IndexBatch;
     the resolver's `LocalVarTypeIndex` consumes them.
@@ -191,27 +212,73 @@ def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int
     found: list[tuple[str, str, int]] = []
 
     def _visit(n: Any) -> None:
-        # Walk INTO function and class bodies so nested scopes also get
-        # their bindings extracted. The CALLER (`_emit_function`) limits
-        # the body it passes us to a single function's body, so we don't
-        # cross function boundaries here.
         if n.type == "assignment":
             left = n.child_by_field_name("left")
             right = n.child_by_field_name("right")
             if (left is not None and left.type == "identifier"
                     and right is not None and right.type == "call"):
                 callee = right.child_by_field_name("function")
-                if callee is not None and callee.type == "identifier":
-                    var_name = _node_text(source, left)
-                    type_raw_name = _node_text(source, callee)
-                    line = n.start_point[0] + 1
-                    found.append((var_name, type_raw_name, line))
+                if callee is not None:
+                    flattened = _flatten_attribute_for_assignment(source, callee)
+                    if flattened is not None:
+                        var_name = _node_text(source, left)
+                        line = n.start_point[0] + 1
+                        found.append((var_name, flattened, line))
         for child in n.children:
             _visit(child)
 
     if body_node is not None:
         _visit(body_node)
     return found
+
+
+def _normalize_return_type(text: str) -> str:
+    """Sprint 14h — normalize a Python return-type annotation.
+
+    Mirrors GitNexus's `python/interpret.ts:109` strips. For:
+        Optional[X]  →  X
+        X | None     →  X
+        None | X     →  X
+        list[X]      →  X
+        Iterable[X]  →  X
+        Generator[X, ...]  →  X
+        "X"          →  X (forward-ref unquote)
+
+    Multi-arg generics like `dict[K, V]` and `Tuple[A, B]` get the LAST
+    arg (the value type for dict, the result type for callable). For
+    things we can't simplify (`Union[A, B]`, complex shapes), we return
+    the input unchanged — the resolver will fail to find a class by
+    that name and fall through cleanly.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    # Forward-ref: `def f() -> "Foo":`
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1].strip()
+    # `X | None` / `None | X` — pipe-syntax Optional
+    if " | " in text:
+        parts = [p.strip() for p in text.split(" | ")]
+        non_none = [p for p in parts if p != "None"]
+        if len(non_none) == 1:
+            text = non_none[0]
+    # Generic: `Optional[X]`, `list[X]`, `Iterable[X]`, etc.
+    # Strip the wrapper → keep the last type arg.
+    if "[" in text and text.endswith("]"):
+        bracket = text.index("[")
+        wrapper = text[:bracket].strip()
+        inner = text[bracket + 1:-1].strip()
+        # Conservative single-arg unwrap. For dict[K, V] / Callable[..., R],
+        # take the last segment as a best-effort heuristic.
+        if "," in inner:
+            inner = inner.rsplit(",", 1)[-1].strip()
+        # Recurse once for nested wrappers (Optional[list[X]]).
+        if wrapper in {"Optional", "list", "List", "Iterable", "Iterator",
+                       "Sequence", "Collection", "AsyncIterable",
+                       "AsyncIterator", "Awaitable", "Coroutine",
+                       "Generator", "AsyncGenerator"}:
+            return _normalize_return_type(inner)
+    return text
 
 
 def _walk_module_level_assignments(
@@ -416,6 +483,7 @@ def extract_python_file(
         name_node = node.child_by_field_name("name")
         body = node.child_by_field_name("body")
         params = node.child_by_field_name("parameters")
+        return_type_node = node.child_by_field_name("return_type")
         if name_node is None:
             return
         name = _node_text(source, name_node)
@@ -425,6 +493,10 @@ def extract_python_file(
         )
         local_names.add(name)
         param_names, param_types = _function_params(source, params)
+        # Sprint 14h — return type annotation, normalized.
+        return_type_raw = ""
+        if return_type_node is not None:
+            return_type_raw = _normalize_return_type(_node_text(source, return_type_node))
         batch.functions.append(FunctionNode(
             repo=repo.name,
             qualified_name=qn,
@@ -437,8 +509,43 @@ def extract_python_file(
             parent_class_qn=parent_class_qn,
             params=param_names,
             param_types=param_types,
+            return_type_raw=return_type_raw,
             docstring=_docstring(source, body),
         ))
+        # Sprint 14h — return-type binding emitted on the function's
+        # ENCLOSING scope (class for methods, module for free functions).
+        # Mirrors GitNexus's auto-hoist: `findReceiverTypeBinding(scope,
+        # method_name)` from a caller scope walks UP and finds the
+        # binding on the parent scope. Same `LocalVarBinding` storage
+        # as 14g — discriminator is just the position in the scope tree.
+        if return_type_raw:
+            if is_method and parent_class_line_start > 0:
+                # Method: hoist to the class scope.
+                batch.local_var_bindings.append(LocalVarBinding(
+                    repo=repo.name,
+                    tenant_id=repo.tenant_id,
+                    file_path=rel_path,
+                    enclosing_scope_kind="class",
+                    enclosing_line_start=parent_class_line_start,
+                    enclosing_line_end=parent_class_line_end,
+                    var_name=name,
+                    type_raw_name=return_type_raw,
+                    line=node.start_point[0] + 1,
+                ))
+            elif not is_method and module_qn:
+                # Free function: hoist to module scope.
+                from .scope_resolution._adapter import MODULE_SCOPE_END
+                batch.local_var_bindings.append(LocalVarBinding(
+                    repo=repo.name,
+                    tenant_id=repo.tenant_id,
+                    file_path=rel_path,
+                    enclosing_scope_kind="module",
+                    enclosing_line_start=0,
+                    enclosing_line_end=MODULE_SCOPE_END - 1,
+                    var_name=name,
+                    type_raw_name=return_type_raw,
+                    line=node.start_point[0] + 1,
+                ))
         # Calls inside this function become CallEdges. Same-file local calls
         # resolve here; everything else is left as the raw dotted name and
         # the resolver decides post-pass whether it lands on a Function

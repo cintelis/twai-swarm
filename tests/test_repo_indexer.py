@@ -398,12 +398,17 @@ def test_extractor_emits_local_var_binding_for_constructor(parser):
     assert b.line == 2  # the assignment line
 
 
-def test_extractor_skips_dotted_constructor(parser):
-    """`x = models.User(...)` is a case-5 shape (namespace prefix);
-    14g.1 only handles bare-identifier callees."""
+def test_extractor_emits_dotted_callee_assignment(parser):
+    """Sprint 14h — `u = models.User(...)` and `g = builder.compile()`
+    both produce bindings with a DOTTED `type_raw_name`. The resolver
+    interprets the dotted form: case-5 namespace prefix (`models.User`)
+    or method-call chain (`builder.compile`'s return type)."""
     src = b"def use_it():\n    u = models.User()\n"
     batch = extract_python_file(REPO, "use.py", src, "sha", parser)
-    assert batch.local_var_bindings == []
+    bindings = batch.local_var_bindings
+    assert len(bindings) == 1
+    assert bindings[0].var_name == "u"
+    assert bindings[0].type_raw_name == "models.User"
 
 
 def test_extractor_skips_function_call_assignment(parser):
@@ -623,3 +628,85 @@ def test_extractor_module_binding_has_sentinel_range(parser):
     assert len(mod_bindings) == 1
     assert mod_bindings[0].enclosing_line_start == 0
     assert mod_bindings[0].enclosing_line_end == MODULE_SCOPE_END - 1
+
+
+# ─── Sprint 14h — return-type extraction ────────────────────────────────────
+
+def test_extractor_captures_function_return_annotation(parser):
+    """`def make_user() -> User:` populates FunctionNode.return_type_raw."""
+    src = b"def make_user() -> User:\n    return User()\n"
+    batch = extract_python_file(REPO, "a.py", src, "sha", parser)
+    assert len(batch.functions) == 1
+    assert batch.functions[0].return_type_raw == "User"
+
+
+def test_extractor_normalizes_optional_return():
+    """`Optional[X]` → `X` (mirrors GitNexus's strip)."""
+    from app.repo_indexer.extractor_python import _normalize_return_type
+    assert _normalize_return_type("Optional[User]") == "User"
+    assert _normalize_return_type("User | None") == "User"
+    assert _normalize_return_type("None | User") == "User"
+
+
+def test_extractor_normalizes_list_return():
+    """Single-arg generic wrappers strip to the inner type."""
+    from app.repo_indexer.extractor_python import _normalize_return_type
+    assert _normalize_return_type("list[User]") == "User"
+    assert _normalize_return_type("List[User]") == "User"
+    assert _normalize_return_type("Iterable[User]") == "User"
+
+
+def test_extractor_normalizes_quoted_forward_ref():
+    """`def f() -> "User":` → `User`."""
+    from app.repo_indexer.extractor_python import _normalize_return_type
+    assert _normalize_return_type('"User"') == "User"
+    assert _normalize_return_type("'User'") == "User"
+
+
+def test_extractor_emits_module_return_binding_for_free_function(parser):
+    """A free function with a return annotation emits a binding on the
+    module scope keyed by the function name."""
+    src = b"def make_user() -> User:\n    return User()\n"
+    batch = extract_python_file(REPO, "a.py", src, "sha", parser)
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert len(mod_bindings) == 1
+    assert mod_bindings[0].var_name == "make_user"
+    assert mod_bindings[0].type_raw_name == "User"
+
+
+def test_extractor_emits_class_return_binding_for_method(parser):
+    """A method with a return annotation emits a binding on its CLASS
+    scope keyed by the method name (auto-hoist semantics — mirrors
+    GitNexus's `pass4CollectTypeBindings` parent-hoist for return
+    types)."""
+    src = (
+        b"class StateGraph:\n"
+        b"    def compile(self) -> CompiledStateGraph:\n"
+        b"        return CompiledStateGraph()\n"
+    )
+    batch = extract_python_file(REPO, "g.py", src, "sha", parser)
+    cls_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "class"]
+    assert len(cls_bindings) == 1
+    assert cls_bindings[0].var_name == "compile"
+    assert cls_bindings[0].type_raw_name == "CompiledStateGraph"
+    # The class scope is StateGraph's range, NOT compile's function range.
+    assert cls_bindings[0].enclosing_line_start == 1
+
+
+def test_extractor_dotted_callee_emits_chained_binding(parser):
+    """`g = builder.compile()` produces a binding with dotted
+    `type_raw_name = "builder.compile"` — the resolver interprets the
+    dotted form via the chain-resolve helper."""
+    src = (
+        b"def use():\n"
+        b"    builder = StateGraph()\n"
+        b"    g = builder.compile()\n"
+    )
+    batch = extract_python_file(REPO, "u.py", src, "sha", parser)
+    fn_bindings = [b for b in batch.local_var_bindings
+                   if b.enclosing_scope_kind == "function"]
+    by_name = {b.var_name: b for b in fn_bindings}
+    assert by_name["builder"].type_raw_name == "StateGraph"
+    assert by_name["g"].type_raw_name == "builder.compile"  # dotted!
