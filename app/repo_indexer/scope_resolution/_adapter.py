@@ -97,16 +97,46 @@ def to_declarations(batch: IndexBatch) -> list[Declaration]:
     return out
 
 
+# Sprint 14i — Module scopes use a sentinel range that's wider than any
+# real function/class scope, so they always strictly contain their
+# children in the scope tree. The half-open end (10**9) is well past any
+# realistic file's line count and matches the encoding `_range_for`
+# produces from `enclosing_line_end = MODULE_SCOPE_END_LINE - 1`.
+MODULE_SCOPE_END = 10**9
+
+
 def to_scopes(batch: IndexBatch) -> list[ScopeId]:
-    """Flat list of ScopeIds — one per FunctionNode (kind="function"),
-    one per ClassNode (kind="class"). ModuleNodes don't have line ranges
-    in our extractor output, so they don't become scopes here.
+    """Flat list of ScopeIds — one per ModuleNode, one per ClassNode,
+    one per FunctionNode.
+
+    Sprint 14i: ModuleNodes now produce Module scopes (kind="module")
+    with a sentinel `(0, MODULE_SCOPE_END)` range so they strictly
+    contain every class/function in the file. This gives the scope tree
+    a root per file under which class+function scopes nest as children,
+    and gives module-level typeBindings somewhere to live. Pre-14i,
+    modules were absent from the scope tree.
 
     `build_scope_tree` consumes this list and rejects identical ranges
     via ScopeTreeInvariantError; let that propagate (same contract as
     the 12a indexes).
     """
     out: list[ScopeId] = []
+    seen_module_files: set[str] = set()
+    for m in batch.modules:
+        # Defensive: a batch may legitimately have multiple ModuleNodes
+        # for the same file (re-scans, fragment merges); dedupe by path.
+        if m.file_path in seen_module_files:
+            continue
+        seen_module_files.add(m.file_path)
+        out.append(ScopeId(
+            file_path=m.file_path,
+            range=Range(
+                file_path=m.file_path,
+                start_byte=0,
+                end_byte=MODULE_SCOPE_END,
+            ),
+            kind="module",
+        ))
     for c in batch.classes:
         out.append(ScopeId(
             file_path=c.file_path,
@@ -169,10 +199,16 @@ def build_local_var_type_index(batch: IndexBatch) -> LocalVarTypeIndex:
             range=_range_for(b.file_path, b.enclosing_line_start, b.enclosing_line_end),
             kind=b.enclosing_scope_kind,
         )
+        # `class_field` only when the binding was hoisted to a class
+        # scope (from `self.x = X()` in __init__). Function-body and
+        # module-level bindings are both "constructor-inferred" — the
+        # source describes WHY we know the type, not WHERE the binding
+        # lives in the scope tree.
+        source = "class_field" if b.enclosing_scope_kind == "class" else "constructor"
         type_ref = TypeRef(
             raw_name=b.type_raw_name,
             declared_at_scope=scope_id,
-            source="constructor" if b.enclosing_scope_kind == "function" else "class_field",
+            source=source,
         )
         index.add(scope_id, b.var_name, type_ref)
     return index

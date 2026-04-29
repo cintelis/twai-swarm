@@ -214,6 +214,48 @@ def _walk_assignments(source: bytes, body_node: Any) -> list[tuple[str, str, int
     return found
 
 
+def _walk_module_level_assignments(
+    source: bytes, root: Any,
+) -> list[tuple[str, str, int]]:
+    """Sprint 14i — return [(var_name, type_raw_name, line)] for every
+    `var = SomeClass(...)` assignment at the MODULE level only.
+
+    Mirrors `_walk_assignments` shape but does NOT recurse into function
+    or class bodies — those are handled separately. Only direct children
+    of the module root are inspected (typically `expression_statement`
+    nodes containing an `assignment`).
+
+    Catches the canonical FastAPI/Flask/Django pattern:
+
+        # at module top
+        app = FastAPI()
+        db = SQLAlchemy(app)
+
+    These bindings are stored on the file's Module scope so any function
+    or class in the same file finds them via the scope-chain walk.
+    """
+    found: list[tuple[str, str, int]] = []
+    for child in root.children:
+        # Module-level assignments are wrapped in `expression_statement`
+        # in tree-sitter-python's grammar.
+        if child.type != "expression_statement":
+            continue
+        for sub in child.children:
+            if sub.type != "assignment":
+                continue
+            left = sub.child_by_field_name("left")
+            right = sub.child_by_field_name("right")
+            if (left is not None and left.type == "identifier"
+                    and right is not None and right.type == "call"):
+                callee = right.child_by_field_name("function")
+                if callee is not None and callee.type == "identifier":
+                    var_name = _node_text(source, left)
+                    type_raw_name = _node_text(source, callee)
+                    line = sub.start_point[0] + 1
+                    found.append((var_name, type_raw_name, line))
+    return found
+
+
 def _walk_self_field_assignments(
     source: bytes, body_node: Any,
 ) -> list[tuple[str, str, int]]:
@@ -497,6 +539,28 @@ def extract_python_file(
             _emit_function(child)
         elif child.type == "class_definition":
             _emit_class(child)
+
+    # Sprint 14i — module-level typeBindings. `app = FastAPI()` at the
+    # top of the file becomes a binding on the module scope so any
+    # function in this file (or class methods) can resolve `app.get(...)`
+    # via the scope-chain walk. Sentinel encoding: enclosing_line_end =
+    # MODULE_SCOPE_END - 1 because the adapter's `_range_for` adds 1 for
+    # half-open semantics; we want the resulting Range to match
+    # `to_scopes`'s module ScopeId range exactly.
+    if module_qn:
+        from .scope_resolution._adapter import MODULE_SCOPE_END
+        for var_name, type_raw_name, assign_line in _walk_module_level_assignments(source, root):
+            batch.local_var_bindings.append(LocalVarBinding(
+                repo=repo.name,
+                tenant_id=repo.tenant_id,
+                file_path=rel_path,
+                enclosing_scope_kind="module",
+                enclosing_line_start=0,
+                enclosing_line_end=MODULE_SCOPE_END - 1,
+                var_name=var_name,
+                type_raw_name=type_raw_name,
+                line=assign_line,
+            ))
 
     # Imports — file-level edges.
     for target_qn, local_name, kind in _walk_imports(source, root):

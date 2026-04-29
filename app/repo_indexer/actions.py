@@ -208,7 +208,7 @@ class LocalVarBinding:
     repo: str
     tenant_id: str
     file_path: str
-    enclosing_scope_kind: Literal["function", "class"]
+    enclosing_scope_kind: Literal["function", "class", "module"]
     enclosing_line_start: int       # 1-based inclusive line of the enclosing scope
     enclosing_line_end: int         # 1-based inclusive line of the enclosing scope
     var_name: str                   # local var name, or "self.x" for class-field bindings

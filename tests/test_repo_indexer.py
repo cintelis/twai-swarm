@@ -534,3 +534,92 @@ def test_extractor_emits_both_local_and_field_bindings(parser):
     assert len(cls_bindings) == 1
     assert cls_bindings[0].var_name == "client"
     assert cls_bindings[0].type_raw_name == "ApiClient"
+
+
+# ─── Sprint 14i — module-level typeBinding extraction ──────────────────────
+
+def test_extractor_emits_module_level_binding(parser):
+    """`app = FastAPI()` at module top emits a module-scoped binding."""
+    src = b"app = FastAPI()\n\ndef handler():\n    pass\n"
+    batch = extract_python_file(REPO, "main.py", src, "sha", parser)
+
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert len(mod_bindings) == 1
+    b = mod_bindings[0]
+    assert b.var_name == "app"
+    assert b.type_raw_name == "FastAPI"
+    assert b.line == 1
+
+
+def test_extractor_does_not_double_walk_into_function_bodies(parser):
+    """The module-level walker must NOT recurse into function bodies —
+    those are visited separately by `_walk_assignments`. If both fired,
+    we'd get duplicate bindings (one at module scope, one at function
+    scope) for the same source line."""
+    src = (
+        b"app = FastAPI()\n"
+        b"\n"
+        b"def handler():\n"
+        b"    helper = Helper()\n"
+    )
+    batch = extract_python_file(REPO, "main.py", src, "sha", parser)
+
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    fn_bindings = [b for b in batch.local_var_bindings
+                   if b.enclosing_scope_kind == "function"]
+
+    # Each should have exactly one binding; no overlap.
+    assert len(mod_bindings) == 1
+    assert mod_bindings[0].var_name == "app"
+    assert len(fn_bindings) == 1
+    assert fn_bindings[0].var_name == "helper"
+
+
+def test_extractor_does_not_double_walk_into_class_bodies(parser):
+    """Class-body assignments at the class level (not inside methods)
+    are NOT module-level. They're class-scope, but our extractor today
+    doesn't capture class-level annotated/initialized fields (only
+    `self.x = ...` in __init__). Verify the walker doesn't mistakenly
+    emit them as module-level."""
+    src = (
+        b"app = FastAPI()\n"
+        b"\n"
+        b"class Settings:\n"
+        b"    db = Database()\n"   # class-level — currently not captured
+    )
+    batch = extract_python_file(REPO, "main.py", src, "sha", parser)
+
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    # Only `app = FastAPI()` is module-level. `db = Database()` is inside
+    # a class body — not module-level. (And we don't currently support
+    # class-level field initialization without `self.` — that's a 14j
+    # follow-up if needed.)
+    assert [b.var_name for b in mod_bindings] == ["app"]
+
+
+def test_extractor_skips_module_level_dotted_constructor(parser):
+    """`x = models.User()` at module level is case-5 territory (namespace
+    prefix) — same as the function-body skip rule."""
+    src = b"u = models.User()\n"
+    batch = extract_python_file(REPO, "main.py", src, "sha", parser)
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert mod_bindings == []
+
+
+def test_extractor_module_binding_has_sentinel_range(parser):
+    """Module bindings use a sentinel (0, MODULE_SCOPE_END-1) line range
+    so the adapter's _range_for produces a Range that exactly matches
+    the Module ScopeId in `to_scopes` — same shape, structural equality
+    in the LocalVarTypeIndex."""
+    from app.repo_indexer.scope_resolution._adapter import MODULE_SCOPE_END
+    src = b"app = FastAPI()\n"
+    batch = extract_python_file(REPO, "main.py", src, "sha", parser)
+    mod_bindings = [b for b in batch.local_var_bindings
+                    if b.enclosing_scope_kind == "module"]
+    assert len(mod_bindings) == 1
+    assert mod_bindings[0].enclosing_line_start == 0
+    assert mod_bindings[0].enclosing_line_end == MODULE_SCOPE_END - 1
