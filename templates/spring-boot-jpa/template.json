@@ -1,0 +1,61 @@
+{
+  "name": "spring-boot-jpa",
+  "display_name": "Spring Boot 3 + JPA + Postgres + React",
+  "description": "Java 21 + Spring Boot 3 backend with JWT auth and JPA, PostgreSQL persistence, Vite/React frontend, Testcontainers, multi-stage Docker.",
+  "language": "java",
+  "framework": "spring-boot",
+  "runtime_version": "java 21",
+
+  "included": [
+    "Spring Boot 3.4 with Spring Security + JWT (HS256) login flow",
+    "Spring Data JPA + Hibernate, PostgreSQL driver, H2 for unit tests",
+    "Testcontainers (Postgres) for integration tests with graceful Docker-unavailable fallback",
+    "Vite + React 19 + TypeScript frontend with RTK Query and react-router",
+    "Sample public + protected endpoints (/api/hello, /api/hello/me) with corresponding HomePage",
+    "Multi-stage Dockerfile: frontend build → backend build → JRE-only runtime image",
+    "docker-compose with healthchecked Postgres + app",
+    "verify.sh with lint/typecheck/smoke/test/all stages"
+  ],
+
+  "selection_hints": [
+    "Java backend with JWT authentication",
+    "Spring Boot REST API with PostgreSQL persistence",
+    "Full-stack app with Java backend and React frontend",
+    "Stateful backend service with relational database",
+    "JPA / Hibernate ORM is acceptable",
+    "Containerised deployment via docker-compose"
+  ],
+
+  "anti_hints": [
+    "Frontend-only (no backend)",
+    "Serverless-first architectures",
+    "Non-JVM language preference (Python, Go, Rust, Node)",
+    "Document database / NoSQL primary store",
+    "Real-time / WebSocket-heavy requirements (template is REST-only)"
+  ],
+
+  "verification": {
+    "script": "verify.sh",
+    "description": "Compile Java + frontend, run unit tests on both sides, smoke-boot the Spring application context. `all` is the gate — exit 0 means the customised scaffold is healthy."
+  },
+
+  "customisation_guide": {
+    "primary_files": [
+      "src/main/java/com/example/app/HelloController.java — replace with your real endpoints",
+      "src/main/java/com/example/app/Application.java — adjust SecurityFilterChain matchers for your routes",
+      "src/main/java/com/example/app/security/InMemoryUserStore.java — swap for a real UserDetailsService backed by your DB",
+      "src/main/java/com/example/app/security/JwtUtil.java — load the signing secret from env, not the hardcoded value",
+      "frontend/src/pages/HomePage.tsx — replace with your real UI",
+      "frontend/src/api/api.ts — add endpoints for your routes",
+      "pom.xml — set groupId / artifactId / version to your project's coordinates",
+      "src/main/resources/application.properties — point at your real DB",
+      "docker-compose.yml — adjust ports, container names, env"
+    ],
+    "preserve": [
+      "src/main/java/com/example/app/security/JwtAuthFilter.java — generic JWT filter wiring",
+      "src/test/java/com/example/app/persistence/PostgresTestcontainerConfig.java — generic Testcontainers setup",
+      "Dockerfile — multi-stage build pattern is sound; modify only if you change the build commands",
+      "frontend/vite.config.ts, tsconfig*.json — generic Vite/TS configuration"
+    ]
+  }
+}

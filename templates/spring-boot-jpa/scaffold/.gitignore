@@ -1,0 +1,38 @@
+# Build output
+target/
+build/
+dist/
+
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Java
+*.class
+*.jar
+*.war
+
+# Logs
+*.log
+
+# Worker worktrees (per-task isolation)
+.worktrees/
+logs/**
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Vite build artifacts
+frontend/vite.config.d.ts
+frontend/vite.config.js
