@@ -10,10 +10,18 @@ ENV PYTHONUNBUFFERED=1
 #   - bash: required by the Coder's run_verify + bash_exec tools
 #   - git: Coder may `git init` / `git diff` inside its workspace
 #   - nodejs + npm (via NodeSource Node 20 LTS): toolchain for JS/TS templates
+#   - temurin-21-jdk + maven (via Eclipse Adoptium apt repo): toolchain for
+#     the spring-boot-jpa template. Debian bookworm ships JDK 17 by default,
+#     but the template's pom specifies Java 21, so we pull from Adoptium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl bash git gnupg \
+    && curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
+         | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" \
+         > /etc/apt/sources.list.d/adoptium.list \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs temurin-21-jdk maven \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
