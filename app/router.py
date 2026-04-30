@@ -34,18 +34,19 @@ MODELS: dict[str, ModelSpec] = {
     "opus":   ModelSpec("anthropic", "claude-opus-4-7",   "flagship", 15.00, 75.00),
 
     # xAI -- grok-4.20 is their current flagship (2M context, reasoning + tools).
-    # Using the base alias so we auto-track stable releases; pin to
-    # "grok-4.20-<date>" (e.g. grok-4.20-0309-non-reasoning) for reproducibility.
-    "grok":          ModelSpec("xai", "grok-4.20",           "flagship", 2.00, 6.00),
-    # grok-code-fast-1 is on the standard API. grok-4-1-fast is Enterprise-API-
-    # only per release-notes Nov 2025 — it returns empty completions on
-    # standard accounts (smoke saw "172 -> 0 tok"). Pricing below is a
-    # placeholder until confirmed against the live language-models endpoint.
-    "grok-fast":     ModelSpec("xai", "grok-code-fast-1",    "fast",     0.20, 0.50),
-    # Reasoning variant required for server-side tools (web_search, x_search)
-    # via the Responses API. Same per-token pricing as the flagship; the
-    # extra cost is tool invocations ($5 / 1k calls).
-    "grok-research": ModelSpec("xai", "grok-4.20-reasoning", "flagship", 2.00, 6.00),
+    # Using the base alias so we auto-track stable releases.
+    "grok":          ModelSpec("xai", "grok-4.20",                "flagship", 2.00, 6.00),
+    # The reasoning variant of grok-4-1-fast is available on the standard API.
+    # The plain "grok-4-1-fast" alias is Enterprise-only and returns 200 with
+    # empty content on standard accounts (smoke saw "172 -> 0 tok"); the
+    # -reasoning suffix routes to the standard-API endpoint.
+    "grok-fast":     ModelSpec("xai", "grok-4-1-fast-reasoning", "fast",     0.20, 0.50),
+    # Date-pinned reasoning variant — required for server-side tools
+    # (web_search, x_search) via the Responses API. Pin to a known-good
+    # release for reproducibility; bump explicitly when a newer dated build
+    # ships. Same per-token pricing as the flagship; the extra cost is tool
+    # invocations ($5 / 1k calls).
+    "grok-research": ModelSpec("xai", "grok-4.20-0309-reasoning", "flagship", 2.00, 6.00),
 
     # OpenAI — fallback only. Per OpenAI's "Default model for most coding tasks"
     # guidance, gpt-5.4 is the right default for both general + coding work.
