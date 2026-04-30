@@ -213,6 +213,22 @@ async def create_repo_task(request: Request, req: CreateRepoTaskReq):
         id=workflow_id,
         task_queue="project-workflows",
     )
+
+    # Land a row in `projects` so the UI's recent-list + detail page work
+    # for repo-task workflows. The detail page uses workflow_id prefix
+    # ("repo-task-" vs "project-") to switch rendering — see GET /projects/{id}.
+    repo_name = (
+        req.repo_name
+        or req.repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    )
+    one_line = " ".join(req.brief.split())
+    display_name = f"{repo_name}: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
+    await db.create_project(
+        name=display_name,
+        brief=req.brief,
+        workflow_id=workflow_id,
+        tenant_id=tenant_id,
+    )
     return CreateRepoTaskResp(workflow_id=workflow_id)
 
 
@@ -510,6 +526,30 @@ async def get_project(workflow_id: str):
         and not approval_state.get("rejected", False)
     )
 
+    # Repo-task workflows don't run BA/Architect/SE/etc., so `tasks` is empty
+    # and the agent-task UI is meaningless. Surface the workflow's result
+    # (diff + files_changed + summary) instead so the user can actually see
+    # what the Coder did. Skipped for still-running workflows; the Temporal
+    # describe() above already reports status=RUNNING in that case.
+    repo_task_result = None
+    if workflow_id.startswith("repo-task-") and status == "COMPLETED":
+        try:
+            result = await asyncio.wait_for(handle.result(), timeout=5.0)
+            repo_task_result = {
+                "commit_sha": getattr(result, "commit_sha", None),
+                "files_changed": list(getattr(result, "files_changed", []) or []),
+                "diff": getattr(result, "diff", "") or "",
+                "iterations": getattr(result, "iterations", 0),
+                "summary": getattr(result, "summary", "") or "",
+                "tokens_in": getattr(result, "tokens_in", 0),
+                "tokens_out": getattr(result, "tokens_out", 0),
+                "cost_usd": float(getattr(result, "cost_usd", 0.0) or 0.0),
+            }
+        except Exception:
+            # Workflow result unavailable (timeout, serialisation mismatch, etc.).
+            # The detail page degrades gracefully — status + project info still render.
+            pass
+
     return {
         "workflow_id": workflow_id,
         "status": status,
@@ -520,6 +560,8 @@ async def get_project(workflow_id: str):
             {**t, "id": str(t["id"]), "parent_task_id": str(t["parent_task_id"]) if t["parent_task_id"] else None}
             for t in tasks
         ],
+        "repo_task_result": repo_task_result,
+        "is_repo_task": workflow_id.startswith("repo-task-"),
     }
 
 

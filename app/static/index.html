@@ -1440,6 +1440,46 @@ function renderProject(data) {
     }
   }
 
+  // ── Repo-task result (work-on-existing-repo workflows) ──
+  if (data.repo_task_result) {
+    const r = data.repo_task_result;
+    const tokens = `${(r.tokens_in || 0).toLocaleString()}→${(r.tokens_out || 0).toLocaleString()} tok`;
+    const cost = (r.cost_usd != null) ? `$${r.cost_usd.toFixed(4)}` : '';
+    html += `
+      <div class="code-card">
+        <div class="code-head">
+          <div class="code-title">Coder result <span class="meta">· ${r.iterations} iteration${r.iterations === 1 ? '' : 's'}</span></div>
+        </div>
+    `;
+    if (r.summary) {
+      html += `<div class="code-summary">${escapeHtml(r.summary)}</div>`;
+    }
+    if (Array.isArray(r.files_changed) && r.files_changed.length > 0) {
+      html += `<div class="section-label" style="margin-top:14px;">Files changed (${r.files_changed.length})</div>`;
+      html += `<div class="file-tree">`;
+      for (const p of r.files_changed) {
+        html += `<div class="file-tree-item">${escapeHtml(p)}</div>`;
+      }
+      html += `</div>`;
+    } else {
+      html += `<div class="code-summary" style="color: var(--amber);">No files changed.</div>`;
+    }
+    if (r.diff) {
+      html += `
+        <details style="margin-top:14px;">
+          <summary class="code-summary" style="cursor:pointer;">Full diff (${r.diff.length.toLocaleString()} chars)</summary>
+          <pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:0.85em;background:var(--surface2);padding:14px;border-radius:var(--radius-sm);max-height:600px;overflow:auto;margin-top:8px;">${escapeHtml(r.diff)}</pre>
+        </details>
+      `;
+    }
+    html += `<div class="code-summary" style="margin-top:10px;color: var(--muted2);font-size:11px;">commit ${escapeHtml((r.commit_sha || '').slice(0, 12))} · ${tokens} · ${cost}</div>`;
+    html += `</div>`;
+  } else if (data.is_repo_task && status === 'RUNNING') {
+    html += `<div class="card empty">Cloning, indexing, and running the Coder against the repo… check back in a few minutes.</div>`;
+  } else if (data.is_repo_task && status !== 'COMPLETED' && status !== 'RUNNING') {
+    html += `<div class="card empty">Workflow ${escapeHtml(status)}; no result available.</div>`;
+  }
+
   // ── Approval banner ─────────────────────────────────────
   if (awaiting_approval) {
     html += `
@@ -1455,10 +1495,16 @@ function renderProject(data) {
   }
 
   // ── Task list (with drilldown) ──────────────────────────
-  html += `<div class="section-label">Tasks (${tasks.length})</div>`;
-  if (tasks.length === 0) {
+  // Repo-task workflows don't run BA/Architect/SE/etc., so the agent-task
+  // UI doesn't apply. Skip the section entirely when there's nothing to show.
+  if (data.is_repo_task) {
+    // Suppress agent-task UI for repo-tasks; the Coder-result card above
+    // is the workflow output.
+  } else if (tasks.length === 0) {
+    html += `<div class="section-label">Tasks (0)</div>`;
     html += `<div class="card empty">Workflow just started — agents will appear here as they're scheduled.</div>`;
   } else {
+    html += `<div class="section-label">Tasks (${tasks.length})</div>`;
     html += `<div class="card"><div class="task-list">`;
     for (const t of tasks) {
       const tid = t.id;
