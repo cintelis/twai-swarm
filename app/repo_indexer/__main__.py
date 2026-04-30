@@ -61,6 +61,16 @@ def _parser_for_cpp():
     return Parser(Language(tscpp.language()))
 
 
+def _parser_for_java():
+    """Sprint 17a — tree-sitter-java parser for `.java`. Lazy-imported
+    so the module loads without tree-sitter-java installed when the
+    caller's languages don't include java.
+    """
+    import tree_sitter_java as tsjava
+    from tree_sitter import Language, Parser
+    return Parser(Language(tsjava.language()))
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_path).resolve()
     if not repo_root.is_dir():
@@ -111,6 +121,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     # set; keeps tree-sitter-cpp out of the import path for default scans
     # and tests that don't need it.
     cpp_parser = _parser_for_cpp() if "cpp" in languages else None
+    # Sprint 17a — only build the java parser when java is in the
+    # language set; keeps tree-sitter-java out of the import path for
+    # default scans and tests that don't need it.
+    java_parser = _parser_for_java() if "java" in languages else None
 
     # Sprint 11c: resolve worker count. Default cpu_count()//2 (forward-looking
     # for the 13K-file case; small repos pay spawn overhead). `--parse-workers
@@ -137,6 +151,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             py_parser=py_parser,
             ts_parsers=ts_parsers,
             cpp_parser=cpp_parser,
+            java_parser=java_parser,
             driver=None,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
@@ -165,6 +180,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             py_parser=py_parser,
             ts_parsers=ts_parsers,
             cpp_parser=cpp_parser,
+            java_parser=java_parser,
             driver=driver,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
@@ -243,9 +259,9 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--dry-run", action="store_true", help="Parse + report counts without writing to Neo4j")
     scan.add_argument(
         "--languages", nargs="+", default=None,
-        choices=["python", "typescript", "javascript", "cpp"],
+        choices=["python", "typescript", "javascript", "cpp", "java"],
         help="Languages to extract. Default: python+typescript+javascript "
-             "(cpp must be opted-in via --languages cpp).",
+             "(cpp / java must be opted-in via --languages cpp / --languages java).",
     )
     scan.add_argument(
         "--parse-workers", type=int, default=None,

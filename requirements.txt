@@ -50,6 +50,9 @@ tree-sitter-python>=0.23,<0.26
 # `language_tsx()` (for .tsx / .jsx — needed because regular TS grammar
 # parse-errors on JSX literals).
 tree-sitter-typescript>=0.23,<0.26
+# Sprint 17a — Java extractor support. Same precompiled-wheel story
+# as the python / typescript / cpp grammars.
+tree-sitter-java>=0.23,<0.26
 neo4j>=5.25,<7.0
 # Sprint 12b — repo_indexer cross-file resolution.
 # rustworkx hosts the Tarjan SCC + topological-sort over the import graph

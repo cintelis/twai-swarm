@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-Language = Literal["python", "typescript", "javascript", "cpp"]
+Language = Literal["python", "typescript", "javascript", "cpp", "java"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,11 @@ class FileNode:
     path: str           # relative posix path from repo root
     language: Language
     sha: str            # blob sha256, used for diff-skip on re-scan
+    # Sprint 17a — Java's `package com.foo.bar;` declaration. Empty for
+    # other languages (and for Java files in the default package). The
+    # 17d import resolver will look this up to map cross-file references
+    # to qns without re-parsing the file.
+    package: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,12 @@ class ClassNode:
     line_start: int
     line_end: int
     docstring: str = ""
+    # Sprint 17a — Java annotation-as-raw-string capture. Each entry is
+    # the verbatim source text including the `@`, e.g.
+    # `'@RestController'`, `'@RequestMapping("/api")'`. Other extractors
+    # leave this empty; route / JPA domain extractors parse the
+    # arguments themselves at consumption time.
+    annotations: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,10 @@ class FunctionNode:
     # for Python and TS extractors — they ignore these fields entirely.
     is_const: bool = False
     is_virtual: bool = False
+    # Sprint 17a — Java annotation-as-raw-string capture. Same shape as
+    # ClassNode.annotations. Empty for other languages and for Java
+    # methods with no annotation modifiers.
+    annotations: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

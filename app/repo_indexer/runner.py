@@ -35,6 +35,11 @@ class PhaseContext:
     # OR runs whose languages tuple doesn't include "cpp"). The parse
     # phase guards on this before dispatching to extract_cpp_file.
     cpp_parser: Any = None
+    # Sprint 17a — tree-sitter-java parser. Same opt-in convention as
+    # cpp_parser: None means java scanning is disabled (grammar not
+    # installed OR languages tuple doesn't include "java"). ParsePhase
+    # guards on this before dispatching to extract_java_file.
+    java_parser: Any = None
     progress: Callable[[str], None] = print
     # Sprint 11b: SHA short-circuit. `driver` is a Neo4j Driver (typed Any
     # so the runner doesn't drag neo4j into the import path); `prior_shas`

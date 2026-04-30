@@ -46,19 +46,21 @@ _TS_PARSERS: dict | None = None
 
 
 _CPP_PARSER = None
+_JAVA_PARSER = None
 
 
 def _pool_init() -> None:
     """Worker-process initializer. Builds a Python parser + a TS/TSX parser
-    dict + a C++ parser and stashes them in module globals. Runs once per
-    worker, not once per task — that's the point of using `initializer`
-    instead of building parsers inside `_pool_extract`.
+    dict + a C++ parser + a Java parser and stashes them in module
+    globals. Runs once per worker, not once per task — that's the point
+    of using `initializer` instead of building parsers inside
+    `_pool_extract`.
 
-    The cpp parser import is best-effort: if tree-sitter-cpp isn't
-    installed, we log nothing here (parsers run lazily on first use)
-    and the cpp branch in `_pool_extract` skips with an error.
+    The cpp / java parser imports are best-effort: if the grammar isn't
+    installed, we log nothing here (parsers run lazily on first use) and
+    the corresponding branch in `_pool_extract` skips with an error.
     """
-    global _PY_PARSER, _TS_PARSERS, _CPP_PARSER
+    global _PY_PARSER, _TS_PARSERS, _CPP_PARSER, _JAVA_PARSER
     import tree_sitter_python as tspython
     import tree_sitter_typescript as tsts
     from tree_sitter import Language, Parser
@@ -73,6 +75,11 @@ def _pool_init() -> None:
         _CPP_PARSER = Parser(Language(tscpp.language()))
     except Exception:  # noqa: BLE001
         _CPP_PARSER = None
+    try:
+        import tree_sitter_java as tsjava
+        _JAVA_PARSER = Parser(Language(tsjava.language()))
+    except Exception:  # noqa: BLE001
+        _JAVA_PARSER = None
 
 
 def _pool_extract(args: tuple) -> tuple:
@@ -115,6 +122,14 @@ def _pool_extract(args: tuple) -> tuple:
             from ..extractor_cpp import extract_cpp_file
             fragment = extract_cpp_file(
                 repo, rel_path, source, sha, _CPP_PARSER,
+                repo_files=repo_files,
+            )
+        elif language == "java":
+            if _JAVA_PARSER is None:
+                return (rel_path, None, "tree_sitter_java not installed in worker")
+            from ..extractor_java import extract_java_file
+            fragment = extract_java_file(
+                repo, rel_path, source, sha, _JAVA_PARSER,
                 repo_files=repo_files,
             )
         else:
@@ -190,6 +205,15 @@ class ParsePhase:
                         from ..extractor_cpp import extract_cpp_file
                         fragment = extract_cpp_file(
                             ctx.repo, rel_path, source, sha, ctx.cpp_parser,
+                            repo_files=ctx.repo_files,
+                        )
+                    elif language == "java":
+                        if ctx.java_parser is None:
+                            logger.warning("java parser unavailable; skipping %s", rel_path)
+                            continue
+                        from ..extractor_java import extract_java_file
+                        fragment = extract_java_file(
+                            ctx.repo, rel_path, source, sha, ctx.java_parser,
                             repo_files=ctx.repo_files,
                         )
                     else:

@@ -49,6 +49,10 @@ EXT_LANGUAGE: dict[str, Language] = {
     ".hpp": "cpp",
     ".hxx": "cpp",
     ".hh":  "cpp",
+    # Sprint 17a — Java. `target/` (Maven/Gradle build dir) is already
+    # in SKIP_DIRS, so generated `.java` under it is filtered before
+    # this map ever fires.
+    ".java": "java",
 }
 
 
