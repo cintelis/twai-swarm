@@ -92,8 +92,24 @@ def _capture_diff(repo_root: Path) -> tuple[str, list[str]]:
     files_changed is the list of relative paths git reports as modified
     (added/deleted/renamed all bucket into the same list — caller can
     reparse the diff for finer granularity if needed).
+
+    Untracked new files are promoted to intent-to-add (`git add -N`) before
+    diffing so brand-new files the Coder created appear in both the unified
+    diff and the name list. Without this, `git diff HEAD` silently omits
+    untracked paths and the push activity ships an incomplete PR — only
+    the wiring edits, not the new classes/tests they reference.
     """
     try:
+        untracked_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=30,
+        )
+        untracked = [p for p in untracked_proc.stdout.splitlines() if p.strip()]
+        if untracked:
+            subprocess.run(
+                ["git", "-C", str(repo_root), "add", "-N", "--", *untracked],
+                capture_output=True, text=True, timeout=30,
+            )
         diff_proc = subprocess.run(
             ["git", "-C", str(repo_root), "diff", "HEAD"],
             capture_output=True, text=True, timeout=30,

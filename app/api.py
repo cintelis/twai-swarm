@@ -535,22 +535,37 @@ async def get_project(workflow_id: str):
     if workflow_id.startswith("repo-task-") and status == "COMPLETED":
         try:
             result = await asyncio.wait_for(handle.result(), timeout=5.0)
+            # `handle.result()` returns a dict here, not a RepoTaskOutput
+            # dataclass — `get_workflow_handle(workflow_id)` is untyped, so
+            # the SDK has no return-type hint to deserialise into. Reading
+            # via getattr() silently returned the default for every field
+            # (iterations=0, tokens=0, cost=0.0), which is what the UI
+            # rendered as "0 iterations / No files changed / $0.0000" even
+            # for workflows that completed successfully with real numbers.
+            # _get supports both shapes so a future switch to a typed handle
+            # doesn't regress this.
+            def _get(obj, key, default=None):
+                if isinstance(obj, dict):
+                    val = obj.get(key, default)
+                else:
+                    val = getattr(obj, key, default)
+                return default if val is None else val
             repo_task_result = {
-                "commit_sha": getattr(result, "commit_sha", None),
-                "files_changed": list(getattr(result, "files_changed", []) or []),
-                "diff": getattr(result, "diff", "") or "",
-                "iterations": getattr(result, "iterations", 0),
-                "summary": getattr(result, "summary", "") or "",
-                "tokens_in": getattr(result, "tokens_in", 0),
-                "tokens_out": getattr(result, "tokens_out", 0),
-                "cost_usd": float(getattr(result, "cost_usd", 0.0) or 0.0),
+                "commit_sha": _get(result, "commit_sha"),
+                "files_changed": list(_get(result, "files_changed", []) or []),
+                "diff": _get(result, "diff", "") or "",
+                "iterations": _get(result, "iterations", 0),
+                "summary": _get(result, "summary", "") or "",
+                "tokens_in": _get(result, "tokens_in", 0),
+                "tokens_out": _get(result, "tokens_out", 0),
+                "cost_usd": float(_get(result, "cost_usd", 0.0) or 0.0),
                 # Auto-PR step output (added Sprint 10f). Older workflow
-                # outputs without these attrs degrade to None silently via
-                # getattr defaults, so the field is always present.
-                "pr_url": getattr(result, "pr_url", None),
-                "pr_number": getattr(result, "pr_number", None),
-                "branch_name": getattr(result, "branch_name", None),
-                "push_error": getattr(result, "push_error", None),
+                # outputs without these keys degrade to None silently via
+                # _get defaults, so the field is always present.
+                "pr_url": _get(result, "pr_url"),
+                "pr_number": _get(result, "pr_number"),
+                "branch_name": _get(result, "branch_name"),
+                "push_error": _get(result, "push_error"),
             }
         except Exception:
             # Workflow result unavailable (timeout, serialisation mismatch, etc.).

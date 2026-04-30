@@ -129,3 +129,42 @@ def test_repo_task_input_dataclass_shape():
     inp = RepoTaskInput(repo_url="https://x/y.git", branch="main", brief="do thing")
     assert inp.tenant_id == "default"
     assert inp.repo_name == ""
+
+
+# ─── _capture_diff: untracked-file regression ───────────────────────────────
+# A real bug we shipped: the Coder created a brand-new file (e.g. RateLimitFilter.java)
+# alongside an edit to an existing file, but `git diff HEAD` only reports the
+# tracked edit — untracked paths are invisible — so the PR pushed only the
+# wiring change and CI broke on a missing import. The fix promotes untracked
+# files to intent-to-add before diffing.
+
+def test_capture_diff_includes_untracked_new_files(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+    from app.agents.coder_repo import _capture_diff
+
+    repo = tmp_path / "repo"
+    _make_local_repo(repo)
+
+    # Modify a tracked file and create an untracked one — exactly the shape
+    # of a "wire up + add new class" Coder output.
+    (repo / "README.md").write_text("hi\nedited\n", encoding="utf-8")
+    (repo / "NEW_FILE.txt").write_text("brand new\n", encoding="utf-8")
+
+    diff, files = _capture_diff(repo)
+    assert "README.md" in files
+    assert "NEW_FILE.txt" in files
+    assert "brand new" in diff  # the new file's content shows up as +lines
+
+
+def test_capture_diff_clean_repo_returns_empty(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+    from app.agents.coder_repo import _capture_diff
+
+    repo = tmp_path / "repo"
+    _make_local_repo(repo)
+
+    diff, files = _capture_diff(repo)
+    assert diff == ""
+    assert files == []
