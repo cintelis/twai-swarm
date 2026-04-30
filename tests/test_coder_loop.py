@@ -118,7 +118,7 @@ async def test_loop_seeds_template_and_accumulates_tokens(tmp_path, templates_di
     assert result["_tokens_in"] == 300
     assert result["_tokens_out"] == 130
     assert result["_provider"] == "anthropic"
-    assert result["_model"] == "claude-opus-4-7"
+    assert result["_model"] == "claude-haiku-4-5"
     assert result["template"] == "tiny"
     assert result["summary"] == "done!"
     # Heartbeats fired once per iteration.

@@ -3,7 +3,7 @@
   "display_name": "Spring Boot 3 + JPA + Postgres + React",
   "description": "Java 21 + Spring Boot 3 backend with JWT auth and JPA, PostgreSQL persistence, Vite/React frontend, Testcontainers, multi-stage Docker.",
   "language": "java",
-  "framework": "spring-boot",
+  "framework": "spring",
   "runtime_version": "java 21",
 
   "included": [
@@ -18,20 +18,21 @@
   ],
 
   "selection_hints": [
-    "Java backend with JWT authentication",
-    "Spring Boot REST API with PostgreSQL persistence",
-    "Full-stack app with Java backend and React frontend",
-    "Stateful backend service with relational database",
-    "JPA / Hibernate ORM is acceptable",
-    "Containerised deployment via docker-compose"
+    "Java backend",
+    "Spring Boot REST API",
+    "JVM language preference",
+    "JPA or Hibernate ORM",
+    "JWT-secured Spring application",
+    "Maven build for Java"
   ],
 
   "anti_hints": [
-    "Frontend-only (no backend)",
-    "Serverless-first architectures",
-    "Non-JVM language preference (Python, Go, Rust, Node)",
-    "Document database / NoSQL primary store",
-    "Real-time / WebSocket-heavy requirements (template is REST-only)"
+    "Python framework like FastAPI, Django, or Flask",
+    "JavaScript or TypeScript framework like Next.js, React, Vue, Express, Hono",
+    "Frontend-only project (no backend)",
+    "Serverless or Lambda-first architecture",
+    "Document database or NoSQL primary store (MongoDB, DynamoDB)",
+    "Real-time or WebSocket-heavy requirements"
   ],
 
   "verification": {

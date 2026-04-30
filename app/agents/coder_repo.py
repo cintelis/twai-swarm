@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 # Same caps as run_agentic_coder (Sprint 9 numbers).
 MAX_ITERATIONS = 15
 MAX_TOKENS_PER_TURN = 16384
-CODER_MODEL = "claude-opus-4-7"
+# See coder_agentic.CODER_MODEL — same Anthropic-SDK constraint applies here.
+CODER_MODEL = "claude-haiku-4-5"
 
 REPO_CODER_SYSTEM_PROMPT = """You are an agentic Coder working on an EXISTING repository.
 

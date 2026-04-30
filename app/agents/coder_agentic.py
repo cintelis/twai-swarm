@@ -33,7 +33,13 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 15           # hard cap — cheap escape valve
 MAX_TOKENS_PER_TURN = 16384   # per model response; tool-runner sums these up
-CODER_MODEL = "claude-opus-4-7"
+# Hardcoded outside the router because the agentic loop binds tightly to
+# anthropic.AsyncAnthropic.beta.messages.tool_runner + @beta_async_tool —
+# tooling is Anthropic-SDK-typed, so this stays an Anthropic model. Haiku
+# 4.5 chosen for cost ($1/$5 per Mtok vs Opus's $15/$75) — empirically
+# strong enough for template customisation; bump to "claude-sonnet-4-6"
+# or "claude-opus-4-7" if iteration counts spike on harder briefs.
+CODER_MODEL = "claude-haiku-4-5"
 
 CODER_SYSTEM_PROMPT = """You are an agentic Coder. Your job is to produce a runnable starter project that passes `verify.sh` with exit code 0.
 

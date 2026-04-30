@@ -69,10 +69,10 @@ ROLE_DEFAULTS: dict[Role, str] = {
     "architect":  "opus",       # design -- worth the spend
     "se":         "sonnet",     # implementation plans
     "estimator":  "grok",       # reasoning + cost-awareness; Grok's strength
-    "reviewer":   "grok",       # second opinion from different family
+    "reviewer":   "opus",       # high-stakes review; Opus precision over cross-family diversity
     "researcher": "grok-research",  # web_search + x_search (see ROLE_TOOLS in runner.py)
     "documenter": "grok-fast",      # writing up; speed > nuance
-    "coder":      "opus",           # code generation: precision > speed
+    "coder":      "haiku",          # cost-first; agentic Coder bypasses router (see coder_agentic.CODER_MODEL)
 }
 
 # Escalation: complexity_hint=3 bumps one step along this chain.
