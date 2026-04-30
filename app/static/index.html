@@ -634,6 +634,58 @@
       font-weight: 700;
     }
 
+    /* ── Tab toggle (Start workflow card) ─────────────── */
+    .tab-row {
+      display: flex;
+      gap: 4px;
+      background: var(--surface2);
+      padding: 4px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 18px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 8px 12px;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border-radius: calc(var(--radius-sm) - 2px);
+      transition: background .15s, color .15s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active {
+      background: var(--surface);
+      color: var(--text);
+    }
+    .tab-panel[hidden] { display: none; }
+
+    /* ── Selected repo chip (existing-repo tab) ────────── */
+    .selected-repo {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .selected-repo .meta { color: var(--muted2); font-size: 12px; margin-left: 6px; }
+    .selected-repo .change-link {
+      color: var(--iris);
+      font-size: 12px;
+      cursor: pointer;
+      background: none;
+      border: none;
+      padding: 4px 8px;
+    }
+    .selected-repo .change-link:hover { color: var(--iris-strong); }
+
     /* ── Projects list (landing page) ─────────────────────── */
     .projects-grid {
       display: flex;
@@ -942,6 +994,26 @@ const EXAMPLE_BRIEFS = [
   },
 ];
 
+// ─── Example feature briefs (clickable starters for existing-repo work) ─
+const EXAMPLE_FEATURE_BRIEFS = [
+  {
+    label: "Observability bundle",
+    brief: "Add API documentation and a health check.\n\n1. Add springdoc-openapi-starter-webmvc-ui (latest 2.x compatible with Spring Boot 3.4) to pom.xml. Expose /v3/api-docs and /swagger-ui.html publicly (allow them through the SecurityFilterChain alongside /api/auth/login). Annotate AuthController and CalculatorController with @Operation/@ApiResponse where it adds clarity, but do not over-document trivial fields.\n\n2. Add spring-boot-starter-actuator. Expose only the health endpoint at /actuator/health, also publicly. Do not expose env, beans, or other actuator endpoints — that would leak config.\n\nTests: extend AuthIntegrationTest (or add SmokeTest) with a test that GETs /actuator/health and expects 200 with status:UP, and a test that GETs /v3/api-docs and expects 200 with a non-empty paths object. Update README accordingly."
+  },
+  {
+    label: "History endpoint + page",
+    brief: "Surface the calculation history through the API and the UI.\n\n1. Backend: add GET /api/history (JWT-protected) that returns the last 50 CalculationRecord rows ordered by created_at desc. Reuse CalculationRepository; add a method like findTop50ByOrderByCreatedAtDesc. Return [{id, a, b, op, result, createdAt}] JSON.\n\n2. Frontend: add a /history route (HistoryPage.tsx) that uses RTK Query to fetch /api/history and renders a simple table. Add a \"History\" link on the Calculator page that navigates to it, and a \"Back\" link on the History page that returns to /calculator.\n\nTests: backend integration test that performs a calculation, then calls /api/history and asserts the new row appears first; frontend Vitest that mocks the query and asserts the table renders 3 sample rows. Update README to document the new endpoint and route."
+  },
+  {
+    label: "Scientific operations",
+    brief: "Extend the calculator with three scientific operations and surface them in the UI.\n\n1. Backend: add sqrt(a), pow(a, b), log(a, base=10) to the Calculator domain class with proper edge cases (sqrt of negative throws ArithmeticException; log of zero/negative likewise). Extend CalculatorController with /api/calculate now accepting an \"op\" query param including sqrt, pow, log in addition to the existing add/sub/mul/div. Persist these like the existing operations. Reject bad input with 400 + a clear message.\n\n2. Frontend: add three buttons (sqrt, pow, log) on the Calculator page. sqrt and log only need one operand (hide the b input when those are selected); pow uses both. Wire them through the existing RTK Query mutation.\n\nTests: CalculatorTest covers each new op including the error cases; CalculatorControllerTest covers the new query-param routing; one frontend test that clicks the sqrt button and confirms the right payload is sent."
+  },
+  {
+    label: "Per-user history + sign out",
+    brief: "Two small but related improvements: scope the calculation history per user, and add a sign-out button.\n\n1. Backend: CalculationRecord currently has no owner. Add a \"username\" column (nullable=false, default-backfilled to \"testuser\" for any pre-existing rows via a Hibernate update or a one-shot SQL in application.properties via spring.jpa.properties.hibernate.hbm2ddl.import_files). On every persist, fill username from SecurityContextHolder.getContext().getAuthentication().getName(). The /api/history endpoint must filter by current username only — never return another user's rows.\n\n2. Frontend: add a \"Sign out\" button on the Calculator page header. Clicking it dispatches clearToken() (already in authSlice) and navigates to /login. Style it consistently with the Sign in button.\n\nTests: backend integration test that logs in as testuser, posts a calculation, confirms /api/history returns it; logs in as a different user (add a second seeded user \"alice\" / \"AnotherPass123!\" in InMemoryUserStore), and confirms /api/history is empty for them. Frontend test that clicks Sign out and asserts navigation + the token is cleared in the Redux store."
+  },
+];
+
 // ─── Submit view ────────────────────────────────────────
 async function showSubmit() {
   crumb.innerHTML = '';
@@ -979,33 +1051,76 @@ async function showSubmit() {
       <div class="disclosure" style="margin-top: 14px;">The generated code is a starter scaffold meant to accelerate day one — not finished, production-ready software.</div>
     </div>
 
-    <div class="section-label">Start a new project</div>
+    <div class="section-label">Start a new workflow</div>
     <div class="card">
-      <label>Try an example brief</label>
-      <div class="examples-grid" id="examplesGrid"></div>
+      <div class="tab-row" role="tablist">
+        <button class="tab-btn active" data-tab="repo" type="button" role="tab">Work on existing repo</button>
+        <button class="tab-btn" data-tab="new" type="button" role="tab">Generate new scaffold</button>
+      </div>
 
-      <form id="submitForm">
-        <label for="name">Name</label>
-        <input type="text" id="name" required placeholder="my-cli-tool" autocomplete="off" />
+      <!-- Existing-repo tab -->
+      <div class="tab-panel" data-tab-panel="repo">
+        <label>Try a feature brief</label>
+        <div class="examples-grid" id="featureExamplesGrid"></div>
 
-        <label for="brief">Brief</label>
-        <textarea id="brief" required placeholder="Build a CLI tool that summarises git commits using idiomatic Rust..."></textarea>
+        <form id="repoTaskForm">
+          <label>GitHub repo</label>
+          <div id="selectedRepoDisplay" class="selected-repo" hidden>
+            <span><strong id="selectedRepoFullName"></strong><span class="meta" id="selectedRepoMeta"></span></span>
+            <button type="button" class="change-link" id="changeRepoBtn">Change</button>
+          </div>
+          <button type="button" id="repoPickerBtn" class="btn">Pick a repo…</button>
 
-        <div class="checkbox-row">
-          <input type="checkbox" id="auto_approve" />
-          <label for="auto_approve">Skip approval gate (auto-approve after architect)</label>
-        </div>
+          <label for="branch">Branch</label>
+          <input type="text" id="branch" value="main" autocomplete="off" />
 
-        <button type="submit" id="submitBtn" class="btn btn-primary">Start workflow</button>
-      </form>
-      <div id="submitAlert"></div>
+          <label for="repoBrief">Brief</label>
+          <textarea id="repoBrief" required placeholder="Describe the feature(s) to add to this repo. Be specific about endpoints, files to modify, and tests to add."></textarea>
+
+          <button type="submit" id="repoSubmitBtn" class="btn btn-primary" disabled>Start workflow</button>
+        </form>
+        <div id="repoSubmitAlert"></div>
+      </div>
+
+      <!-- New-scaffold tab -->
+      <div class="tab-panel" data-tab-panel="new" hidden>
+        <label>Try an example brief</label>
+        <div class="examples-grid" id="examplesGrid"></div>
+
+        <form id="submitForm">
+          <label for="name">Name</label>
+          <input type="text" id="name" required placeholder="my-cli-tool" autocomplete="off" />
+
+          <label for="brief">Brief</label>
+          <textarea id="brief" required placeholder="Build a CLI tool that summarises git commits using idiomatic Rust..."></textarea>
+
+          <div class="checkbox-row">
+            <input type="checkbox" id="auto_approve" />
+            <label for="auto_approve">Skip approval gate (auto-approve after architect)</label>
+          </div>
+
+          <button type="submit" id="submitBtn" class="btn btn-primary">Start workflow</button>
+        </form>
+        <div id="submitAlert"></div>
+      </div>
     </div>
 
     <div class="section-label">Recent projects</div>
     <div id="projectsListContainer"><div class="card empty">Loading…</div></div>
   `;
 
-  // Example brief buttons
+  // ── Tab switching ────────────────────────────────────────
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabPanels = document.querySelectorAll('.tab-panel');
+  for (const btn of tabBtns) {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      for (const b of tabBtns) b.classList.toggle('active', b === btn);
+      for (const p of tabPanels) p.hidden = p.dataset.tabPanel !== target;
+    });
+  }
+
+  // ── New-scaffold tab: examples + submit ──────────────────
   const examplesGrid = document.getElementById('examplesGrid');
   for (const ex of EXAMPLE_BRIEFS) {
     const btn = document.createElement('button');
@@ -1021,7 +1136,6 @@ async function showSubmit() {
     examplesGrid.appendChild(btn);
   }
 
-  // Submit handler
   document.getElementById('submitForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const alertEl = document.getElementById('submitAlert');
@@ -1036,6 +1150,114 @@ async function showSubmit() {
         auto_approve: document.getElementById('auto_approve').checked,
       };
       const r = await apiFetch('/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const data = await r.json();
+      location.hash = '#/p/' + data.workflow_id;
+    } catch (err) {
+      alertEl.innerHTML = `<div class="alert alert-error">Couldn't start: ${escapeHtml(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Start workflow';
+    }
+  });
+
+  // ── Existing-repo tab: examples + repo picker + submit ──
+  let selectedRepoForTask = null;   // { repo_owner, repo_name, default_branch }
+
+  const featureExamplesGrid = document.getElementById('featureExamplesGrid');
+  for (const ex of EXAMPLE_FEATURE_BRIEFS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'example-btn';
+    btn.innerHTML = `<span class="example-icon">▸</span>${escapeHtml(ex.label)}`;
+    btn.addEventListener('click', () => {
+      document.getElementById('repoBrief').value = ex.brief;
+      document.getElementById('repoSubmitAlert').innerHTML = '';
+      document.getElementById('repoBrief').focus();
+    });
+    featureExamplesGrid.appendChild(btn);
+  }
+
+  function setSelectedRepo(install, selection) {
+    selectedRepoForTask = selection ? {
+      repo_owner: selection.repo_owner,
+      repo_name: selection.repo_name,
+      default_branch: selection.default_branch || 'main',
+    } : null;
+
+    const display = document.getElementById('selectedRepoDisplay');
+    const pickBtn = document.getElementById('repoPickerBtn');
+    const submitBtn = document.getElementById('repoSubmitBtn');
+
+    if (selectedRepoForTask) {
+      document.getElementById('selectedRepoFullName').textContent =
+        `${selectedRepoForTask.repo_owner}/${selectedRepoForTask.repo_name}`;
+      document.getElementById('selectedRepoMeta').textContent =
+        ` · default: ${selectedRepoForTask.default_branch}`;
+      display.hidden = false;
+      pickBtn.hidden = true;
+      // Pre-fill the branch input with the repo's default unless user overrode.
+      const branchEl = document.getElementById('branch');
+      if (!branchEl.dataset.userEdited) branchEl.value = selectedRepoForTask.default_branch;
+      submitBtn.disabled = false;
+    } else {
+      display.hidden = true;
+      pickBtn.hidden = false;
+      submitBtn.disabled = true;
+    }
+  }
+
+  document.getElementById('branch').addEventListener('input', (e) => {
+    e.target.dataset.userEdited = '1';
+  });
+
+  async function handleRepoPick() {
+    const alertEl = document.getElementById('repoSubmitAlert');
+    alertEl.innerHTML = '';
+    const result = await pickGitHubRepo();
+    if (result.ok) {
+      setSelectedRepo(result.install, result.selection);
+      return;
+    }
+    if (result.reason === 'cancelled') return;
+    if (result.reason === 'no_installations') {
+      alertEl.innerHTML =
+        `<div class="alert">No GitHub accounts connected. ` +
+        `<a href="${escapeHtml(result.install_url)}" target="_blank" rel="noopener">Install the swarm GitHub App</a>, then come back and pick a repo.</div>`;
+      return;
+    }
+    if (result.reason === 'app_unconfigured') {
+      alertEl.innerHTML = `<div class="alert alert-error">GitHub App not configured on this server (set GITHUB_APP_ID + private key).</div>`;
+      return;
+    }
+    alertEl.innerHTML = `<div class="alert alert-error">${escapeHtml(result.message || 'Repo picker failed')}</div>`;
+  }
+
+  document.getElementById('repoPickerBtn').addEventListener('click', handleRepoPick);
+  document.getElementById('changeRepoBtn').addEventListener('click', handleRepoPick);
+
+  document.getElementById('repoTaskForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const alertEl = document.getElementById('repoSubmitAlert');
+    const btn = document.getElementById('repoSubmitBtn');
+    alertEl.innerHTML = '';
+    if (!selectedRepoForTask) {
+      alertEl.innerHTML = `<div class="alert alert-error">Pick a repo first.</div>`;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    try {
+      const body = {
+        repo_url: `https://github.com/${selectedRepoForTask.repo_owner}/${selectedRepoForTask.repo_name}`,
+        branch: document.getElementById('branch').value.trim() || 'main',
+        brief: document.getElementById('repoBrief').value,
+        repo_name: selectedRepoForTask.repo_name,
+      };
+      const r = await apiFetch('/repo-tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1378,23 +1600,30 @@ async function downloadScaffold(workflowId, btn) {
 
 /**
  * Modal repo picker. Returns a Promise that resolves to:
- *   { repo_owner, repo_name, create_if_missing, repo_private }
+ *   { repo_owner, repo_name, default_branch, create_if_missing, repo_private }
  * or null if the user cancelled.
+ *
+ * Options:
+ *   allowCreate (default true): show the "create new repo instead" affordance.
+ *     The repo-task entry point hides this — you can't run agents against a
+ *     repo that doesn't exist yet.
+ *   title (default 'Push to GitHub'), confirmLabel (default 'Push').
  */
-function showGitHubRepoPicker({ install, repos, defaultNewName }) {
+function showGitHubRepoPicker({ install, repos, defaultNewName, allowCreate = true, title = 'Push to GitHub', confirmLabel = 'Push' }) {
   return new Promise(resolve => {
     const modal = document.createElement('div');
     modal.className = 'gh-picker';
     modal.innerHTML = `
       <div class="gh-picker-backdrop"></div>
       <div class="gh-picker-panel">
-        <h2>Push to GitHub</h2>
+        <h2>${escapeHtml(title)}</h2>
         <div class="gh-picker-install">
           Installation: <strong>${escapeHtml(install.account_login)}</strong>
           <span class="meta">(${escapeHtml(install.account_type)})</span>
         </div>
         <input type="text" class="gh-picker-filter" placeholder="Filter repos…" autofocus>
         <div class="gh-picker-repos"></div>
+        ${allowCreate ? `
         <div class="gh-picker-divider">or</div>
         <label class="gh-picker-create-toggle">
           <input type="checkbox" class="gh-picker-create-check">
@@ -1404,9 +1633,10 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
           <input type="text" class="gh-picker-create-name" placeholder="new-repo-name">
           <label><input type="checkbox" class="gh-picker-create-private" checked> Private</label>
         </div>
+        ` : ''}
         <div class="gh-picker-actions">
           <button class="btn gh-picker-cancel">Cancel</button>
-          <button class="btn btn-primary gh-picker-confirm" disabled>Push</button>
+          <button class="btn btn-primary gh-picker-confirm" disabled>${escapeHtml(confirmLabel)}</button>
         </div>
       </div>
     `;
@@ -1414,10 +1644,10 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
 
     const reposEl = modal.querySelector('.gh-picker-repos');
     const filterEl = modal.querySelector('.gh-picker-filter');
-    const createCheck = modal.querySelector('.gh-picker-create-check');
-    const createFields = modal.querySelector('.gh-picker-create-fields');
-    const createName = modal.querySelector('.gh-picker-create-name');
-    const createPrivate = modal.querySelector('.gh-picker-create-private');
+    const createCheck = allowCreate ? modal.querySelector('.gh-picker-create-check') : null;
+    const createFields = allowCreate ? modal.querySelector('.gh-picker-create-fields') : null;
+    const createName = allowCreate ? modal.querySelector('.gh-picker-create-name') : null;
+    const createPrivate = allowCreate ? modal.querySelector('.gh-picker-create-private') : null;
     const confirmBtn = modal.querySelector('.gh-picker-confirm');
     const cancelBtn = modal.querySelector('.gh-picker-cancel');
     const backdrop = modal.querySelector('.gh-picker-backdrop');
@@ -1432,7 +1662,7 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
         return;
       }
       reposEl.innerHTML = matching.map(r => `
-        <div class="gh-picker-repo" data-owner="${escapeHtml(r.owner)}" data-name="${escapeHtml(r.name)}">
+        <div class="gh-picker-repo" data-owner="${escapeHtml(r.owner)}" data-name="${escapeHtml(r.name)}" data-default-branch="${escapeHtml(r.default_branch || 'main')}">
           <span>${escapeHtml(r.full_name)}</span>
           <span class="meta">${r.private ? 'private' : 'public'} · default: ${escapeHtml(r.default_branch)}</span>
         </div>
@@ -1441,9 +1671,13 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
         el.addEventListener('click', () => {
           for (const s of reposEl.querySelectorAll('.gh-picker-repo.selected')) s.classList.remove('selected');
           el.classList.add('selected');
-          selectedRepo = { repo_owner: el.dataset.owner, repo_name: el.dataset.name };
+          selectedRepo = {
+            repo_owner: el.dataset.owner,
+            repo_name: el.dataset.name,
+            default_branch: el.dataset.defaultBranch,
+          };
           // Selecting a repo cancels the "create new" mode.
-          if (createCheck.checked) {
+          if (createCheck && createCheck.checked) {
             createCheck.checked = false;
             createFields.style.display = 'none';
           }
@@ -1455,24 +1689,26 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
     renderRepos('');
     filterEl.addEventListener('input', e => renderRepos(e.target.value));
 
-    createCheck.addEventListener('change', () => {
-      if (createCheck.checked) {
-        createFields.style.display = 'flex';
-        // Clear repo selection when switching to create mode.
-        for (const s of reposEl.querySelectorAll('.gh-picker-repo.selected')) s.classList.remove('selected');
-        selectedRepo = null;
-        createName.value = createName.value || defaultNewName;
-        createName.focus();
-        confirmBtn.disabled = !createName.value.trim();
-      } else {
-        createFields.style.display = 'none';
-        confirmBtn.disabled = true;
-      }
-    });
+    if (allowCreate) {
+      createCheck.addEventListener('change', () => {
+        if (createCheck.checked) {
+          createFields.style.display = 'flex';
+          // Clear repo selection when switching to create mode.
+          for (const s of reposEl.querySelectorAll('.gh-picker-repo.selected')) s.classList.remove('selected');
+          selectedRepo = null;
+          createName.value = createName.value || defaultNewName;
+          createName.focus();
+          confirmBtn.disabled = !createName.value.trim();
+        } else {
+          createFields.style.display = 'none';
+          confirmBtn.disabled = true;
+        }
+      });
 
-    createName.addEventListener('input', () => {
-      if (createCheck.checked) confirmBtn.disabled = !createName.value.trim();
-    });
+      createName.addEventListener('input', () => {
+        if (createCheck.checked) confirmBtn.disabled = !createName.value.trim();
+      });
+    }
 
     function close(result) {
       document.body.removeChild(modal);
@@ -1487,7 +1723,7 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
     cancelBtn.addEventListener('click', () => close(null));
     backdrop.addEventListener('click', () => close(null));
     confirmBtn.addEventListener('click', () => {
-      if (createCheck.checked) {
+      if (createCheck && createCheck.checked) {
         const name = createName.value.trim();
         if (!name) return;
         close({
@@ -1500,12 +1736,74 @@ function showGitHubRepoPicker({ install, repos, defaultNewName }) {
         close({
           repo_owner: selectedRepo.repo_owner,
           repo_name: selectedRepo.repo_name,
+          default_branch: selectedRepo.default_branch,
           create_if_missing: false,
           repo_private: true,   // ignored when pushing to existing repo
         });
       }
     });
   });
+}
+
+
+/**
+ * Drive the picker for the "Work on existing repo" entry point. Returns
+ *   { ok: true, install, selection }       on selection
+ *   { ok: false, reason: 'cancelled' }     on user cancel
+ *   { ok: false, reason: 'no_installations', install_url }  if no GH App connected
+ *   { ok: false, reason: 'app_unconfigured' }                if server has no App configured
+ *   { ok: false, reason: 'error', message }
+ *
+ * No `create_if_missing` path here — the agentic Coder needs an existing
+ * repo to clone. Use the post-completion push-to-GitHub dialog if you want
+ * a fresh repo for a generated scaffold.
+ */
+async function pickGitHubRepo() {
+  try {
+    const r = await apiFetch('/github/installations');
+    if (!r.ok) return { ok: false, reason: 'error', message: `installations HTTP ${r.status}` };
+    const { installations } = await r.json();
+
+    if (!installations || installations.length === 0) {
+      const u = await apiFetch('/github/install-url');
+      if (!u.ok) return { ok: false, reason: 'app_unconfigured' };
+      const { install_url } = await u.json();
+      return { ok: false, reason: 'no_installations', install_url };
+    }
+
+    let installationId;
+    if (installations.length === 1) {
+      installationId = installations[0].installation_id;
+    } else {
+      const choices = installations.map((i, idx) => `${idx + 1}) ${i.account_login} (${i.account_type})`).join('\n');
+      const pick = prompt(`Pick a GitHub installation:\n${choices}\n\nEnter number:`, '1');
+      if (!pick) return { ok: false, reason: 'cancelled' };
+      const idx = parseInt(pick, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= installations.length) return { ok: false, reason: 'cancelled' };
+      installationId = installations[idx].installation_id;
+    }
+
+    const reposResp = await apiFetch(`/github/installations/${installationId}/repos`);
+    if (!reposResp.ok) {
+      const text = await reposResp.text();
+      return { ok: false, reason: 'error', message: `repos HTTP ${reposResp.status}: ${text.slice(0, 200)}` };
+    }
+    const { repos } = await reposResp.json();
+    const install = installations.find(i => i.installation_id === installationId);
+
+    const selection = await showGitHubRepoPicker({
+      install,
+      repos,
+      defaultNewName: '',
+      allowCreate: false,
+      title: 'Pick a GitHub repo',
+      confirmLabel: 'Select',
+    });
+    if (!selection) return { ok: false, reason: 'cancelled' };
+    return { ok: true, install, selection };
+  } catch (err) {
+    return { ok: false, reason: 'error', message: err.message };
+  }
 }
 
 
