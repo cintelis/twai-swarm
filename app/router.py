@@ -36,9 +36,12 @@ MODELS: dict[str, ModelSpec] = {
     # xAI -- grok-4.20 is their current flagship (2M context, reasoning + tools).
     # Using the base alias so we auto-track stable releases; pin to
     # "grok-4.20-<date>" (e.g. grok-4.20-0309-non-reasoning) for reproducibility.
-    # Naming convention is all-dashes: grok-4-1-fast (NOT grok-4.1-fast).
     "grok":          ModelSpec("xai", "grok-4.20",           "flagship", 2.00, 6.00),
-    "grok-fast":     ModelSpec("xai", "grok-4-1-fast",       "fast",     0.20, 0.50),
+    # grok-code-fast-1 is on the standard API. grok-4-1-fast is Enterprise-API-
+    # only per release-notes Nov 2025 — it returns empty completions on
+    # standard accounts (smoke saw "172 -> 0 tok"). Pricing below is a
+    # placeholder until confirmed against the live language-models endpoint.
+    "grok-fast":     ModelSpec("xai", "grok-code-fast-1",    "fast",     0.20, 0.50),
     # Reasoning variant required for server-side tools (web_search, x_search)
     # via the Responses API. Same per-token pricing as the flagship; the
     # extra cost is tool invocations ($5 / 1k calls).
