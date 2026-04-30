@@ -135,14 +135,17 @@ async def run_agentic_repo_coder(
     user_message = _build_user_message(brief, repo_name)
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
-    runner = client.beta.messages.tool_runner(
+    runner_kwargs: dict = dict(
         model=CODER_MODEL,
         max_tokens=MAX_TOKENS_PER_TURN,
         system=REPO_CODER_SYSTEM_PROMPT,
         tools=tools,
         messages=[{"role": "user", "content": user_message}],
-        thinking={"type": "adaptive"},
     )
+    # See coder_agentic for the rationale — adaptive thinking is Opus-only.
+    if CODER_MODEL.startswith("claude-opus-"):
+        runner_kwargs["thinking"] = {"type": "adaptive"}
+    runner = client.beta.messages.tool_runner(**runner_kwargs)
 
     iterations = 0
     total_input_tokens = 0

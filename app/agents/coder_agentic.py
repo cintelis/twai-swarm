@@ -167,15 +167,20 @@ async def run_agentic_coder(
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
 
-    runner = client.beta.messages.tool_runner(
+    runner_kwargs: dict = dict(
         model=CODER_MODEL,
         max_tokens=MAX_TOKENS_PER_TURN,
         system=CODER_SYSTEM_PROMPT,
         tools=tools,
         messages=[{"role": "user", "content": user_message}],
-        # Adaptive thinking per Opus 4.7 guidance — it's the only on-mode.
-        thinking={"type": "adaptive"},
     )
+    # Adaptive thinking is currently an Opus-4.x-only feature; Haiku/Sonnet
+    # 400 with "adaptive thinking is not supported on this model" if it's
+    # set. If we move Coder back to Opus, this auto-re-enables.
+    if CODER_MODEL.startswith("claude-opus-"):
+        runner_kwargs["thinking"] = {"type": "adaptive"}
+
+    runner = client.beta.messages.tool_runner(**runner_kwargs)
 
     iterations = 0
     total_input_tokens = 0
