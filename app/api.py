@@ -369,11 +369,53 @@ async def project_costs(workflow_id: str):
         """,
         row["id"],
     )
-    total = sum(float(r["cost_usd"] or 0) for r in rows)
+    breakdown = [dict(r) for r in rows]
+
+    # Repo-task workflows don't write `tasks` rows — there's no BA/Architect/SE
+    # split, just a single Coder activity. Synthesize a one-row breakdown from
+    # the workflow's RepoTaskOutput so the UI's cost-summary card has the same
+    # shape as a greenfield project. Skipped silently if the workflow isn't
+    # finished yet, the result isn't readable, or there's already a real
+    # breakdown (future-proof for if we start writing task rows here too).
+    if not breakdown and workflow_id.startswith("repo-task-"):
+        try:
+            from app.agents.coder_repo import CODER_MODEL
+            client = await temporal()
+            handle = client.get_workflow_handle(workflow_id)
+            desc = await handle.describe()
+            if desc.status.name == "COMPLETED":
+                result = await asyncio.wait_for(handle.result(), timeout=5.0)
+                # `handle.result()` returns dict (untyped handle) — same trap
+                # as get_project. Read defensively.
+                def _g(obj, key, default=None):
+                    if isinstance(obj, dict):
+                        val = obj.get(key, default)
+                    else:
+                        val = getattr(obj, key, default)
+                    return default if val is None else val
+                tokens_in = int(_g(result, "tokens_in", 0))
+                tokens_out = int(_g(result, "tokens_out", 0))
+                cost_usd = float(_g(result, "cost_usd", 0.0))
+                # Provider/model aren't on RepoTaskOutput — Coder model is
+                # hardcoded in coder_repo. If that ever becomes router-driven,
+                # add the fields to RepoTaskOutput and read them here.
+                breakdown = [{
+                    "role": "coder",
+                    "provider": "anthropic",
+                    "model_used": CODER_MODEL,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "cost_usd": cost_usd,
+                    "calls": 1,
+                }]
+        except Exception:
+            pass
+
+    total = sum(float(r["cost_usd"] or 0) for r in breakdown)
     return {
         "workflow_id": workflow_id,
         "total_usd": round(total, 4),
-        "breakdown": [dict(r) for r in rows],
+        "breakdown": breakdown,
     }
 
 def _salvage_files_from_truncated(raw_text: str) -> list[dict]:
