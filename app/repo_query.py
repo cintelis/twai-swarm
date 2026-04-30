@@ -1060,3 +1060,139 @@ def find_mcp_resources(
                 line_start=int(row["line_start"] or 0),
             ))
         return out
+
+
+# ─── Sprint 15b — ORM extraction surface (tables, table accessors) ──────────
+
+@dataclass(frozen=True)
+class TableHit:
+    """One row from `find_tables`."""
+    name: str
+    model_qn: str
+    dialect: str
+    schema: str
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class TableAccessHit:
+    """One row from `find_table_accessors` / `find_table_writers`."""
+    function_qn: str
+    table_name: str
+    op_kind: str
+    line: int
+    file_path: str
+
+
+def find_tables(
+    driver: Driver,
+    repo: str,
+    name_filter: Optional[str] = None,
+    dialect: Optional[str] = None,
+    limit: int = 200,
+) -> list[TableHit]:
+    """List ORM-declared tables in `repo`. `name_filter` is a
+    case-insensitive substring on the database table name. `dialect`
+    pins to one of `'sqlalchemy_declarative'`, `'sqlalchemy_typed'`,
+    `'sqlalchemy_classical'`, `'django'`.
+
+    Sprint 15b — the Coder uses this to answer "which tables does this
+    repo declare?" without grepping for `__tablename__` or
+    `class Meta`.
+    """
+    where = "t.repo = $repo"
+    params: dict[str, object] = {"repo": repo, "limit": int(limit)}
+    if name_filter:
+        where += " AND toLower(t.name) CONTAINS toLower($q)"
+        params["q"] = name_filter
+    if dialect:
+        where += " AND t.dialect = $dialect"
+        params["dialect"] = dialect
+    cypher = f"""
+        MATCH (t:Table)
+        WHERE {where}
+        RETURN t.name AS name, coalesce(t.model_qn, '') AS model_qn,
+               t.dialect AS dialect, coalesce(t.schema, '') AS schema,
+               t.file_path AS file_path, t.line_start AS line_start
+        ORDER BY t.name
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(cypher, params)
+        out: list[TableHit] = []
+        for row in result.data():
+            out.append(TableHit(
+                name=row["name"],
+                model_qn=row["model_qn"] or "",
+                dialect=row["dialect"] or "",
+                schema=row["schema"] or "",
+                file_path=row["file_path"] or "",
+                line_start=int(row["line_start"] or 0),
+            ))
+        return out
+
+
+def find_table_accessors(
+    driver: Driver,
+    repo: str,
+    table_name: str,
+    op_kind: Optional[str] = None,
+    limit: int = 200,
+) -> list[TableAccessHit]:
+    """Functions that access `table_name` via ORM operations. `op_kind`
+    pins to `'read'` or `'write'` (None returns both, separately
+    labelled).
+
+    Sprint 15b.2 — the Coder uses this for impact analysis: "which
+    code reads / writes the `users` table?".
+    """
+    where_parts = ["t.repo = $repo", "t.name = $table_name"]
+    params: dict[str, object] = {
+        "repo": repo,
+        "table_name": table_name,
+        "limit": int(limit),
+    }
+    if op_kind == "read":
+        rel_pattern = "[r:READS]"
+    elif op_kind == "write":
+        rel_pattern = "[r:WRITES]"
+    else:
+        rel_pattern = "[r:READS|WRITES]"
+    cypher = f"""
+        MATCH (fn:Function)-{rel_pattern}->(t:Table)
+        WHERE {' AND '.join(where_parts)}
+        RETURN fn.qualified_name AS function_qn,
+               t.name AS table_name,
+               type(r) AS op_kind,
+               r.line AS line,
+               fn.file_path AS file_path
+        ORDER BY fn.qualified_name, r.line
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        result = session.run(cypher, params)
+        out: list[TableAccessHit] = []
+        for row in result.data():
+            op_label = (row["op_kind"] or "").lower()
+            # Map READS -> read, WRITES -> write for caller ergonomics.
+            if op_label == "reads":
+                op_label = "read"
+            elif op_label == "writes":
+                op_label = "write"
+            out.append(TableAccessHit(
+                function_qn=row["function_qn"],
+                table_name=row["table_name"],
+                op_kind=op_label,
+                line=int(row["line"] or 0),
+                file_path=row["file_path"] or "",
+            ))
+        return out
+
+
+def find_table_writers(
+    driver: Driver, repo: str, table_name: str, limit: int = 200,
+) -> list[TableAccessHit]:
+    """Convenience wrapper around `find_table_accessors` filtered to
+    writes only — the canonical "what mutates this table?" question."""
+    return find_table_accessors(driver, repo, table_name, op_kind="write", limit=limit)

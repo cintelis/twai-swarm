@@ -382,6 +382,8 @@ def test_batch_counts():
         # Sprint 15c — MCP tool / resource registrations.
         "mcp_tools",
         "mcp_resources",
+        # Sprint 15b — ORM declarations and access edges.
+        "tables", "columns", "table_accesses", "orm_call_hints",
     }
 
 

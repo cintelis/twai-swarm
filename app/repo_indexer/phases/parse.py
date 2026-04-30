@@ -45,13 +45,20 @@ _PY_PARSER = None
 _TS_PARSERS: dict | None = None
 
 
+_CPP_PARSER = None
+
+
 def _pool_init() -> None:
     """Worker-process initializer. Builds a Python parser + a TS/TSX parser
-    dict and stashes them in module globals. Runs once per worker, not once
-    per task — that's the point of using `initializer` instead of building
-    parsers inside `_pool_extract`.
+    dict + a C++ parser and stashes them in module globals. Runs once per
+    worker, not once per task — that's the point of using `initializer`
+    instead of building parsers inside `_pool_extract`.
+
+    The cpp parser import is best-effort: if tree-sitter-cpp isn't
+    installed, we log nothing here (parsers run lazily on first use)
+    and the cpp branch in `_pool_extract` skips with an error.
     """
-    global _PY_PARSER, _TS_PARSERS
+    global _PY_PARSER, _TS_PARSERS, _CPP_PARSER
     import tree_sitter_python as tspython
     import tree_sitter_typescript as tsts
     from tree_sitter import Language, Parser
@@ -61,12 +68,17 @@ def _pool_init() -> None:
         "typescript": Parser(Language(tsts.language_typescript())),
         "tsx":        Parser(Language(tsts.language_tsx())),
     }
+    try:
+        import tree_sitter_cpp as tscpp
+        _CPP_PARSER = Parser(Language(tscpp.language()))
+    except Exception:  # noqa: BLE001
+        _CPP_PARSER = None
 
 
 def _pool_extract(args: tuple) -> tuple:
     """Worker-side per-file extraction. Args:
         (rel_path, source, language, sha, repo, repo_files, package_roots,
-         extract_routes, extract_mcp_tools)
+         extract_routes, extract_mcp_tools, extract_orm)
 
     Returns `(rel_path, fragment_or_None, error_str_or_None)`. Catches all
     exceptions so one weird file never crashes the pool. The `args` tuple
@@ -74,7 +86,7 @@ def _pool_extract(args: tuple) -> tuple:
     globals populated by `_pool_init`.
     """
     (rel_path, source, language, sha, repo, repo_files, package_roots,
-     extract_routes, extract_mcp_tools) = args
+     extract_routes, extract_mcp_tools, extract_orm) = args
     try:
         # Lazy-import inside the worker — keeps the parent process from
         # paying the import cost when sequential mode is used.
@@ -85,6 +97,7 @@ def _pool_extract(args: tuple) -> tuple:
                 package_roots=package_roots,
                 extract_routes=extract_routes,
                 extract_mcp_tools=extract_mcp_tools,
+                extract_orm=extract_orm,
             )
         elif language in ("typescript", "javascript"):
             from ..extractor_typescript import extract_typescript_file
@@ -95,6 +108,14 @@ def _pool_extract(args: tuple) -> tuple:
                 repo, rel_path, source, sha, parser,
                 repo_files=repo_files, language=language,
                 extract_routes=extract_routes,
+            )
+        elif language == "cpp":
+            if _CPP_PARSER is None:
+                return (rel_path, None, "tree_sitter_cpp not installed in worker")
+            from ..extractor_cpp import extract_cpp_file
+            fragment = extract_cpp_file(
+                repo, rel_path, source, sha, _CPP_PARSER,
+                repo_files=repo_files,
             )
         else:
             return (rel_path, None, None)
@@ -151,6 +172,7 @@ class ParsePhase:
                             package_roots=ctx.package_roots,
                             extract_routes=ctx.extract_routes,
                             extract_mcp_tools=ctx.extract_mcp_tools,
+                            extract_orm=ctx.extract_orm,
                         )
                     elif language in ("typescript", "javascript"):
                         # TSX files need the TSX grammar; .ts/.js use the regular TS grammar.
@@ -160,6 +182,15 @@ class ParsePhase:
                             ctx.repo, rel_path, source, sha, parser,
                             repo_files=ctx.repo_files, language=language,
                             extract_routes=ctx.extract_routes,
+                        )
+                    elif language == "cpp":
+                        if ctx.cpp_parser is None:
+                            logger.warning("cpp parser unavailable; skipping %s", rel_path)
+                            continue
+                        from ..extractor_cpp import extract_cpp_file
+                        fragment = extract_cpp_file(
+                            ctx.repo, rel_path, source, sha, ctx.cpp_parser,
+                            repo_files=ctx.repo_files,
                         )
                     else:
                         continue
@@ -186,7 +217,8 @@ class ParsePhase:
             # imap_unordered consumes lazily (with internal buffering).
             args_iter = (
                 (rel_path, source, language, sha, ctx.repo, ctx.repo_files,
-                 ctx.package_roots, ctx.extract_routes, ctx.extract_mcp_tools)
+                 ctx.package_roots, ctx.extract_routes, ctx.extract_mcp_tools,
+                 ctx.extract_orm)
                 for (rel_path, source, language, sha) in _work_items()
             )
 

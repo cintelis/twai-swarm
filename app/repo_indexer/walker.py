@@ -29,7 +29,10 @@ SKIP_DIRS = frozenset({
     "egg-info",
 })
 
-# Extension → language mapping. Sprint 10d added the TS family.
+# Extension → language mapping. Sprint 10d added the TS family;
+# Sprint 16a added C++. `.h` and `.hpp`/`.hxx`/`.hh` route to cpp
+# universally — pure-C projects pay a tiny cost (cpp is a strict
+# superset for declarations) and we don't want per-file detection.
 EXT_LANGUAGE: dict[str, Language] = {
     ".py":  "python",
     ".ts":  "typescript",
@@ -38,6 +41,14 @@ EXT_LANGUAGE: dict[str, Language] = {
                             # to .ts — extractor picks the right parser.
     ".js":  "javascript",
     ".jsx": "javascript",
+    ".cpp": "cpp",
+    ".cc":  "cpp",
+    ".cxx": "cpp",
+    ".c":   "cpp",          # treat C as cpp — strict superset for decls
+    ".h":   "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".hh":  "cpp",
 }
 
 

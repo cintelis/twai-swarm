@@ -30,6 +30,11 @@ class PhaseContext:
     repo_files: set[str] = field(default_factory=set)
     py_parser: Any = None
     ts_parsers: dict | None = None
+    # Sprint 16a — tree-sitter-cpp parser. None means cpp scanning is
+    # disabled (e.g. tests that don't have tree-sitter-cpp installed
+    # OR runs whose languages tuple doesn't include "cpp"). The parse
+    # phase guards on this before dispatching to extract_cpp_file.
+    cpp_parser: Any = None
     progress: Callable[[str], None] = print
     # Sprint 11b: SHA short-circuit. `driver` is a Neo4j Driver (typed Any
     # so the runner doesn't drag neo4j into the import path); `prior_shas`
@@ -68,6 +73,7 @@ class PhaseContext:
     # walkers (15b) only fire when explicitly requested.
     extract_routes: bool = False
     extract_mcp_tools: bool = False
+    extract_orm: bool = False
 
 
 class Phase(Protocol):

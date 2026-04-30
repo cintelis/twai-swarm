@@ -698,6 +698,27 @@ def finalize_batch(batch: IndexBatch) -> None:
     batch.calls.clear()
     batch.calls.extend(new_calls)
 
+    # Sprint 15b.2 — ORM call-site classification. Joins extractor-side
+    # OrmCallHint records against the rewritten CallEdges, resolves
+    # access targets via the closures above, and emits TableAccessEdge
+    # records (READS/WRITES). No-op when --with-orm wasn't set (no
+    # hints, no tables).
+    if batch.orm_call_hints and batch.tables:
+        from .orm_classifier import classify_orm_calls
+        classify_orm_calls(
+            batch,
+            qn_index=qn_index,
+            parent_relation=parent_relation,
+            local_var_index=local_var_index,
+            scope_tree=scope_tree,
+            func_scope_id=func_scope_id,
+            func_file_path=func_file_path,
+            caller_class_qn=caller_class_qn,
+            class_scope_id=class_scope_id,
+            resolve_type_name=_resolve_type_name,
+            resolve_type_chain=_resolve_type_chain,
+        )
+
     # Materialise Symbol nodes (deduped against any pre-existing Symbols).
     existing = {s.qualified_name for s in batch.symbols}
     for qn in needs_symbol:

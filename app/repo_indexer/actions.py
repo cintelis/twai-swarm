@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-Language = Literal["python", "typescript", "javascript"]
+Language = Literal["python", "typescript", "javascript", "cpp"]
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,15 @@ class FunctionNode:
     # the resolver uses to chain `g = builder.compile(); g.invoke()`.
     return_type_raw: str = ""
     docstring: str = ""
+    # Sprint 16a — C++ method modifiers. `is_const=True` for `void
+    # foo() const;` (member function with trailing const). The qn gets
+    # a `:const` suffix when set so MERGE-on-qn doesn't collapse a
+    # const + non-const overload into one node. `is_virtual=True` for
+    # virtual / pure-virtual / `override` / `final` methods (the latter
+    # two imply virtual without the keyword). Both default to False
+    # for Python and TS extractors — they ignore these fields entirely.
+    is_const: bool = False
+    is_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -307,6 +316,123 @@ class MCPResourceNode:
     line_start: int
 
 
+@dataclass(frozen=True)
+class TableNode:
+    """Sprint 15b — ORM-declared table.
+
+    Emitted by the ORM domain extractor when it recognises an ORM
+    declaration:
+        SQLAlchemy declarative: `class User(Base): __tablename__ = "users"`
+        SQLAlchemy 2.0 typed:   `class User(Base): __tablename__ = "users"; id: Mapped[int]`
+        SQLAlchemy classical:   `users = Table("users", metadata, ...)`
+        Django:                  `class User(models.Model): ...`
+        Drizzle (TS):           `export const users = pgTable("users", ...)`
+
+    `name` is the actual database table name (from `__tablename__`,
+    `db_table`, or `pgTable` literal arg). `model_qn` is the qn of the
+    Python/TS class that declares it — links the abstract table to its
+    in-source model.
+
+    `dialect` distinguishes detection sources for queries like
+    "show only Django models" or "show only SQLAlchemy 2.0 typed".
+
+    Multi-tenant from day one (`tenant_id`).
+    """
+    repo: str
+    tenant_id: str
+    name: str               # db table name, e.g. "users"
+    model_qn: str           # qn of the declaring class (or empty for classical Table())
+    dialect: str            # 'sqlalchemy_declarative' | 'sqlalchemy_typed' | 'sqlalchemy_classical' | 'django' | 'drizzle' | 'prisma'
+    schema: str             # SQL schema name, e.g. "public"; "" if default
+    file_path: str
+    line_start: int
+
+
+@dataclass(frozen=True)
+class ColumnNode:
+    """Sprint 15b — ORM column declaration.
+
+    Owned by a TableNode via the (repo, table_name) composite. The
+    column-uniqueness key is (repo, table_name, name) so the loader's
+    HAS_COLUMN edge stays well-typed.
+
+    `type_raw` is the as-written type expression (`"Integer"`,
+    `"VARCHAR(255)"`, `"int"` for SQLAlchemy 2.0 `Mapped[int]`,
+    `"models.CharField"` for Django). No normalization.
+
+    `primary_key` / `nullable` / `indexed` are best-effort from kwargs
+    on the column declaration; default False / True / False.
+    `foreign_key_table` is populated from `ForeignKey("orders.id")`
+    literal arg parsing — split on `.`, take the table portion.
+    """
+    repo: str
+    tenant_id: str
+    table_name: str
+    name: str
+    type_raw: str
+    primary_key: bool = False
+    nullable: bool = True
+    indexed: bool = False
+    foreign_key_table: str = ""
+    file_path: str = ""
+    line_start: int = 0
+
+
+@dataclass(frozen=True)
+class OrmCallHint:
+    """Sprint 15b.2 — extractor-side capture for ORM call sites.
+
+    The CallEdge schema doesn't keep argument-AST around, so when the
+    extractor sees an ORM-shaped method call it captures the relevant
+    first-argument identifier here. The finalize-time classifier joins
+    these against the rewritten CallEdges by (caller_qn, line, leaf)
+    and resolves the identifier to a class qn — which then maps to a
+    TableNode via 15b.1's class_qn → TableNode index.
+
+    `leaf` is the leaf method name (`query`, `add`, `execute`,
+    `filter`, `create`, `save`, etc.). `arg_head` is the FIRST positional
+    argument's flattened head identifier (e.g. for `session.query(User)`,
+    arg_head="User"; for `session.add(u)`, arg_head="u"; for
+    `session.execute(select(User))`, arg_head="select" and
+    `inner_call_arg_head="User"`). Empty strings when not applicable.
+
+    Multi-tenant from day one (`tenant_id`).
+    """
+    repo: str
+    tenant_id: str
+    caller_qn: str          # FunctionNode qn that contains this call
+    leaf: str               # leaf method name from the call's callee chain
+    arg_head: str           # first positional arg's flattened head identifier ("" if none)
+    inner_call_fn: str      # for execute(select(X)): "select"; "" otherwise
+    inner_call_arg_head: str  # for execute(select(X)): "X"; "" otherwise
+    line: int               # 1-based line of the call
+
+
+@dataclass(frozen=True)
+class TableAccessEdge:
+    """Sprint 15b.2 — function-to-table READS or WRITES edge.
+
+    Emitted by the finalize-phase ORM call-site classifier when it
+    recognises an ORM method call (`session.query(User)`,
+    `User.objects.create(...)`, `instance.save()`, etc.) and can
+    resolve the target table.
+
+    `op_kind` is "read" or "write". `Function.qualified_name = function_qn`
+    must already exist in the graph (the resolver populates this for
+    in-repo functions; cross-package call sites where the caller
+    isn't indexed produce no edge).
+
+    Multiple edges per function are allowed — same-function reads
+    and writes against the same table both emit independently.
+    """
+    repo: str
+    tenant_id: str
+    function_qn: str
+    table_name: str
+    op_kind: str            # "read" | "write"
+    line: int
+
+
 @dataclass
 class IndexBatch:
     """Mutable accumulator the extractor populates per file.
@@ -354,6 +480,17 @@ class IndexBatch:
     # `--with-mcp-tools` is on. Empty in default scans.
     mcp_tools: list[MCPToolNode] = field(default_factory=list)
     mcp_resources: list[MCPResourceNode] = field(default_factory=list)
+    # Sprint 15b — ORM declarations and access edges. Populated when
+    # `--with-orm` is on. tables + columns from declaration extraction
+    # (15b.1); table_accesses from call-site classification (15b.2).
+    tables: list[TableNode] = field(default_factory=list)
+    columns: list[ColumnNode] = field(default_factory=list)
+    table_accesses: list[TableAccessEdge] = field(default_factory=list)
+    # Sprint 15b.2 — extractor-side ORM call-site hints. Captured during
+    # `_walk_calls` when the leaf method name is in a known SA / Django
+    # set; the finalize-time classifier joins these by (caller_qn, line,
+    # leaf) to resolve the access target. Not persisted to Neo4j.
+    orm_call_hints: list[OrmCallHint] = field(default_factory=list)
 
     def extend(self, other: IndexBatch) -> None:
         """Merge `other` into self. Repos must match."""
@@ -377,6 +514,10 @@ class IndexBatch:
         self.route_edges.extend(other.route_edges)
         self.mcp_tools.extend(other.mcp_tools)
         self.mcp_resources.extend(other.mcp_resources)
+        self.tables.extend(other.tables)
+        self.columns.extend(other.columns)
+        self.table_accesses.extend(other.table_accesses)
+        self.orm_call_hints.extend(other.orm_call_hints)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -398,4 +539,8 @@ class IndexBatch:
             "route_edges": len(self.route_edges),
             "mcp_tools": len(self.mcp_tools),
             "mcp_resources": len(self.mcp_resources),
+            "tables": len(self.tables),
+            "columns": len(self.columns),
+            "table_accesses": len(self.table_accesses),
+            "orm_call_hints": len(self.orm_call_hints),
         }

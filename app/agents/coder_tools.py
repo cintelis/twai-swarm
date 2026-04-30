@@ -599,12 +599,113 @@ def build_tools(
                 for r in results
             ])
 
+        @beta_async_tool
+        async def repo_find_tables(
+            name_filter: str = "", dialect: str = "", limit: int = 200,
+        ) -> str:
+            """List ORM-declared tables in this repo. Available when
+            the repo was scanned with `--with-orm`.
+
+            Recognises SQLAlchemy declarative + 2.0 typed + classical
+            `Table(...)` and Django `models.Model` subclasses.
+
+            Args:
+                name_filter: Case-insensitive substring on the database
+                    table name. Empty disables.
+                dialect: Pin to one of `sqlalchemy_declarative` |
+                    `sqlalchemy_typed` | `sqlalchemy_classical` | `django`.
+                    Empty disables.
+                limit: Max rows (default 200).
+
+            Returns JSON: [{name, model_qn, dialect, schema, file_path,
+            line_start}, ...].
+            """
+            stats["repo_find_tables_calls"] = stats.get("repo_find_tables_calls", 0) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_tables,
+                neo4j_driver, repo_name,
+                name_filter or None, dialect or None, int(limit),
+            )
+            return json.dumps([
+                {
+                    "name": t.name, "model_qn": t.model_qn,
+                    "dialect": t.dialect, "schema": t.schema,
+                    "file_path": t.file_path, "line_start": t.line_start,
+                }
+                for t in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_table_accessors(
+            table_name: str, op_kind: str = "", limit: int = 200,
+        ) -> str:
+            """Functions that access `table_name` via ORM operations.
+
+            Sprint 15b.2 — the access edges come from the finalize-time
+            ORM call-site classifier (SQLAlchemy `session.query(...)` /
+            `session.add(...)` / Django `Model.objects.filter(...)` /
+            `instance.save()`, etc.).
+
+            Args:
+                table_name: Database table name (e.g. `users`).
+                op_kind: `"read"` or `"write"` (empty returns both).
+                limit: Max rows (default 200).
+
+            Returns JSON: [{function_qn, table_name, op_kind, line,
+            file_path}, ...].
+            """
+            stats["repo_find_table_accessors_calls"] = stats.get(
+                "repo_find_table_accessors_calls", 0,
+            ) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_table_accessors,
+                neo4j_driver, repo_name, table_name,
+                op_kind or None, int(limit),
+            )
+            return json.dumps([
+                {
+                    "function_qn": h.function_qn,
+                    "table_name": h.table_name,
+                    "op_kind": h.op_kind,
+                    "line": h.line,
+                    "file_path": h.file_path,
+                }
+                for h in results
+            ])
+
+        @beta_async_tool
+        async def repo_find_table_writers(
+            table_name: str, limit: int = 200,
+        ) -> str:
+            """Convenience wrapper around `repo_find_table_accessors`
+            filtered to writes only — answers "what mutates this
+            table?".
+            """
+            stats["repo_find_table_writers_calls"] = stats.get(
+                "repo_find_table_writers_calls", 0,
+            ) + 1
+            results = await asyncio.to_thread(
+                repo_query.find_table_writers,
+                neo4j_driver, repo_name, table_name, int(limit),
+            )
+            return json.dumps([
+                {
+                    "function_qn": h.function_qn,
+                    "table_name": h.table_name,
+                    "op_kind": h.op_kind,
+                    "line": h.line,
+                    "file_path": h.file_path,
+                }
+                for h in results
+            ])
+
         tools.extend([
             repo_search, repo_find_definition, repo_find_callers,
             repo_find_processes, repo_find_modules, repo_semantic_search,
             repo_find_routes, repo_find_route_handler,
             repo_find_routes_by_handler,
             repo_find_mcp_tools, repo_find_mcp_resources,
+            repo_find_tables, repo_find_table_accessors, repo_find_table_writers,
         ])
 
     return tools, stats

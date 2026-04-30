@@ -33,6 +33,7 @@ from .actions import (
     InheritsEdge,
     LocalVarBinding,
     ModuleNode,
+    OrmCallHint,
     RepoNode,
 )
 
@@ -116,14 +117,30 @@ def _function_params(source: bytes, params_node: Any) -> tuple[tuple[str, ...], 
     return tuple(names), tuple(types)
 
 
-def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
-    """Return [(callee_dotted_name, line)] for every call expression in body.
+def _walk_calls(
+    source: bytes,
+    body_node: Any,
+    capture_orm_hints: bool = False,
+) -> tuple[list[tuple[str, int]], list[tuple[str, str, str, str, int]]]:
+    """Return ([(callee_dotted_name, line)], [orm_hints]) for every call.
 
     Best-effort: handles `foo()`, `obj.method()`, `pkg.mod.func()`. Skips
     calls where the function expression isn't a name/attribute (e.g.
     `(lambda: 1)()` — those are noise).
+
+    `capture_orm_hints` (Sprint 15b.2): when True, also capture leaf
+    methods that match an ORM-leaf-method set, returning hint tuples
+    `(leaf, arg_head, inner_call_fn, inner_call_arg_head, line)`.
+    The classifier in finalize joins these by `(caller_qn, line, leaf)`
+    against rewritten CallEdges to resolve the access target.
     """
     found: list[tuple[str, int]] = []
+    orm_hints: list[tuple[str, str, str, str, int]] = []
+    if capture_orm_hints:
+        from .domain_extractors.orm_python import (
+            ORM_LEAF_METHODS,
+            capture_orm_call_hint,
+        )
 
     def _flatten_attribute(n: Any) -> str | None:
         """`a.b.c` → "a.b.c"; returns None for anything not chainable.
@@ -164,13 +181,22 @@ def _walk_calls(source: bytes, body_node: Any) -> list[tuple[str, int]]:
                 # dotted shapes.
                 if dotted and dotted != "super":
                     # tree-sitter Point uses 0-indexed rows; humans count from 1.
-                    found.append((dotted, n.start_point[0] + 1))
+                    line = n.start_point[0] + 1
+                    found.append((dotted, line))
+                    if capture_orm_hints:
+                        leaf = dotted.rsplit(".", 1)[-1]
+                        if leaf in ORM_LEAF_METHODS:
+                            args_node = n.child_by_field_name("arguments")
+                            hint = capture_orm_call_hint(source, n, leaf, args_node)
+                            if hint is not None:
+                                arg_head, inner_fn, inner_arg = hint
+                                orm_hints.append((leaf, arg_head, inner_fn, inner_arg, line))
         for child in n.children:
             _visit(child)
 
     if body_node is not None:
         _visit(body_node)
-    return found
+    return found, orm_hints
 
 
 def _flatten_attribute_for_assignment(source: bytes, n: Any) -> str | None:
@@ -526,6 +552,7 @@ def extract_python_file(
     package_roots: tuple = (),
     extract_routes: bool = False,
     extract_mcp_tools: bool = False,
+    extract_orm: bool = False,
 ) -> IndexBatch:
     """Parse one .py file and return its IndexBatch fragment.
 
@@ -535,8 +562,14 @@ def extract_python_file(
     `extract_routes` (Sprint 15a) opts in to HTTP route extraction.
     `extract_mcp_tools` (Sprint 15c) opts in to MCP tool/resource
     extraction — `@app.tool()` and `@app.resource(...)` decorators
-    become MCPToolNode / MCPResourceNode records. Both default off to
-    keep scans fast.
+    become MCPToolNode / MCPResourceNode records.
+    `extract_orm` (Sprint 15b) opts in to ORM extraction — SQLAlchemy
+    declarative + 2.0 typed + classical Table() and Django
+    `models.Model` subclasses become TableNode + ColumnNode records;
+    SA / Django ORM call sites get OrmCallHint records that the
+    finalize-time classifier joins with the resolved CallEdges to emit
+    READS / WRITES (TableAccessEdge) edges.
+    All default off to keep scans fast.
     """
     batch = IndexBatch(repo=repo)
 
@@ -707,7 +740,8 @@ def extract_python_file(
         # resolve here; everything else is left as the raw dotted name and
         # the resolver decides post-pass whether it lands on a Function
         # (cross-file) or a Symbol (truly external).
-        for callee_dotted, line in _walk_calls(source, body):
+        calls, orm_hints = _walk_calls(source, body, capture_orm_hints=extract_orm)
+        for callee_dotted, line in calls:
             head = callee_dotted.split(".", 1)[0]
             if head in local_names and "." not in callee_dotted:
                 callee_qn = f"{module_qn}.{callee_dotted}" if module_qn else callee_dotted
@@ -718,6 +752,20 @@ def extract_python_file(
                 repo=repo.name,
                 caller_qn=qn,
                 callee_qn=callee_qn,
+                line=line,
+            ))
+        # Sprint 15b.2 — ORM call-site hints. Captured per call here so
+        # the finalize-time classifier can resolve table targets without
+        # needing to re-walk the AST. Joined by (caller_qn, line, leaf).
+        for leaf, arg_head, inner_fn, inner_arg, line in orm_hints:
+            batch.orm_call_hints.append(OrmCallHint(
+                repo=repo.name,
+                tenant_id=repo.tenant_id,
+                caller_qn=qn,
+                leaf=leaf,
+                arg_head=arg_head,
+                inner_call_fn=inner_fn,
+                inner_call_arg_head=inner_arg,
                 line=line,
             ))
 
@@ -774,6 +822,18 @@ def extract_python_file(
             line_end=node.end_point[0] + 1,
             docstring=_docstring(source, body),
         ))
+        # Sprint 15b.1 — ORM declaration extraction. SQLAlchemy
+        # declarative + 2.0 typed + Django Model subclasses become
+        # TableNode + ColumnNode records. Classes that don't match an
+        # ORM dialect return None and are silently skipped.
+        if extract_orm:
+            from .domain_extractors.orm_python import extract_orm_class_decls
+            table_node, column_nodes = extract_orm_class_decls(
+                source, node, qn, rel_path, repo.name, repo.tenant_id,
+            )
+            if table_node is not None:
+                batch.tables.append(table_node)
+                batch.columns.extend(column_nodes)
         # Inheritance — superclasses are in the argument_list child. Recorded
         # as observed; resolver decides post-pass whether the parent maps
         # to an in-repo Class or stays as an external Symbol.
@@ -816,6 +876,17 @@ def extract_python_file(
             _emit_function(inner, decorator_nodes=decorators)
         elif inner.type == "class_definition":
             _emit_class(inner)
+
+    # Sprint 15b.1 — classical SQLAlchemy `Table(...)` declarations
+    # at module level. These have no class so the per-class extraction
+    # hook above never fires.
+    if extract_orm:
+        from .domain_extractors.orm_python import extract_orm_classical_tables
+        classical_tables, classical_columns = extract_orm_classical_tables(
+            source, root, module_qn, rel_path, repo.name, repo.tenant_id,
+        )
+        batch.tables.extend(classical_tables)
+        batch.columns.extend(classical_columns)
 
     # Sprint 14i — module-level typeBindings. `app = FastAPI()` at the
     # top of the file becomes a binding on the module scope so any

@@ -97,6 +97,13 @@ def ensure_constraints(driver: Driver) -> None:
         # Sprint 15c — MCP tool / resource registrations.
         "CREATE CONSTRAINT mcp_tool_id IF NOT EXISTS FOR (t:MCPTool) REQUIRE (t.repo, t.name) IS UNIQUE",
         "CREATE CONSTRAINT mcp_resource_id IF NOT EXISTS FOR (r:MCPResource) REQUIRE (r.repo, r.uri_template) IS UNIQUE",
+        # Sprint 15b — ORM-declared Tables and Columns. Composite keys
+        # are (repo, name) for Table and (repo, table_name, name) for
+        # Column. tenant_id and dialect live as properties so re-scanning
+        # the same model with a different declarative-base style stays
+        # idempotent on a single Table node.
+        "CREATE CONSTRAINT table_id IF NOT EXISTS FOR (t:Table) REQUIRE (t.repo, t.name) IS UNIQUE",
+        "CREATE CONSTRAINT column_id IF NOT EXISTS FOR (c:Column) REQUIRE (c.repo, c.table_name, c.name) IS UNIQUE",
     ]
     with driver.session() as session:
         for stmt in stmts:
@@ -245,6 +252,8 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
                 fn.line_end = row.line_end,
                 fn.is_async = row.is_async,
                 fn.is_method = row.is_method,
+                fn.is_const = row.is_const,
+                fn.is_virtual = row.is_virtual,
                 fn.params = row.params,
                 fn.docstring = row.docstring
             WITH fn, row
@@ -484,6 +493,96 @@ def write_batch(driver: Driver, batch: IndexBatch) -> None:
                 """,
                 [asdict(r) for r in batch.mcp_resources if r.handler_qn],
             )
+
+        # Sprint 15b — ORM-declared Tables, Columns, and access edges
+        # (READS/WRITES from Function to Table). MERGE on (repo, name)
+        # for Table; (repo, table_name, name) for Column. The HAS_COLUMN
+        # edge fans out from Table to Column. table_accesses splits into
+        # READS / WRITES based on op_kind.
+        if batch.tables:
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MERGE (t:Table {repo: row.repo, name: row.name})
+                SET t.tenant_id = row.tenant_id,
+                    t.model_qn = row.model_qn,
+                    t.dialect = row.dialect,
+                    t.schema = row.schema,
+                    t.file_path = row.file_path,
+                    t.line_start = row.line_start
+                """,
+                [asdict(t) for t in batch.tables],
+            )
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo: row.repo, path: row.file_path})
+                MATCH (t:Table {repo: row.repo, name: row.name})
+                MERGE (f)-[:DEFINES]->(t)
+                """,
+                [asdict(t) for t in batch.tables],
+            )
+            # Class→Table DECLARES edge for ORM-declared models so
+            # callers can jump from a Class node to its Table.
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (c:Class {repo: row.repo, qualified_name: row.model_qn})
+                MATCH (t:Table {repo: row.repo, name: row.name})
+                MERGE (c)-[:DECLARES]->(t)
+                """,
+                [asdict(t) for t in batch.tables if t.model_qn],
+            )
+        if batch.columns:
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MERGE (c:Column {repo: row.repo, table_name: row.table_name, name: row.name})
+                SET c.tenant_id = row.tenant_id,
+                    c.type_raw = row.type_raw,
+                    c.primary_key = row.primary_key,
+                    c.nullable = row.nullable,
+                    c.indexed = row.indexed,
+                    c.foreign_key_table = row.foreign_key_table,
+                    c.file_path = row.file_path,
+                    c.line_start = row.line_start
+                """,
+                [asdict(c) for c in batch.columns],
+            )
+            # Table→Column HAS_COLUMN edge.
+            _chunked_write(session,
+                """
+                UNWIND $rows AS row
+                MATCH (t:Table {repo: row.repo, name: row.table_name})
+                MATCH (c:Column {repo: row.repo, table_name: row.table_name, name: row.name})
+                MERGE (t)-[:HAS_COLUMN]->(c)
+                """,
+                [asdict(c) for c in batch.columns],
+            )
+        if batch.table_accesses:
+            # READS edges
+            reads = [asdict(e) for e in batch.table_accesses if e.op_kind == "read"]
+            if reads:
+                _chunked_write(session,
+                    """
+                    UNWIND $rows AS row
+                    MATCH (fn:Function {repo: row.repo, qualified_name: row.function_qn})
+                    MATCH (t:Table {repo: row.repo, name: row.table_name})
+                    MERGE (fn)-[r:READS {line: row.line}]->(t)
+                    """,
+                    reads,
+                )
+            writes = [asdict(e) for e in batch.table_accesses if e.op_kind == "write"]
+            if writes:
+                _chunked_write(session,
+                    """
+                    UNWIND $rows AS row
+                    MATCH (fn:Function {repo: row.repo, qualified_name: row.function_qn})
+                    MATCH (t:Table {repo: row.repo, name: row.table_name})
+                    MERGE (fn)-[r:WRITES {line: row.line}]->(t)
+                    """,
+                    writes,
+                )
 
         # Sprint 14a — embedding writes. Delegated to _write_embeddings so
         # the --embed-only path can reuse the same Cypher.

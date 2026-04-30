@@ -51,6 +51,16 @@ def _parsers_for_typescript():
     }
 
 
+def _parser_for_cpp():
+    """Sprint 16a — tree-sitter-cpp parser for `.cpp/.cc/.cxx/.h/.hpp/...`.
+    Lazy-imported so the module loads without tree-sitter-cpp installed
+    when the caller's languages don't include cpp.
+    """
+    import tree_sitter_cpp as tscpp
+    from tree_sitter import Language, Parser
+    return Parser(Language(tscpp.language()))
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_path).resolve()
     if not repo_root.is_dir():
@@ -97,6 +107,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     ts_parsers = _parsers_for_typescript()
 
     languages = tuple(args.languages) if args.languages else ("python", "typescript", "javascript")
+    # Sprint 16a — only build the cpp parser when cpp is in the language
+    # set; keeps tree-sitter-cpp out of the import path for default scans
+    # and tests that don't need it.
+    cpp_parser = _parser_for_cpp() if "cpp" in languages else None
 
     # Sprint 11c: resolve worker count. Default cpu_count()//2 (forward-looking
     # for the 13K-file case; small repos pay spawn overhead). `--parse-workers
@@ -122,6 +136,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             batch=aggregate,
             py_parser=py_parser,
             ts_parsers=ts_parsers,
+            cpp_parser=cpp_parser,
             driver=None,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
@@ -129,6 +144,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             additional_skip_dirs=additional_skip_dirs,
             extract_routes=bool(getattr(args, "with_routes", False)),
             extract_mcp_tools=bool(getattr(args, "with_mcp_tools", False)),
+            extract_orm=bool(getattr(args, "with_orm", False)),
         )
         run_pipeline(ctx, phases)
         print("[indexer] --dry-run: skipping Neo4j write")
@@ -148,6 +164,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             batch=aggregate,
             py_parser=py_parser,
             ts_parsers=ts_parsers,
+            cpp_parser=cpp_parser,
             driver=driver,
             parse_workers=parse_workers,
             embed_enabled=embed_enabled,
@@ -155,6 +172,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             additional_skip_dirs=additional_skip_dirs,
             extract_routes=bool(getattr(args, "with_routes", False)),
             extract_mcp_tools=bool(getattr(args, "with_mcp_tools", False)),
+            extract_orm=bool(getattr(args, "with_orm", False)),
         )
         run_pipeline(ctx, phases)
         write_start = time.monotonic()
@@ -225,8 +243,9 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--dry-run", action="store_true", help="Parse + report counts without writing to Neo4j")
     scan.add_argument(
         "--languages", nargs="+", default=None,
-        choices=["python", "typescript", "javascript"],
-        help="Languages to extract. Default: all supported.",
+        choices=["python", "typescript", "javascript", "cpp"],
+        help="Languages to extract. Default: python+typescript+javascript "
+             "(cpp must be opted-in via --languages cpp).",
     )
     scan.add_argument(
         "--parse-workers", type=int, default=None,
@@ -264,6 +283,14 @@ def main(argv: list[str] | None = None) -> int:
         "--with-mcp-tools", action="store_true", default=False,
         help="Sprint 15c — extract MCP tool/resource registrations "
              "(@app.tool, @mcp.resource) into MCPTool/MCPResource nodes. "
+             "Disabled by default.",
+    )
+    scan.add_argument(
+        "--with-orm", action="store_true", default=False,
+        help="Sprint 15b — extract ORM model declarations (SQLAlchemy "
+             "declarative + 2.0 typed + classical Table(); Django "
+             "models.Model subclasses) into Table/Column nodes, and "
+             "classify ORM call sites into READS / WRITES edges. "
              "Disabled by default.",
     )
     scan.set_defaults(func=cmd_scan)

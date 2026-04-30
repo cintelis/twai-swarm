@@ -18,7 +18,10 @@ class ScanPhase:
 
     def run(self, ctx: PhaseContext) -> None:
         pre_start = time.monotonic()
-        if any(lang in ctx.languages for lang in ("typescript", "javascript")):
+        # Sprint 16d adds cpp to the languages that need a pre-walked
+        # file set — `#include "foo.h"` is suffix-matched against
+        # repo_files.
+        if any(lang in ctx.languages for lang in ("typescript", "javascript", "cpp")):
             for rel_path, _lang in walker.walk_paths(
                 ctx.repo_root,
                 languages=ctx.languages,
@@ -29,5 +32,5 @@ class ScanPhase:
         if ctx.repo_files:
             ctx.progress(
                 f"[indexer] pre-walked {len(ctx.repo_files)} files in {pre_secs:.1f}s "
-                f"(TS/JS path resolution)"
+                f"(TS/JS/cpp path resolution)"
             )
