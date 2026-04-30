@@ -544,6 +544,13 @@ async def get_project(workflow_id: str):
                 "tokens_in": getattr(result, "tokens_in", 0),
                 "tokens_out": getattr(result, "tokens_out", 0),
                 "cost_usd": float(getattr(result, "cost_usd", 0.0) or 0.0),
+                # Auto-PR step output (added Sprint 10f). Older workflow
+                # outputs without these attrs degrade to None silently via
+                # getattr defaults, so the field is always present.
+                "pr_url": getattr(result, "pr_url", None),
+                "pr_number": getattr(result, "pr_number", None),
+                "branch_name": getattr(result, "branch_name", None),
+                "push_error": getattr(result, "push_error", None),
             }
         except Exception:
             # Workflow result unavailable (timeout, serialisation mismatch, etc.).

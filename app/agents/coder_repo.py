@@ -180,6 +180,26 @@ async def run_agentic_repo_coder(
 
     diff, files_changed = _capture_diff(repo_root)
 
+    # Capture the post-Coder content of each modified file so the workflow's
+    # push activity can open a PR without needing same-worker disk access.
+    # Binary or non-UTF-8 files are skipped with a logged warning — the PR
+    # will be incomplete but the rest of the change still lands.
+    # Deleted paths (in files_changed but not on disk) are likewise skipped;
+    # push_files_as_branch only adds/modifies, so deletions don't round-trip
+    # through this MVP path.
+    files_with_content: list[dict] = []
+    for rel in files_changed:
+        full = repo_root / rel
+        if not full.is_file():
+            logger.warning("skipping %s in push payload: not a file (deleted?)", rel)
+            continue
+        try:
+            content = full.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("skipping %s in push payload: %s", rel, e)
+            continue
+        files_with_content.append({"path": rel, "content": content})
+
     input_cost = total_input_tokens * 5.0 / 1_000_000
     output_cost = total_output_tokens * 25.0 / 1_000_000
 
@@ -189,6 +209,7 @@ async def run_agentic_repo_coder(
         "stop_reason": stop_reason,
         "diff": diff,
         "files_changed": files_changed,
+        "files_with_content": files_with_content,
         "tool_calls": {
             "list_files":          stats["list_files_calls"],
             "read_file":           stats["read_file_calls"],

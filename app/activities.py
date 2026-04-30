@@ -503,3 +503,94 @@ async def run_repo_coder_activity(
         except asyncio.CancelledError:
             pass
     return result
+
+
+@activity.defn
+async def push_repo_changes_activity(
+    repo_url: str,
+    files: list[dict],
+    workflow_id: str,
+    brief: str,
+    tenant_id: str,
+) -> dict:
+    """Push the Coder's edits as a new branch + PR via the GitHub App.
+
+    Best-effort: returns {"pr_url": None, "error": "..."} for graceful
+    failure modes (no installation has access, repo not found, push API
+    rejects). Hard failures (network, auth) propagate so Temporal can
+    surface them in the workflow result.
+
+    The branch name is derived from the workflow_id so re-runs collide
+    cleanly (push_files_as_branch force-updates the ref). PR title +
+    body include the brief so a reviewer can see intent without
+    leaving the PR.
+    """
+    import re
+    from app import db, github_app
+
+    if not files:
+        return {"pr_url": None, "branch_name": None, "error": "no files to push"}
+
+    # https://github.com/<owner>/<name>(.git)?
+    m = re.match(r"https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", repo_url)
+    if not m:
+        return {"pr_url": None, "branch_name": None, "error": f"could not parse repo_url: {repo_url}"}
+    owner, name = m.group(1), m.group(2)
+
+    # Find which installation can see this repo. The user can have multiple
+    # installations connected (across orgs); we pick the first one whose
+    # repo list includes the target. iter on demand — repo lists can be
+    # large for prolific orgs, so don't materialise all of them.
+    installations = await db.get_github_installations(tenant_id=tenant_id)
+    matched_inst_id: int | None = None
+    for inst in installations:
+        try:
+            repos = await github_app.list_installation_repos(inst["installation_id"])
+        except Exception as e:
+            activity.logger.warning(
+                "list_installation_repos failed for installation %s: %s",
+                inst["installation_id"], e,
+            )
+            continue
+        for r in repos:
+            if r["owner"].lower() == owner.lower() and r["name"].lower() == name.lower():
+                matched_inst_id = inst["installation_id"]
+                break
+        if matched_inst_id is not None:
+            break
+
+    if matched_inst_id is None:
+        return {
+            "pr_url": None, "branch_name": None,
+            "error": f"no GitHub App installation has access to {owner}/{name}",
+        }
+
+    short = workflow_id.removeprefix("repo-task-")[:8]
+    branch_name = f"swarm/{short}"
+    one_line = " ".join(brief.split())
+    pr_title = f"Swarm: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
+    pr_body = (
+        f"Automated change from twai-swarm workflow `{workflow_id}`.\n\n"
+        f"## Brief\n\n{brief}\n\n"
+        f"## Files changed ({len(files)})\n\n"
+        + "\n".join(f"- `{f['path']}`" for f in files)
+    )
+    commit_message = f"swarm: {one_line[:72]}"
+
+    push = await github_app.push_files_as_branch(
+        installation_id=matched_inst_id,
+        repo_owner=owner,
+        repo_name=name,
+        branch=branch_name,
+        files=files,
+        commit_message=commit_message,
+        open_pr=True,
+        pr_title=pr_title,
+        pr_body=pr_body,
+    )
+    return {
+        "pr_url": getattr(push, "pr_url", None),
+        "pr_number": getattr(push, "pr_number", None),
+        "branch_name": branch_name,
+        "installation_id": matched_inst_id,
+    }

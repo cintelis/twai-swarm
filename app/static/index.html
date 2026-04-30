@@ -1451,6 +1451,26 @@ function renderProject(data) {
           <div class="code-title">Coder result <span class="meta">· ${r.iterations} iteration${r.iterations === 1 ? '' : 's'}</span></div>
         </div>
     `;
+    // PR banner (top of card, prominent). Three states: opened, attempted-but-failed, skipped.
+    if (r.pr_url) {
+      html += `
+        <div class="alert" style="margin:0 0 12px 0;background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.3);">
+          <strong style="color: var(--green);">PR opened:</strong>
+          <a href="${escapeHtml(r.pr_url)}" target="_blank" rel="noopener" style="color: var(--iris);">${escapeHtml(r.pr_url)}</a>
+          ${r.branch_name ? `<span class="meta" style="margin-left:8px;">branch: ${escapeHtml(r.branch_name)}</span>` : ''}
+        </div>
+      `;
+    } else if (r.push_error && r.push_error !== 'no files changed' && r.push_error !== 'auto_pr disabled') {
+      html += `
+        <div class="alert alert-error" style="margin:0 0 12px 0;">
+          <strong>Push to GitHub failed:</strong> ${escapeHtml(r.push_error)}
+          <div class="meta" style="margin-top:4px;">The diff below is still valid — apply it manually if you want the change to land.</div>
+        </div>
+      `;
+    } else if (r.push_error) {
+      // Benign skip — don't shout, just note it quietly.
+      html += `<div class="code-summary" style="color: var(--muted2);">No PR opened (${escapeHtml(r.push_error)}).</div>`;
+    }
     if (r.summary) {
       html += `<div class="code-summary">${escapeHtml(r.summary)}</div>`;
     }
