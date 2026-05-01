@@ -29,6 +29,8 @@ from app.activities import (
     push_repo_changes_activity,
     # Sprint 18b — Architect pre-step for RepoTaskWorkflow.
     architect_repo_task_activity,
+    # Sprint 18c — Critic post-step + continuation loop.
+    critic_repo_task_activity,
 )
 
 ACTIVITIES = [
@@ -36,6 +38,7 @@ ACTIVITIES = [
     clone_repo_activity, index_repo_activity, run_repo_coder_activity,
     push_repo_changes_activity,
     architect_repo_task_activity,
+    critic_repo_task_activity,
 ]
 WORKFLOWS = [ProjectWorkflow, RepoTaskWorkflow]
 

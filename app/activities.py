@@ -589,6 +589,60 @@ async def architect_repo_task_activity(
 
 
 @activity.defn
+async def critic_repo_task_activity(
+    repo_path: str,
+    repo_name: str,
+    architect_plan: dict | None,
+    coder_diff: str,
+    files_with_content: list[dict],
+    tenant_id: str,
+    workflow_id: str,
+) -> dict:
+    """Validate the Coder's diff against the Architect's checklist.
+
+    Sprint 18c: post-step after `run_repo_coder_activity`. Runs a
+    deterministic gate (ruff / compileall / mvn / npm — best-effort,
+    silent skip on absent tooling) and an LLM-judge stage that grades
+    each `acceptance_criterion` from the Architect plan against the
+    diff. If any block-severity criterion fails OR the deterministic
+    gate flags errors, the result includes a structured
+    `continuation_prompt` (D7 handoff doc) for the workflow's continuation
+    loop.
+
+    Returns `dataclasses.asdict(CriticRepoOutput)`. Failure modes (no
+    plan, judge API errors) all surface as a `CriticRepoOutput` rather
+    than an activity-level exception — the workflow keeps moving even
+    if the Critic stage degrades.
+    """
+    from pathlib import Path
+    from app.agents.critic_repo import critic_output_to_dict, run_critic_repo
+
+    # Tenant_id and repo_name are accepted for symmetry with the other
+    # repo-task activities but the Critic doesn't need a Neo4j driver
+    # (gates run on the disk; the LLM judge gets the plan + diff
+    # directly). Keeping them in the signature keeps the workflow's
+    # call site uniform with the Architect/Coder activities.
+    _ = tenant_id, repo_name, workflow_id
+
+    activity.heartbeat("critic starting")
+    hb_task = asyncio.create_task(_keep_alive(message="critic running"))
+    try:
+        result = await run_critic_repo(
+            architect_plan=architect_plan,
+            coder_diff=coder_diff,
+            files_with_content=files_with_content,
+            repo_root=Path(repo_path),
+        )
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+    return critic_output_to_dict(result)
+
+
+@activity.defn
 async def run_repo_coder_activity(
     repo_path: str,
     repo_name: str,
@@ -607,6 +661,14 @@ async def run_repo_coder_activity(
     `run_agentic_repo_coder` which renders it as a "## Architect plan"
     section in the Coder's user message. Default None preserves the
     pre-18b call shape — older callers / replayed histories still work.
+
+    Sprint 18c: when the workflow's continuation loop fires, it passes
+    the Critic's structured handoff doc (D7) AS the `brief` parameter.
+    No code change is needed in this activity — `_build_user_message`
+    already renders the brief verbatim, and the handoff doc is just
+    a markdown string with extra sections. The Architect plan is
+    threaded through unchanged so the continuation Coder still sees
+    the original acceptance_criteria, not just the gap list.
     """
     from pathlib import Path
     from app.agents.coder_repo import run_agentic_repo_coder

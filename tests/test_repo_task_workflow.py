@@ -227,3 +227,100 @@ def test_index_activity_constructs_java_parser():
     assert "tree_sitter_java" in src
     assert "java_parser" in src
     assert "Parser(Language(tsjava.language()))" in src
+
+
+# ─── Sprint 18c: Critic activity registration + workflow wiring ─────────────
+
+
+def test_critic_activity_registered_in_worker():
+    """Sprint 18c wires `critic_repo_task_activity` into the worker so
+    Temporal can dispatch it. Without this registration the workflow's
+    execute_activity call raises at first run."""
+    from app import worker
+    from app.activities import critic_repo_task_activity
+    assert critic_repo_task_activity in worker.ACTIVITIES
+
+
+def test_critic_activity_signature():
+    """The critic activity's coroutine signature must accept the seven
+    positional args the workflow passes (path, name, plan, diff, files,
+    tenant, wf_id)."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(
+        acts.critic_repo_task_activity, "__wrapped__",
+        acts.critic_repo_task_activity,
+    )
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    assert params == [
+        "repo_path", "repo_name", "architect_plan", "coder_diff",
+        "files_with_content", "tenant_id", "workflow_id",
+    ]
+
+
+def test_continuation_count_max_2():
+    """D4: continuation cap = 2. Locking the value down so a future tweak
+    to bump it requires intent (Reflexion's 3-trial cap is the published
+    upper bound; going higher regresses to AutoGPT failure mode)."""
+    from app.workflows.repo_task import MAX_CONTINUATIONS
+    assert MAX_CONTINUATIONS == 2
+
+
+def test_repo_task_output_includes_critic_results():
+    """RepoTaskOutput exposes critic_results + continuation_count so the
+    UI / cost-summary card can render the multi-agent breakdown."""
+    from app.workflows import RepoTaskOutput
+    out = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+    )
+    assert out.critic_results == []
+    assert out.continuation_count == 0
+
+
+def test_repo_task_output_critic_results_accepts_dicts():
+    """critic_results is a plain list of dicts (not CriticRepoOutput) so it
+    survives Temporal's JSON serialisation without a converter."""
+    from app.workflows import RepoTaskOutput
+    out = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+        critic_results=[
+            {"verdict": "incomplete", "passed_criteria": [], "failed_criteria": []},
+            {"verdict": "complete", "passed_criteria": ["c1"], "failed_criteria": []},
+        ],
+        continuation_count=1,
+    )
+    assert len(out.critic_results) == 2
+    assert out.continuation_count == 1
+
+
+def test_workflow_uses_critic_activity_after_coder():
+    """Source-string check: critic_repo_task_activity is invoked AFTER
+    run_repo_coder_activity. Cheap regression against a refactor that
+    drops or reorders the critic step."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    coder_pos = src.find("run_repo_coder_activity")
+    critic_pos = src.find("critic_repo_task_activity")
+    assert coder_pos != -1
+    assert critic_pos != -1
+    assert coder_pos < critic_pos, "critic must run after coder"
+    # The continuation loop must use a `while` and respect MAX_CONTINUATIONS.
+    assert "while" in src
+    assert "MAX_CONTINUATIONS" in src
+
+
+def test_workflow_continuation_loop_handles_monotone_progress():
+    """Source-string check: the workflow includes a monotone-progress guard
+    that terminates early when the new pass doesn't satisfy strictly more
+    criteria than the previous (per D4)."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    # Check that the loop reads passed_criteria from prior critic results.
+    assert "passed_criteria" in src

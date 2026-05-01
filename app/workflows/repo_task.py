@@ -17,7 +17,7 @@ to Sprint 10f (it can reuse the existing GitHub App push code).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from temporalio import workflow
@@ -33,7 +33,18 @@ with workflow.unsafe.imports_passed_through():
         push_repo_changes_activity,
         # Sprint 18b — Architect pre-step.
         architect_repo_task_activity,
+        # Sprint 18c — Critic post-step + continuation loop.
+        critic_repo_task_activity,
     )
+
+
+# Sprint 18c: hard cap on continuation Coder passes after the initial
+# Coder run. Total Coder iterations across initial + N continuations
+# stays bounded at MAX_ITERATIONS * (1 + MAX_CONTINUATIONS) = 30 * 3 = 90.
+# Per D4 (Reflexion-inspired): more than 2 continuations regresses to
+# AutoGPT's hallucination-loop failure mode. Plus a monotone-progress
+# check catches "going backwards" continuations early.
+MAX_CONTINUATIONS = 2
 
 
 @dataclass
@@ -74,6 +85,15 @@ class RepoTaskOutput:
     # the Architect step ran but produced no output (degraded path) or
     # when a future opt-out flag is added.
     architect_plan: dict | None = None
+    # Sprint 18c — Every Critic verdict observed during the run, in
+    # order: index 0 is the initial Coder pass's Critic; indices 1..N
+    # are the continuation passes' Critics. Empty list means the Critic
+    # step never ran (degraded Architect path or pre-18c replay).
+    critic_results: list[dict] = field(default_factory=list)
+    # Sprint 18c — How many continuation Coder passes fired (0 if the
+    # initial pass passed the Critic on first try). Bounded by
+    # MAX_CONTINUATIONS = 2.
+    continuation_count: int = 0
 
 
 @workflow.defn
@@ -131,6 +151,64 @@ class RepoTaskWorkflow:
             heartbeat_timeout=timedelta(minutes=3),
         )
 
+        # Sprint 18c: Critic + continuation loop. After every Coder pass
+        # (initial + up to MAX_CONTINUATIONS continuations), run the Critic
+        # against the diff. If verdict="incomplete" AND budget remains AND
+        # progress is monotone, fire another Coder pass with the Critic's
+        # structured handoff doc as the brief. The previous Coder's edits
+        # persist on disk in the cloned repo (Temporal heartbeats keep the
+        # workspace pinned for the activity worker), so the new pass adds
+        # incrementally rather than rewriting from scratch.
+        critic_results: list[dict] = []
+        continuation_count = 0
+        while continuation_count <= MAX_CONTINUATIONS:
+            critic_result = await workflow.execute_activity(
+                critic_repo_task_activity,
+                args=[
+                    clone_result["path"], repo_name, arch_result,
+                    coder_result["diff"], coder_result["files_with_content"],
+                    inp.tenant_id, workflow.info().workflow_id,
+                ],
+                schedule_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=2),
+            )
+            critic_results.append(critic_result)
+
+            if critic_result["verdict"] == "complete":
+                break
+            if continuation_count == MAX_CONTINUATIONS:
+                # Cap reached — ship anyway. The PR footer will note the
+                # known gaps for human triage (D4: bounded autonomy).
+                break
+
+            # Monotone-progress guard: continuation N+1 must satisfy
+            # STRICTLY MORE checklist items than continuation N. If the
+            # new pass regressed (or held steady), terminate early — we'd
+            # otherwise burn another Sonnet judge call to learn nothing.
+            if continuation_count > 0:
+                prev = critic_results[-2]
+                prev_passed = len(prev.get("passed_criteria") or [])
+                curr_passed = len(critic_result.get("passed_criteria") or [])
+                if curr_passed <= prev_passed:
+                    break
+
+            # Continuation Coder pass. Same activity — the Critic's
+            # `continuation_prompt` IS the brief (it's a structured
+            # markdown doc per D7). The Architect plan is threaded through
+            # unchanged so the new pass still sees the original
+            # acceptance_criteria as authoritative scope.
+            coder_result = await workflow.execute_activity(
+                run_repo_coder_activity,
+                args=[
+                    clone_result["path"], repo_name,
+                    critic_result["continuation_prompt"], inp.tenant_id,
+                    workflow.info().workflow_id, arch_result,
+                ],
+                schedule_to_close_timeout=timedelta(minutes=20),
+                heartbeat_timeout=timedelta(minutes=3),
+            )
+            continuation_count += 1
+
         # Auto-PR step. Skipped when the request opted out, when nothing
         # actually changed, or when no installation has access — all
         # surfaced via push_error in the output rather than failing the
@@ -141,6 +219,46 @@ class RepoTaskWorkflow:
         push_error: str | None = None
 
         files_with_content = coder_result.get("files_with_content") or []
+
+        # Sprint 18c: when continuation passes ran, the final Critic verdict
+        # may still flag gaps (cap reached, or monotone-progress terminated).
+        # Append a "Known gaps" footer to the brief so the PR body surfaces
+        # them inline for human triage. push_repo_changes_activity renders
+        # `brief` verbatim into the PR body, so this is the lightest-touch
+        # injection point.
+        push_brief = inp.brief
+        if continuation_count > 0 and critic_results:
+            final = critic_results[-1]
+            failed = final.get("failed_criteria") or []
+            gates = final.get("gate_failures") or []
+            if final.get("verdict") == "incomplete" and (failed or gates):
+                footer_lines = [
+                    "",
+                    "---",
+                    f"## Known gaps (after {continuation_count} continuation pass"
+                    f"{'es' if continuation_count != 1 else ''})",
+                    "",
+                    "The Critic flagged the following items as still missing "
+                    "after the configured continuation budget was exhausted:",
+                    "",
+                ]
+                for cf in failed[:20]:
+                    footer_lines.append(f"- {cf.get('criterion', '')}: {cf.get('evidence', '')}")
+                if len(failed) > 20:
+                    footer_lines.append(f"- ...and {len(failed) - 20} more")
+                if gates:
+                    footer_lines.append("")
+                    footer_lines.append("### Gate failures")
+                    for gf in gates[:10]:
+                        ln = f":{gf.get('line')}" if gf.get("line") else ""
+                        footer_lines.append(
+                            f"- [{gf.get('tool', '')}] `{gf.get('file', '')}`{ln}"
+                            f" — {gf.get('message', '')}"
+                        )
+                    if len(gates) > 10:
+                        footer_lines.append(f"- ...and {len(gates) - 10} more")
+                push_brief = inp.brief + "\n" + "\n".join(footer_lines)
+
         if not inp.auto_pr:
             push_error = "auto_pr disabled"
         elif not files_with_content:
@@ -152,7 +270,7 @@ class RepoTaskWorkflow:
                     inp.repo_url,
                     files_with_content,
                     workflow.info().workflow_id,
-                    inp.brief,
+                    push_brief,
                     inp.tenant_id,
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
@@ -179,4 +297,6 @@ class RepoTaskWorkflow:
             branch_name=branch_name,
             push_error=push_error,
             architect_plan=arch_result,
+            critic_results=critic_results,
+            continuation_count=continuation_count,
         )
