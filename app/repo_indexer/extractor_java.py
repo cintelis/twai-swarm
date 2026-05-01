@@ -1,4 +1,4 @@
-"""Tree-sitter Java extractor — Sprint 17a.
+"""Tree-sitter Java extractor — Sprint 17a / 17b / 17c.
 
 Walks the AST of one Java source file and emits an IndexBatch fragment.
 Mirrors the shape of `extractor_cpp.py` and `extractor_python.py`;
@@ -41,8 +41,49 @@ Inheritance capture (17b contribution):
       `java.lang.Enum` / `java.lang.annotation.Annotation` parents
       are NOT modelled (matches the no-implicit-`java.lang.*` rule).
 
-Out of 17a/17b scope (LATER sub-sprints — explicitly NOT handled here):
-    - Call edges (bare / field_access / scoped / new) — Sprint 17c.
+Call edges (17c contribution):
+    - Bare `foo()` (`method_invocation`, no `object` field) →
+      callee_qn = `foo`. If `foo` is in same-file local_names, prefix
+      with `module_qn + "."` so same-file calls resolve to a
+      qualified target. (Heuristic — works for the typical "calling
+      a sibling method on the file's primary class" case.)
+    - Field-access / scoped / static `obj.bar()` / `Foo.staticBar()` /
+      `obj.list.add(x)` (`method_invocation` with `object=` field) →
+      callee_qn = `<flattened-receiver>.<name>`. No syntactic
+      distinction between instance and static at the AST level; the
+      resolver disambiguates later. Chained field access flattens
+      via `.` recursion — `obj.list.add` stays joined with periods.
+    - Constructor `new Foo()` / `new Foo<T>()` / `new pkg.Bar()`
+      (`object_creation_expression`) → callee_qn = head identifier
+      (`Foo` / `pkg.Bar`); generics stripped via the same head-recurse
+      logic as 17b's parent-name extractor.
+    - `super(x)` / `this(x)` (`explicit_constructor_invocation`) →
+      callee_qn = literal `"super"` / `"this"`. Resolver maps these
+      to the parent / same class's constructor.
+    - Method references (`Foo::bar`, `this::run`, `String::length`)
+      (`method_reference`) → low-priority CallEdge with
+      callee_qn = `<receiver>.<method>`. `Foo::new` (constructor
+      reference) is captured as `Foo.new` — the resolver can map
+      `.new` later or treat it as unresolved. If the shape is
+      uncertain, we skip rather than crash.
+
+Call-edge limitations (documented for 17e/17f follow-up):
+    - Calls inside lambda bodies attribute to the ENCLOSING method
+      — lambdas don't yet have synthetic FunctionNodes (Sprint 17e).
+      Same for anonymous-class method bodies.
+    - Static / instance initializer blocks (`static { … }` / `{ … }`)
+      and field initializer expressions (`= new Foo()`) have no
+      enclosing FunctionNode, so calls inside them are SKIPPED for
+      17c. Sprint 17e will model these as synthetic `__cinit__` /
+      `__init__`-style nodes.
+    - No type-binding: `User u = new User(); u.foo()` emits
+      callee_qn=`u.foo`, not `User.foo`. Receiver-type inference
+      is a future-sprint concern.
+    - Annotation arguments that look like calls
+      (`@SuppressWarnings(value = "x")`) are NOT `method_invocation`
+      nodes — no special handling needed.
+
+Out of 17a/17b/17c scope (LATER sub-sprints — explicitly NOT handled):
     - Imports + same-package implicit visibility + java.lang.* —
       Sprint 17d.
     - Method-overload qn disambiguation via `:type1,type2` suffix —
@@ -70,6 +111,7 @@ from __future__ import annotations
 from typing import Any
 
 from .actions import (
+    CallEdge,
     ClassNode,
     FileNode,
     FunctionNode,
@@ -471,6 +513,252 @@ def _body_node(node: Any) -> Any:
     return None
 
 
+# ─── 17c: call-edge extraction helpers ─────────────────────────────────────
+
+
+def _flatten_receiver_text(source: bytes, node: Any) -> str:
+    """Flatten a method_invocation `object` (or a field_access `object`)
+    into a dotted form suitable for use as a CallEdge callee prefix.
+
+    Recognised shapes:
+      - `identifier`          → its raw text (`"obj"`)
+      - `this`                → `"this"`
+      - `super`               → `"super"`
+      - `field_access`        → recurse on `object` + `.` + `field.text`
+                                (e.g. `obj.list` for `obj.list.add(x)`'s
+                                `object`)
+      - `method_invocation`   → best-effort raw text of the call expr
+                                (so `getX().y` flattens to `"getX().y"`).
+                                The resolver currently can't resolve
+                                method-chained receivers; recorded
+                                verbatim for future enhancement.
+      - `parenthesized_expression` → recurse into the inner expression
+      - anything else         → fall back to raw `node.text` (best-effort).
+
+    Notes for 17e/17f follow-up: shapes we handle by raw-text fallback
+    include `array_access`, `cast_expression`, and `object_creation_
+    expression` (chained methods on a `new Foo().bar()`). They produce
+    callee strings the resolver won't bind today, but the edge is at
+    least visible for queries.
+    """
+    if node is None:
+        return ""
+    t = node.type
+    if t == "identifier":
+        return _node_text(source, node)
+    if t == "this":
+        return "this"
+    if t == "super":
+        return "super"
+    if t == "field_access":
+        obj = node.child_by_field_name("object")
+        field = node.child_by_field_name("field")
+        obj_text = _flatten_receiver_text(source, obj) if obj is not None else ""
+        field_text = _node_text(source, field) if field is not None else ""
+        if obj_text and field_text:
+            return f"{obj_text}.{field_text}"
+        if field_text:
+            return field_text
+        if obj_text:
+            return obj_text
+        # Fallback to raw text — preserves dotted shape verbatim.
+        return _node_text(source, node).strip()
+    if t == "parenthesized_expression":
+        # Recurse into the first non-punctuation named child.
+        for sub in node.children:
+            if sub.type not in ("(", ")"):
+                inner = _flatten_receiver_text(source, sub)
+                if inner:
+                    return inner
+        return _node_text(source, node).strip()
+    # Fallback: raw text. This covers method_invocation receivers,
+    # cast_expression, array_access, object_creation_expression, etc.
+    # Documented limitation; resolver won't bind, but edge is visible.
+    return _node_text(source, node).strip()
+
+
+def _strip_generics_to_head(source: bytes, type_node: Any) -> str:
+    """Return the dotted head identifier of a constructor type expression.
+
+    Reuses the same logic as 17b's `_extract_parent_name` — kept as a
+    separate function for clarity at call sites (the 17b helper is
+    written for `extends` / `implements` clauses which have a slightly
+    different node-context contract).
+
+    Handles:
+      - `type_identifier`          → bare name (`"Foo"`)
+      - `scoped_type_identifier`   → dotted form (`"com.foo.Bar"`)
+      - `generic_type`             → recurse into head identifier,
+                                     dropping `type_arguments`
+                                     (`"ArrayList"` for `ArrayList<T>`)
+
+    Returns `""` for unrecognised shapes — caller skips the edge.
+    """
+    return _extract_parent_name(source, type_node)
+
+
+def _walk_calls(
+    source: bytes,
+    body_node: Any,
+    local_names: set[str],
+    module_qn: str,
+) -> list[tuple[str, int]]:
+    """Return [(callee_qn, line)] for every call site inside `body_node`.
+
+    Dispatches by node.type:
+      - `method_invocation`             → bare or member call
+      - `object_creation_expression`    → constructor (`new Foo()`)
+      - `explicit_constructor_invocation` → `super(…)` / `this(…)`
+      - `method_reference`              → `Foo::bar` / `this::run`
+                                          (low-priority; skip if shape
+                                          is uncertain rather than crash)
+
+    Walks ALL descendants (including lambda bodies and anonymous-class
+    bodies) so calls inside them attribute to the enclosing method.
+    Documented limitation; Sprint 17e introduces synthetic enclosing
+    nodes for lambdas / anon classes.
+
+    Local-name resolution: for bare identifier calls (no receiver),
+    if the callee name is in `local_names` we prefix with
+    `module_qn + "."`. This is a heuristic — works for the common
+    case of "method on file's primary class calling a sibling method"
+    (where module_qn is `pkg.PrimaryClass`). For nested-class methods
+    calling siblings on their own (different) class, the resolver
+    handles the disambiguation; the extractor stays conservative.
+    """
+    found: list[tuple[str, int]] = []
+
+    def _visit(n: Any) -> None:
+        t = n.type
+        if t == "method_invocation":
+            obj = n.child_by_field_name("object")
+            name_node = n.child_by_field_name("name")
+            if name_node is not None:
+                name = _node_text(source, name_node)
+                if obj is None:
+                    # Bare call: `foo()`.
+                    if name in local_names and module_qn:
+                        callee = f"{module_qn}.{name}"
+                    else:
+                        callee = name
+                    found.append((callee, n.start_point[0] + 1))
+                else:
+                    # Member call: `obj.bar()`, `this.bar()`,
+                    # `Foo.staticBar()`, `obj.list.add(x)`.
+                    receiver = _flatten_receiver_text(source, obj)
+                    if receiver:
+                        callee = f"{receiver}.{name}"
+                    else:
+                        callee = name
+                    found.append((callee, n.start_point[0] + 1))
+            # Recurse into arguments — they may contain nested calls
+            # (`foo(bar(), baz())` → 3 edges).
+            for child in n.children:
+                _visit(child)
+            return
+        if t == "object_creation_expression":
+            # `new Foo()` / `new Foo<T>(arg)` / `new com.foo.Bar()`.
+            type_node = n.child_by_field_name("type")
+            if type_node is not None:
+                head = _strip_generics_to_head(source, type_node)
+                if head:
+                    found.append((head, n.start_point[0] + 1))
+                else:
+                    # Unrecognised type shape — fall back to raw text
+                    # with generics naively stripped. Documented quirk.
+                    raw = _node_text(source, type_node).strip()
+                    if raw:
+                        # Best-effort generics strip on a raw fallback.
+                        if "<" in raw:
+                            raw = raw.split("<", 1)[0]
+                        found.append((raw, n.start_point[0] + 1))
+            for child in n.children:
+                _visit(child)
+            return
+        if t == "explicit_constructor_invocation":
+            # `super(…)` / `this(…)` (NOT `super.foo(…)` — that's a
+            # regular method_invocation with `object=super`).
+            # Grammar shape: `constructor=super` / `constructor=this`
+            # is the field name; in some grammar versions the keyword
+            # appears as a positional child instead. Handle both.
+            ctor_node = n.child_by_field_name("constructor")
+            if ctor_node is not None:
+                ctor_text = _node_text(source, ctor_node).strip()
+            else:
+                ctor_text = ""
+                for sub in n.children:
+                    if sub.type in ("super", "this"):
+                        ctor_text = sub.type
+                        break
+            if ctor_text in ("super", "this"):
+                found.append((ctor_text, n.start_point[0] + 1))
+            for child in n.children:
+                _visit(child)
+            return
+        if t == "method_reference":
+            # `Foo::bar`, `this::run`, `String::length`, `Foo::new`.
+            # NO field names — positional children:
+            #   [receiver_or_type, "::", method_or_"new"]
+            # Filter out punctuation; first non-`::` named child is the
+            # receiver, last non-`::` named child is the method name.
+            named_children = [
+                c for c in n.children if c.type != "::"
+            ]
+            if len(named_children) >= 2:
+                receiver_node = named_children[0]
+                method_node = named_children[-1]
+                # Receiver may be identifier / type_identifier /
+                # scoped_type_identifier / generic_type / `super` /
+                # `this` / field_access / etc.
+                receiver = _flatten_receiver_text(source, receiver_node)
+                if not receiver:
+                    receiver = _node_text(source, receiver_node).strip()
+                # Method-name node is usually `identifier`, but for
+                # `Foo::new` the second child is the literal `new`
+                # keyword (which tree-sitter exposes as an unnamed
+                # token). Read it with raw text.
+                method_text = _node_text(source, method_node).strip()
+                if receiver and method_text:
+                    found.append(
+                        (f"{receiver}.{method_text}", n.start_point[0] + 1),
+                    )
+            # Don't recurse — method_reference has no nested calls.
+            return
+        # Default: recurse into children. Importantly this walks INTO
+        # lambda_expression bodies, anonymous class bodies, switch
+        # expressions, etc., so calls inside them attribute to the
+        # enclosing method. Documented as a 17c limitation.
+        for child in n.children:
+            _visit(child)
+
+    if body_node is not None:
+        _visit(body_node)
+    return found
+
+
+def _collect_local_function_names(node: Any, source: bytes, out: set[str]) -> None:
+    """Pre-pass: collect all method / constructor / class / interface /
+    enum / record names declared anywhere in this file. Used by
+    `_walk_calls` to decide whether a bare-identifier call should be
+    prefixed with `module_qn`.
+
+    Includes both class-name local resolution targets (for `new Foo()`
+    where `Foo` is in this file) and method-name targets (for `bar()`
+    where `bar` is a sibling method).
+
+    Walks recursively so nested-class members are also captured.
+    """
+    for child in node.children:
+        t = child.type
+        if t in _TYPE_DECL_TYPES or t in _FUNCTION_DECL_TYPES:
+            name_node = child.child_by_field_name("name")
+            if name_node is not None:
+                out.add(_node_text(source, name_node))
+        # Recurse: nested types live inside class_body / interface_body /
+        # enum_body, and methods live inside those too.
+        _collect_local_function_names(child, source, out)
+
+
 def extract_java_file(
     repo: RepoNode,
     rel_path: str,
@@ -504,6 +792,13 @@ def extract_java_file(
         batch.modules.append(ModuleNode(
             repo=repo.name, qualified_name=module_qn, file_path=rel_path,
         ))
+
+    # 17c: pre-pass to collect every method / constructor / class /
+    # interface / enum / record name declared in this file. Used by
+    # `_walk_calls` to decide whether a bare-identifier call should
+    # be prefixed with `module_qn` for same-file resolution.
+    local_names: set[str] = set()
+    _collect_local_function_names(root, source, local_names)
 
     def _emit_class(node: Any, parent_class_qn_stack: list[str]) -> None:
         """Emit ClassNode for one type declaration (class / interface /
@@ -625,6 +920,24 @@ def extract_java_file(
             docstring="",
             annotations=annotations,
         ))
+
+        # 17c: walk the method body for call sites and emit CallEdges.
+        # Abstract / interface methods have no body — `body=None` →
+        # _walk_calls returns []. Constructors and compact constructors
+        # always have a body when present. Static / instance initializer
+        # blocks are NOT method declarations and never reach here, so
+        # their calls are silently skipped (documented limitation).
+        body_node = node.child_by_field_name("body")
+        if body_node is not None:
+            for callee_qn, line in _walk_calls(
+                source, body_node, local_names, module_qn,
+            ):
+                batch.calls.append(CallEdge(
+                    repo=repo.name,
+                    caller_qn=fn_qn,
+                    callee_qn=callee_qn,
+                    line=line,
+                ))
 
     def _walk(node: Any, parent_class_qn_stack: list[str]) -> None:
         """Recurse into `node`'s children. Type declarations recurse via

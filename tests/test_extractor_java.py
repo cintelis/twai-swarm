@@ -482,3 +482,279 @@ def test_enum_implements_interface(parser):
     edge = batch.inherits[0]
     assert edge.child_qn == "paint.Color"
     assert edge.parent_qn == "Named"
+
+
+# ─── 17c: Call edges (4 flavours + super/this + method references) ────────
+
+
+def test_bare_call_in_same_class_resolves_to_qn(parser):
+    """`foo() { bar(); }` with `bar()` defined in the same file →
+    CallEdge with callee_qn=`pkg.Cls.bar` (prefixed via local_names).
+    The module qn for `Cls.java` in `pkg` is `pkg.Cls`, so prefixing
+    bare `bar` produces `pkg.Cls.bar` — which is the actual qn the
+    sibling method got. Same-file resolution win.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { bar(); }\n"
+        b"    void bar() {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "pkg.Cls.bar") in edges
+
+
+def test_bare_call_to_unknown_stays_bare(parser):
+    """`unknownThing()` doesn't appear in this file's local_names →
+    callee_qn stays `"unknownThing"` (no module prefix). The resolver
+    will map it to a Symbol or to an imported function later (17d).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { unknownThing(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "unknownThing") in edges
+
+
+def test_field_access_call(parser):
+    """`obj.bar()` → method_invocation with `object=identifier` →
+    callee_qn=`"obj.bar"`. The receiver is captured verbatim; type
+    binding (resolving `obj` → `User` so this becomes `User.bar`) is
+    a future-sprint concern.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { obj.bar(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "obj.bar") in edges
+
+
+def test_this_call(parser):
+    """`this.bar()` → method_invocation with `object=this` →
+    callee_qn=`"this.bar"`. The resolver maps `this.X` to `<class>.X`
+    later — extractor stays mechanical.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { this.bar(); }\n"
+        b"    void bar() {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "this.bar") in edges
+
+
+def test_static_call(parser):
+    """`Math.max(1, 2)` → method_invocation with `object=identifier`
+    (the type name `Math`). No syntactic distinction from instance
+    calls in the AST; we emit `"Math.max"` and let the resolver
+    disambiguate later.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { Math.max(1, 2); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "Math.max") in edges
+
+
+def test_chained_field_access_call(parser):
+    """`obj.list.add(x)` → method_invocation with `object=field_access`.
+    The field_access flattens recursively to `"obj.list"`, then we
+    suffix `.add` → `"obj.list.add"`. Period-joined; documented form.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { obj.list.add(x); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    # Documented chain shape: receiver flattened with periods.
+    assert ("pkg.Cls.foo", "obj.list.add") in edges
+
+
+def test_constructor_call(parser):
+    """`new User()` → object_creation_expression with `type=type_identifier`
+    → callee_qn=`"User"`. No `User.User` form; the resolver maps
+    constructor calls by class name.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { new User(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "User") in edges
+
+
+def test_constructor_call_generic_strips_args(parser):
+    """`new ArrayList<String>()` → generic_type wrapping the head
+    type_identifier. Strip generics same as 17b's parent-name handling
+    → callee_qn=`"ArrayList"`, NOT `"ArrayList<String>"`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { new ArrayList<String>(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "ArrayList") in edges
+    # Make sure the generic args didn't leak into any callee qn.
+    for _, callee in edges:
+        assert "<" not in callee
+        assert ">" not in callee
+
+
+def test_constructor_call_scoped(parser):
+    """`new com.foo.Bar()` → scoped_type_identifier for the type field
+    → callee_qn=`"com.foo.Bar"` (dotted form preserved verbatim).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { new com.foo.Bar(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.foo", "com.foo.Bar") in edges
+
+
+def test_super_constructor_invocation(parser):
+    """`B(int x) { super(x); }` → explicit_constructor_invocation with
+    `constructor=super`. Callee_qn is the literal string `"super"`;
+    the resolver maps super-calls to the parent class's constructor.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class B extends A {\n"
+        b"    public B(int x) { super(x); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/B.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.B.B", "super") in edges
+
+
+def test_this_constructor_invocation(parser):
+    """`B() { this(0); }` → explicit_constructor_invocation with
+    `constructor=this` → callee_qn=`"this"`. Resolver maps this-call
+    to the same class's constructor (overload chain).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class B {\n"
+        b"    public B(int x) {}\n"
+        b"    public B() { this(0); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/B.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.B.B", "this") in edges
+
+
+def test_method_reference(parser):
+    """`stream.map(this::transform)` produces TWO CallEdges:
+      1. `stream.map`        (the map() invocation itself)
+      2. `this.transform`    (the method-reference, low-priority but
+                              recorded — we flatten `this::transform`
+                              with `.` separator since the resolver
+                              uses dotted callee qns uniformly)
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void foo() { stream.map(this::transform); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    # Primary edge — must always exist.
+    assert ("pkg.Cls.foo", "stream.map") in edges
+    # Method-ref edge — captured per spec.
+    assert ("pkg.Cls.foo", "this.transform") in edges
+
+
+def test_no_calls_in_abstract_method(parser):
+    """`abstract void foo();` has `body=None` → _walk_calls returns
+    empty → no CallEdges from this method. Same for unimplemented
+    interface methods. Tests asserts no edge is attributed to
+    `Cls.foo`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"abstract class Cls {\n"
+        b"    abstract void foo();\n"
+        b"    void bar() { helper(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    callers = {c.caller_qn for c in batch.calls}
+    # `foo` is abstract — no body, no edges from it.
+    assert "pkg.Cls.foo" not in callers
+    # `bar` has a body and a call — sanity-check the rest of the
+    # extractor still works.
+    assert "pkg.Cls.bar" in callers
+
+
+def test_calls_inside_lambda_attribute_to_enclosing(parser):
+    """`void run() { Runnable r = () -> doIt(); }` — the lambda body
+    is walked as part of `run`'s body, so `doIt` attributes to
+    `pkg.Cls.run`. Lambdas don't yet have synthetic enclosing
+    FunctionNodes (Sprint 17e).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void run() { Runnable r = () -> doIt(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.run", "doIt") in edges
+
+
+def test_calls_inside_anonymous_class_attribute_to_enclosing(parser):
+    """`void run() { new Runnable() { public void run() { doIt(); }}; }`
+    — for 17c, calls inside the anonymous class body attribute to
+    the ENCLOSING `run` (because `_walk_calls` recurses through
+    object_creation_expression bodies). Documented imperfection;
+    Sprint 17e introduces synthetic anon-class FunctionNodes.
+
+    We accept either:
+      - one edge from `pkg.Cls.run` to `doIt` (ideal case), or
+      - the more verbose case where `Runnable` (the constructor)
+        is also recorded — both are correct.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void run() {\n"
+        b"        new Runnable() { public void run() { doIt(); } };\n"
+        b"    }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
+    assert ("pkg.Cls.run", "doIt") in edges
