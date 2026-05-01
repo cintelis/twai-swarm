@@ -1089,6 +1089,11 @@ async function showSubmit() {
           <label for="repoBrief">Brief</label>
           <textarea id="repoBrief" required placeholder="Describe the feature(s) to add to this repo. Be specific about endpoints, files to modify, and tests to add."></textarea>
 
+          <label class="checkbox-row" style="display:flex; align-items:center; gap:8px; font-weight:normal; margin-top:8px;">
+            <input type="checkbox" id="forceReindex" />
+            <span>Force re-index (bypass SHA cache — use after extractor updates)</span>
+          </label>
+
           <button type="submit" id="repoSubmitBtn" class="btn btn-primary" disabled>Start workflow</button>
         </form>
         <div id="repoSubmitAlert"></div>
@@ -1188,6 +1193,10 @@ async function showSubmit() {
     btn.addEventListener('click', () => {
       document.getElementById('repoBrief').value = ex.brief;
       document.getElementById('repoSubmitAlert').innerHTML = '';
+      // Reset force-reindex when picking an example so a stale toggle
+      // doesn't carry over from a previous attempt.
+      const fr = document.getElementById('forceReindex');
+      if (fr) fr.checked = false;
       document.getElementById('repoBrief').focus();
     });
     featureExamplesGrid.appendChild(btn);
@@ -1268,6 +1277,7 @@ async function showSubmit() {
         branch: document.getElementById('branch').value.trim() || 'main',
         brief: document.getElementById('repoBrief').value,
         repo_name: selectedRepoForTask.repo_name,
+        force_reindex: !!document.getElementById('forceReindex').checked,
       };
       const r = await apiFetch('/repo-tasks', {
         method: 'POST',

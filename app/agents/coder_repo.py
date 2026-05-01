@@ -28,6 +28,7 @@ Returns:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from pathlib import Path
@@ -59,7 +60,7 @@ The full repo is already in your sandbox. You have the standard editing tools (l
 - repo_find_modules() — list the major modules (community clusters) of the codebase. Use this on first contact with an unfamiliar repo to learn its shape; then drill in with repo_search on a cluster's sample members.
 
 Workflow:
-1. If the brief is high-level or you're unfamiliar with this repo, start with repo_find_modules / repo_find_processes / repo_semantic_search to map the territory. Otherwise jump to repo_search.
+1. If the brief is high-level or you're unfamiliar with this repo, start with repo_find_modules / repo_find_processes / repo_semantic_search to map the territory. Otherwise jump to repo_search. When the user message starts with a "Repo recon" block, the modules and processes are pre-loaded — use them as your map. You may still drill in with `repo_find_callers` / `repo_find_definition` on specific symbols.
 2. Use repo_search to locate the relevant area of the codebase. Don't read files at random.
 3. For each candidate: repo_find_definition to see the surrounding code; repo_find_callers to understand how it's used elsewhere.
 4. Plan the minimal change. Edits should be SURGICAL — modify the smallest set of files that satisfies the brief. The repo's existing patterns and style are the source of truth.
@@ -77,13 +78,77 @@ Hard rules:
 """
 
 
-def _build_user_message(brief: str, repo_name: str) -> str:
-    return (
-        f"## Task brief\n{brief.strip()}\n\n"
+# Recon caps — keep total budget under ~1500 tokens of output. Modules cap
+# (15) is the dominant lever; samples-per-module (3) trims wide clusters.
+_RECON_MODULE_CAP = 15
+_RECON_PROCESS_CAP = 10
+_RECON_SAMPLES_PER_MODULE = 3
+
+
+def _format_recon_block(modules: list, processes: list) -> str:
+    """Render a 'Repo recon' markdown block for the user message.
+
+    `modules` is a list of objects with `.label`, `.size`, `.sample_member_qns`
+    (i.e. `ModuleSummary` from `repo_query`, but any duck-typed shape works
+    for tests). `processes` is a list of objects with `.name`, `.step_count`,
+    `.member_qns`.
+
+    Empty inputs return ""; callers detect the empty string and skip injection
+    so the user message doesn't get a meaningless header on small repos.
+    """
+    if not modules and not processes:
+        return ""
+
+    lines: list[str] = ["## Repo recon (auto-generated)"]
+
+    if modules:
+        shown = list(modules)[:_RECON_MODULE_CAP]
+        lines.append("")
+        lines.append(f"### Modules ({len(shown)})")
+        for m in shown:
+            samples = list(getattr(m, "sample_member_qns", []) or [])[:_RECON_SAMPLES_PER_MODULE]
+            sample_str = ", ".join(samples) if samples else "(no sample members)"
+            lines.append(f"- `{m.label}` ({m.size} symbols): {sample_str}")
+        if len(modules) > _RECON_MODULE_CAP:
+            lines.append(f"- …and {len(modules) - _RECON_MODULE_CAP} more")
+
+    if processes:
+        shown_p = list(processes)[:_RECON_PROCESS_CAP]
+        lines.append("")
+        lines.append(f"### Top processes ({len(shown_p)})")
+        for p in shown_p:
+            members = list(p.member_qns or [])
+            if not members:
+                chain = "(empty)"
+            elif len(members) == 1:
+                chain = members[0]
+            elif len(members) == 2:
+                chain = f"{members[0]} → {members[1]}"
+            else:
+                chain = f"{members[0]} → … → {members[-1]}"
+            lines.append(f"- `{p.name}` ({p.step_count} steps): {chain}")
+        if len(processes) > _RECON_PROCESS_CAP:
+            lines.append(f"- …and {len(processes) - _RECON_PROCESS_CAP} more")
+
+    lines.append("")
+    lines.append(
+        "_Use `repo_find_modules` / `repo_find_processes` for full detail, "
+        "or `repo_search`/`repo_find_callers` to drill in._"
+    )
+    return "\n".join(lines)
+
+
+def _build_user_message(brief: str, repo_name: str, recon_block: str = "") -> str:
+    parts: list[str] = []
+    if recon_block:
+        parts.append(recon_block)
+    parts.append(f"## Task brief\n{brief.strip()}")
+    parts.append(
         f"## Repo\nThe repository `{repo_name}` is already cloned in your workspace and its call graph is indexed.\n"
         f"Start with `list_files` to see the layout, then `repo_search` to locate the relevant code.\n"
         f"Apply the smallest change that satisfies the brief.\n"
     )
+    return "\n\n".join(parts)
 
 
 def _capture_diff(repo_root: Path) -> tuple[str, list[str]]:
@@ -148,7 +213,28 @@ async def run_agentic_repo_coder(
 
     sandbox = Sandbox.wrap(repo_root)
     tools, stats = build_tools(sandbox, neo4j_driver=neo4j_driver, repo_name=repo_name)
-    user_message = _build_user_message(brief, repo_name)
+
+    # Pre-seed the user message with a panoramic recon block so the Coder
+    # has the modules + processes in context without needing to choose to
+    # call the graph tools first. Highly-specific briefs (which name a
+    # class/algorithm) used to skip these tools entirely; injecting the
+    # output makes the choice "use this map" rather than "decide whether
+    # to fetch a map." Recon is best-effort — Neo4j hiccups don't fail
+    # the activity.
+    recon_block = ""
+    try:
+        from app import repo_query
+        modules = await asyncio.to_thread(
+            repo_query.find_modules, neo4j_driver, repo_name, _RECON_MODULE_CAP, False,
+        )
+        processes = await asyncio.to_thread(
+            repo_query.find_processes, neo4j_driver, repo_name, None, _RECON_PROCESS_CAP, False,
+        )
+        recon_block = _format_recon_block(modules, processes)
+    except Exception as e:  # noqa: BLE001 — best-effort; log and proceed.
+        logger.warning("repo recon queries failed, proceeding without recon block: %s", e)
+
+    user_message = _build_user_message(brief, repo_name, recon_block=recon_block)
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
     runner_kwargs: dict = dict(
