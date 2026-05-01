@@ -449,11 +449,13 @@ async def test_critic_incomplete_with_continuation_prompt(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_critic_handles_missing_architect_plan(tmp_path):
-    """No plan → skip the LLM judge, return verdict=complete (don't break workflow).
+    """No plan AND no brief → skip the LLM judge, return verdict=complete.
 
-    Per the docstring contract: when the Architect failed and shipped a
-    degraded output, the Critic must NOT block — there's no checklist to
-    grade against. The workflow proceeds with the Coder's diff as-is.
+    Sprint 18.1 update: when the Architect failed AND no brief is
+    provided (empty default), there's nothing to grade against and we
+    preserve the pre-18.1 "don't break the workflow" contract — verdict
+    stays "complete" with no continuation prompt. When a brief IS
+    available, see `test_critic_falls_back_to_brief_when_architect_plan_empty`.
     """
     out = await run_critic_repo(
         architect_plan=None,
@@ -469,7 +471,7 @@ async def test_critic_handles_missing_architect_plan(tmp_path):
 
 @pytest.mark.asyncio
 async def test_critic_treats_empty_subtasks_as_no_plan(tmp_path):
-    """Plan with no subtasks → skip judge, same as missing plan."""
+    """Plan with no subtasks AND no brief → same fully-degraded path."""
     out = await run_critic_repo(
         architect_plan={"narrative": "x", "subtasks": []},
         coder_diff="diff",
@@ -477,6 +479,154 @@ async def test_critic_treats_empty_subtasks_as_no_plan(tmp_path):
         repo_root=tmp_path,
     )
     assert out.verdict == "complete"
+
+
+@pytest.mark.asyncio
+async def test_critic_falls_back_to_brief_when_architect_plan_empty(tmp_path, monkeypatch):
+    """Sprint 18.1: when the Architect plan has no subtasks but a brief
+    IS available, the Critic must extract criteria from the brief and
+    grade them via the existing LLM-judge path — no more vacuous
+    verdict=complete with 0 criteria graded."""
+    extracted = ["Endpoint returns 200", "Endpoint returns 401 for expired tokens"]
+
+    async def fake_extract(brief, client):
+        # 2 fake criteria + token counts.
+        return (extracted, 100, 50)
+
+    judge_seen_plan: dict = {}
+
+    async def fake_judge(architect_plan, coder_diff, files_with_content, gate_failures):
+        # Capture what the judge is asked to grade so we can assert the
+        # synthetic plan was constructed correctly.
+        judge_seen_plan.update(architect_plan or {})
+        return (extracted, [], 200, 80)
+
+    monkeypatch.setattr(
+        "app.agents.critic_repo._extract_criteria_from_brief", fake_extract,
+    )
+    monkeypatch.setattr(
+        "app.agents.critic_repo.run_llm_checklist_judge", fake_judge,
+    )
+
+    out = await run_critic_repo(
+        architect_plan={"subtasks": []},
+        coder_diff="diff",
+        files_with_content=[],
+        repo_root=tmp_path,
+        brief="Add /healthz and a 401 handler.",
+    )
+    # The judge ran against the synthetic brief.fallback subtask.
+    assert "subtasks" in judge_seen_plan
+    assert judge_seen_plan["subtasks"][0]["id"] == "brief.fallback"
+    assert judge_seen_plan["subtasks"][0]["acceptance_criteria"] == extracted
+    # All extracted criteria graded as passing → verdict complete.
+    assert out.verdict == "complete"
+    assert sorted(out.passed_criteria) == sorted(extracted)
+    # Token totals roll the extraction tokens (100/50) into the judge
+    # tokens (200/80) for the cost-summary card.
+    assert out._tokens_in == 300
+    assert out._tokens_out == 130
+
+
+@pytest.mark.asyncio
+async def test_critic_brief_fallback_extraction_failure_stays_complete(tmp_path, monkeypatch):
+    """If the brief-extraction call also fails (returns []), the Critic
+    falls back to the pre-18.1 "skip judge, verdict=complete" path and
+    surfaces only the gate result. Don't break the workflow."""
+
+    async def fake_extract(brief, client):
+        return ([], 0, 0)
+
+    monkeypatch.setattr(
+        "app.agents.critic_repo._extract_criteria_from_brief", fake_extract,
+    )
+
+    out = await run_critic_repo(
+        architect_plan=None,
+        coder_diff="diff",
+        files_with_content=[],
+        repo_root=tmp_path,
+        brief="some brief",
+    )
+    assert out.verdict == "complete"
+    assert out.passed_criteria == []
+    assert out.failed_criteria == []
+
+
+@pytest.mark.asyncio
+async def test_extract_criteria_from_brief_returns_list(monkeypatch):
+    """Sprint 18.1 helper: parses the emit_criteria tool_use block and
+    returns the criteria list. Mocks the Anthropic client so we can
+    assert on shape without a real API call."""
+    from app.agents import critic_repo as cr
+
+    class FakeBlock:
+        def __init__(self, type_, name=None, input_=None):
+            self.type = type_
+            self.name = name
+            self.input = input_
+
+    class FakeUsage:
+        input_tokens = 42
+        output_tokens = 17
+
+    class FakeResponse:
+        content = [
+            FakeBlock(
+                "tool_use", "emit_criteria",
+                {"criteria": ["c1", "c2", "c3"]},
+            ),
+        ]
+        usage = FakeUsage()
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            # Sanity: the helper must pin tool_choice to emit_criteria
+            # so the model can't ignore the schema.
+            assert kwargs.get("tool_choice") == {
+                "type": "tool", "name": "emit_criteria",
+            }
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    criteria, tokens_in, tokens_out = await cr._extract_criteria_from_brief(
+        "Add a /healthz endpoint.", FakeClient(),
+    )
+    assert criteria == ["c1", "c2", "c3"]
+    assert tokens_in == 42
+    assert tokens_out == 17
+
+
+@pytest.mark.asyncio
+async def test_extract_criteria_from_brief_empty_brief_short_circuits():
+    """An empty brief skips the API call entirely (no tokens spent)."""
+    from app.agents import critic_repo as cr
+    criteria, ti, to = await cr._extract_criteria_from_brief("", client=object())
+    assert criteria == []
+    assert ti == 0
+    assert to == 0
+
+
+@pytest.mark.asyncio
+async def test_extract_criteria_from_brief_handles_api_error(monkeypatch):
+    """Defensive: any exception from the API call returns []."""
+    from app.agents import critic_repo as cr
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            raise RuntimeError("503 service unavailable")
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    criteria, ti, to = await cr._extract_criteria_from_brief(
+        "some brief", FakeClient(),
+    )
+    assert criteria == []
+    assert ti == 0
+    assert to == 0
 
 
 @pytest.mark.asyncio

@@ -48,10 +48,15 @@ from .coder_tools import build_tools
 logger = logging.getLogger(__name__)
 
 # Architect runs many fewer turns than the Coder — it's investigating,
-# not editing. 8 iterations is enough to call repo_find_modules +
+# not editing. Originally 8 (enough to call repo_find_modules +
 # repo_find_processes + a handful of repo_search / repo_find_callers
-# drill-ins, then emit the plan. Holds the Sonnet bill in check.
-MAX_ARCHITECT_ITERATIONS = 8
+# drill-ins, then emit the plan). Sprint 18.1 telemetry showed 8 was
+# too tight for cross-cutting briefs (Refresh Tokens A/B run 019de315):
+# the model kept investigating and never reached emit_plan, leaving the
+# Critic + Best-of-N safety nets to vacuously pass against an empty
+# subtask list. Bumped to 15 — still well under the Coder's 30 — and
+# paired with a force-emit-plan fallback below to harden the worst case.
+MAX_ARCHITECT_ITERATIONS = 15
 MAX_TOKENS_PER_TURN = 16384
 
 # Per D8: Architect uses Sonnet 4.6, distinct from the Coder's Haiku.
@@ -102,6 +107,9 @@ CRITICAL constraints:
 - Output JSON via the structured tool-use format the SDK enforces. The narrative goes in the `narrative` field; subtasks go in `subtasks`.
 
 When you have enough information to write the plan, call the `emit_plan` tool with the full structured output. That call ends your turn — do not continue investigating after emitting.
+
+CALIBRATION — iteration budget:
+You have 15 iterations of investigation. By iteration 12, you should be in 'commit mode' — call emit_plan even if your plan is rough. An imperfect plan is better than no plan, because the Critic and Reviewer downstream depend on your subtasks + acceptance_criteria. Investigating to iteration 15 without emitting leaves the safety-net pipeline with nothing to grade against.
 """
 
 
@@ -274,6 +282,77 @@ def _coerce_subtasks(raw: Any) -> list[Subtask]:
     return out
 
 
+async def _force_emit_plan(
+    client: AsyncAnthropic,
+    original_user_message: str,
+    last_text: str,
+) -> dict | None:
+    """Force the Architect to emit a plan when the iteration cap was hit.
+
+    Sprint 18.1 fallback. The main runner ran out of investigation
+    iterations without calling emit_plan (Refresh Tokens A/B run
+    019de315 failure mode). Rather than hand the workflow an empty
+    subtask list and let the Critic/Best-of-N silently no-op, we make
+    one more Sonnet call with `tool_choice` pinned to emit_plan — the
+    model MUST return the structured payload, even if the plan is
+    rough. An imperfect plan is still better than no plan because the
+    downstream safety nets need acceptance_criteria to grade against.
+
+    Returns the emit_plan tool_use input dict (with extra
+    `_forced_tokens_in` / `_forced_tokens_out` keys for accounting), or
+    None if the forced call also fails — in which case the caller
+    proceeds to the existing degraded path (empty subtasks, narrative =
+    last_text).
+    """
+    deadline_message = (
+        "Time's up. You have used your investigation budget without "
+        "calling emit_plan. You must emit your plan now with whatever "
+        "you have learned. Do not investigate further. Call emit_plan "
+        "with your best draft of subtasks (even if incomplete) and set "
+        "cross_cutting based on the brief — if the brief touches "
+        "multiple subsystems or asks for >=4 distinct items, set "
+        "cross_cutting=True. Use your prior reasoning where possible:\n\n"
+        f"{(last_text or '(no prior reasoning captured)')[:4000]}"
+    )
+    try:
+        forced_response = await client.messages.create(
+            model=ARCHITECT_MODEL,
+            max_tokens=MAX_TOKENS_PER_TURN,
+            system=ARCHITECT_REPO_SYSTEM_PROMPT,
+            tools=[_EMIT_PLAN_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": "emit_plan"},
+            messages=[
+                {"role": "user", "content": original_user_message},
+                {"role": "user", "content": deadline_message},
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("architect force-emit-plan fallback failed: %s", e)
+        return None
+
+    forced_in = int(getattr(forced_response.usage, "input_tokens", 0) or 0)
+    forced_out = int(getattr(forced_response.usage, "output_tokens", 0) or 0)
+    for block in (forced_response.content or []):
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and getattr(block, "name", None) == "emit_plan"
+        ):
+            payload = dict(getattr(block, "input", None) or {})
+            payload["_forced_tokens_in"] = forced_in
+            payload["_forced_tokens_out"] = forced_out
+            logger.info(
+                "architect force-emit-plan succeeded: %d subtasks, "
+                "cross_cutting=%s",
+                len(payload.get("subtasks") or []),
+                bool(payload.get("cross_cutting", False)),
+            )
+            return payload
+    logger.warning(
+        "architect force-emit-plan returned no emit_plan tool_use block",
+    )
+    return None
+
+
 async def run_architect_repo(
     workflow_id: str,
     repo_root: Path,
@@ -313,12 +392,13 @@ async def run_architect_repo(
     )
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
+    initial_user_message = {"role": "user", "content": user_message}
     runner_kwargs: dict = dict(
         model=ARCHITECT_MODEL,
         max_tokens=MAX_TOKENS_PER_TURN,
         system=ARCHITECT_REPO_SYSTEM_PROMPT,
         tools=tools_with_emit,
-        messages=[{"role": "user", "content": user_message}],
+        messages=[initial_user_message],
     )
     runner = client.beta.messages.tool_runner(**runner_kwargs)
 
@@ -375,6 +455,29 @@ async def run_architect_repo(
         )
     finally:
         tenant_ctx.__exit__(None, None, None)
+
+    # Sprint 18.1 force-emit-plan fallback. If the runner terminated
+    # without the model ever calling emit_plan (iteration cap hit, or
+    # transient API failure mid-investigation), fire one final stateless
+    # call to Sonnet with `tool_choice` pinned to emit_plan. The SDK's
+    # tool_runner doesn't expose mid-stream tool_choice manipulation
+    # cleanly, and replaying the runner's private message history is
+    # brittle — so we send a fresh, minimal conversation: the original
+    # brief + a deadline instruction. The model has no escape hatch
+    # because tool_choice="emit_plan" forces the structured response.
+    # This guarantees the Critic + Best-of-N safety nets downstream
+    # always have a plan to grade against, even on a degraded run.
+    if plan_payload is None:
+        plan_payload = await _force_emit_plan(
+            client, user_message, last_text,
+        )
+        if plan_payload is not None:
+            # Token accounting for the forced call lives inside the helper
+            # and bumps these counters via the returned payload's
+            # `_forced_tokens_in` / `_forced_tokens_out` keys (popped before
+            # the payload is treated as plan content).
+            total_input_tokens += int(plan_payload.pop("_forced_tokens_in", 0))
+            total_output_tokens += int(plan_payload.pop("_forced_tokens_out", 0))
 
     # Sonnet 4.6 pricing per 1M tokens (matches router.MODELS["sonnet"]).
     input_cost = total_input_tokens * 3.0 / 1_000_000

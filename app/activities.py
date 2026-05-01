@@ -597,6 +597,7 @@ async def critic_repo_task_activity(
     files_with_content: list[dict],
     tenant_id: str,
     workflow_id: str,
+    brief: str = "",
 ) -> dict:
     """Validate the Coder's diff against the Architect's checklist.
 
@@ -632,6 +633,7 @@ async def critic_repo_task_activity(
             coder_diff=coder_diff,
             files_with_content=files_with_content,
             repo_root=Path(repo_path),
+            brief=brief,
         )
     finally:
         hb_task.cancel()

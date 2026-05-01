@@ -242,9 +242,11 @@ def test_critic_activity_registered_in_worker():
 
 
 def test_critic_activity_signature():
-    """The critic activity's coroutine signature must accept the seven
+    """The critic activity's coroutine signature must accept the eight
     positional args the workflow passes (path, name, plan, diff, files,
-    tenant, wf_id)."""
+    tenant, wf_id, brief). `brief` was appended in Sprint 18.1 to feed
+    the brief-derived criteria fallback when the Architect plan is
+    degraded; it defaults to "" for backward compat."""
     import inspect
     from app import activities as acts
     fn = getattr(
@@ -255,8 +257,11 @@ def test_critic_activity_signature():
     params = list(sig.parameters.keys())
     assert params == [
         "repo_path", "repo_name", "architect_plan", "coder_diff",
-        "files_with_content", "tenant_id", "workflow_id",
+        "files_with_content", "tenant_id", "workflow_id", "brief",
     ]
+    # Sprint 18.1: backward-compat default keeps replayed Temporal
+    # histories (which call the activity without `brief`) functional.
+    assert sig.parameters["brief"].default == ""
 
 
 def test_continuation_count_max_2():
@@ -465,3 +470,56 @@ def test_workflow_imports_asyncio():
     src = inspect.getsource(wf)
     # Top-level import (not just a string mention).
     assert "import asyncio" in src
+
+
+# ─── Sprint 18.1: brief plumbing + cross_cutting heuristic fallback ─────────
+
+
+def test_workflow_passes_brief_to_critic_activity():
+    """Sprint 18.1: the workflow must pass `inp.brief` to
+    critic_repo_task_activity as the 8th positional arg so the Critic
+    can fall back to brief-derived criteria when the Architect plan is
+    degraded (empty subtasks)."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    # Locate the critic activity invocation block and assert inp.brief
+    # appears in its args list (between workflow_id and the closing
+    # bracket of the args=[] block).
+    critic_call_idx = src.find("critic_repo_task_activity,")
+    assert critic_call_idx != -1
+    # The args=[...] for the critic call should contain inp.brief.
+    after_critic = src[critic_call_idx:critic_call_idx + 800]
+    assert "inp.brief" in after_critic, (
+        "critic_repo_task_activity invocation must pass inp.brief"
+    )
+
+
+def test_workflow_uses_heuristic_when_architect_plan_degraded():
+    """Sprint 18.1: when arch_result.subtasks is empty the workflow
+    must call infer_cross_cutting_from_brief on inp.brief so Best-of-N
+    still triggers for cross-cutting briefs that hit the Architect's
+    iteration cap."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    # Heuristic helper is invoked by name.
+    assert "infer_cross_cutting_from_brief" in src
+    # Wired off the "plan is degraded" predicate.
+    assert "architect_plan_is_degraded" in src or "not arch_result.get" in src
+
+
+def test_workflow_imports_heuristics_module():
+    """The heuristic must be imported through workflow.unsafe so the
+    Temporal sandbox tolerates it (free-form imports inside @workflow.defn
+    are forbidden)."""
+    import inspect
+    from app.workflows import repo_task as wf
+    src = inspect.getsource(wf)
+    assert "from app.workflows._heuristics import infer_cross_cutting_from_brief" in src
+    # And must live inside a workflow.unsafe.imports_passed_through block.
+    block_start = src.find("with workflow.unsafe.imports_passed_through()")
+    block_end = src.find("\n\n", block_start)
+    assert block_start != -1
+    block = src[block_start:block_end]
+    assert "infer_cross_cutting_from_brief" in block

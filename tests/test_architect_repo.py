@@ -316,14 +316,23 @@ def test_architect_model_is_sonnet():
     assert ARCHITECT_MODEL == "claude-sonnet-4-6"
 
 
-def test_max_architect_iterations_is_modest():
-    """Architect investigates, doesn't edit — 8 turns is plenty.
+def test_max_iterations_is_15():
+    """Sprint 18.1 bumped 8 -> 15 after run 019de315 telemetry showed 8
+    was too tight for cross-cutting briefs (Architect kept investigating
+    and never reached emit_plan, leaving the safety nets to vacuously
+    pass against an empty subtask list). Locking the value down so a
+    future tweak is intentional — Sonnet calls are 3x Haiku and the cost
+    compounds across N=3 Best-of-N runs in 18d if the cap drifts up."""
+    assert MAX_ARCHITECT_ITERATIONS == 15
 
-    Locking the value down so a future tweak to bump it is intentional
-    (Sonnet calls are 3x Haiku; the cost compounds across N=3 Best-of-N
-    runs in 18d if the iteration cap drifts up).
-    """
-    assert MAX_ARCHITECT_ITERATIONS == 8
+
+def test_system_prompt_mentions_commit_mode():
+    """Sprint 18.1 calibration note: prompt must tell the model to
+    transition to 'commit mode' by iteration 12, even with a rough
+    plan. Without this hint the model investigates to the bitter end."""
+    p = ARCHITECT_REPO_SYSTEM_PROMPT.lower()
+    assert "iteration 12" in p
+    assert "commit mode" in p
 
 
 def test_system_prompt_forbids_writes():

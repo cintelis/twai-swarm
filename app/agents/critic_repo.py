@@ -563,6 +563,83 @@ def _parse_judge_response(text: str, criteria: list[tuple[str, str, str]]) -> di
         return {}
 
 
+async def _extract_criteria_from_brief(
+    brief: str, client: AsyncAnthropic,
+) -> tuple[list[str], int, int]:
+    """Sprint 18.1 fallback: derive acceptance criteria from the brief itself.
+
+    Used when the Architect produced an empty subtask list (force-emit
+    fallback also failed, or a regression elsewhere). Asks Sonnet to
+    enumerate the testable asks in the brief, returning them as a flat
+    list of one-line acceptance criteria the Critic can judge against
+    via the existing checklist path.
+
+    Returns (criteria, tokens_in, tokens_out). Empty list means the
+    extraction call also failed — caller proceeds with no checklist (the
+    pre-18.1 behaviour, but at least we tried).
+    """
+    if not brief or not brief.strip():
+        return ([], 0, 0)
+    try:
+        response = await client.messages.create(
+            model=CRITIC_MODEL,
+            max_tokens=2048,
+            system=(
+                "You extract testable acceptance criteria from project briefs. "
+                "Output JSON via the emit_criteria tool. Each criterion is a "
+                "single sentence stating something that should be true after "
+                "the work is complete."
+            ),
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Brief:\n{brief}\n\n"
+                    "Extract 3-10 acceptance criteria. Each criterion should "
+                    "be testable by reading the diff."
+                ),
+            }],
+            tools=[{
+                "name": "emit_criteria",
+                "description": "Emit the list of acceptance criteria",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "criteria": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 15,
+                        },
+                    },
+                    "required": ["criteria"],
+                },
+            }],
+            tool_choice={"type": "tool", "name": "emit_criteria"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "critic brief-criteria extraction failed: %s; "
+            "proceeding with no checklist", e,
+        )
+        return ([], 0, 0)
+
+    tokens_in = int(getattr(response.usage, "input_tokens", 0) or 0)
+    tokens_out = int(getattr(response.usage, "output_tokens", 0) or 0)
+    for block in (response.content or []):
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and getattr(block, "name", None) == "emit_criteria"
+        ):
+            raw = getattr(block, "input", None) or {}
+            criteria = [str(c) for c in (raw.get("criteria") or []) if c]
+            logger.info(
+                "critic extracted %d brief-derived criteria (Architect "
+                "plan was degraded)", len(criteria),
+            )
+            return (criteria, tokens_in, tokens_out)
+    return ([], tokens_in, tokens_out)
+
+
 async def run_llm_checklist_judge(
     architect_plan: dict,
     coder_diff: str,
@@ -753,42 +830,87 @@ async def run_critic_repo(
     coder_diff: str,
     files_with_content: list[dict],
     repo_root: Path,
+    brief: str = "",
 ) -> CriticRepoOutput:
     """Run gate + LLM judge, build the verdict.
 
     If `architect_plan` is None / empty (Architect failed and shipped a
-    degraded output) the Critic SKIPS — we have no checklist to grade
-    against, so we return verdict="complete" with a note. The workflow
-    proceeds to push as if the single-Coder run was the final answer.
-    Don't break the workflow because planning failed earlier.
+    degraded output), Sprint 18.1 falls back to extracting acceptance
+    criteria from the `brief` itself via a Sonnet helper. This avoids
+    the vacuous "verdict=complete with 0 criteria graded" failure mode
+    surfaced in run 019de315 — the Critic must validate SOMETHING.
+
+    If both the plan AND the brief-fallback yield zero criteria, the
+    Critic still returns verdict="complete" with the gate result (the
+    pre-18.1 behaviour), so a degraded run never blocks the workflow.
+
+    `brief` defaults to "" for backward compat with pre-18.1 callers
+    (test fixtures, replayed Temporal histories). Activity callers
+    should always pass it.
     """
     files_changed = [str(f.get("path", "")) for f in (files_with_content or []) if f.get("path")]
 
     # Stage 1: deterministic gate.
     gate_passed, gate_failures = run_deterministic_gate(repo_root, files_changed)
 
-    # If we have no plan, skip the LLM judge — there's nothing to grade.
-    # We still report the gate result so the operator sees ruff/compileall
-    # output even on architect-failed runs.
-    if not architect_plan or not isinstance(architect_plan, dict) or not architect_plan.get("subtasks"):
-        logger.info(
-            "critic skipping LLM judge: no architect_plan / no subtasks "
-            "(degraded path); gate_passed=%s",
-            gate_passed,
+    # Sprint 18.1: detect the degraded-Architect path and try to recover
+    # by extracting criteria from the brief. Anything that yields a
+    # non-empty checklist below means we still get a real LLM-judge pass.
+    plan_for_judge = architect_plan
+    fallback_tokens_in = 0
+    fallback_tokens_out = 0
+    if (
+        not architect_plan
+        or not isinstance(architect_plan, dict)
+        or not architect_plan.get("subtasks")
+    ):
+        client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
+        fallback_criteria, fallback_tokens_in, fallback_tokens_out = (
+            await _extract_criteria_from_brief(brief, client)
         )
-        return CriticRepoOutput(
-            verdict="complete",
-            passed_criteria=[],
-            failed_criteria=[],
-            deterministic_gate_passed=gate_passed,
-            gate_failures=gate_failures,
-            continuation_prompt=None,
-        )
+        if fallback_criteria:
+            # Synthesise a minimal plan dict the existing judge can consume.
+            # All criteria sit under one synthetic "brief.fallback" subtask
+            # so the flat-index numbering stays stable.
+            plan_for_judge = {
+                "subtasks": [{
+                    "id": "brief.fallback",
+                    "description": "Brief asks (Architect-degraded fallback)",
+                    "acceptance_criteria": fallback_criteria,
+                }],
+            }
+        else:
+            # Both Architect and brief-fallback failed; no checklist to
+            # grade. Preserve the pre-18.1 "don't break the workflow"
+            # contract — surface the gate result and exit complete.
+            logger.info(
+                "critic skipping LLM judge: no architect_plan / no "
+                "subtasks AND brief-fallback yielded no criteria "
+                "(fully degraded path); gate_passed=%s",
+                gate_passed,
+            )
+            input_cost = fallback_tokens_in * 3.0 / 1_000_000
+            output_cost = fallback_tokens_out * 15.0 / 1_000_000
+            return CriticRepoOutput(
+                verdict="complete",
+                passed_criteria=[],
+                failed_criteria=[],
+                deterministic_gate_passed=gate_passed,
+                gate_failures=gate_failures,
+                continuation_prompt=None,
+                _tokens_in=fallback_tokens_in,
+                _tokens_out=fallback_tokens_out,
+                _cost_usd=round(input_cost + output_cost, 6),
+            )
 
     # Stage 2: LLM checklist judge.
     passed, failed, tokens_in, tokens_out = await run_llm_checklist_judge(
-        architect_plan, coder_diff, files_with_content, gate_failures,
+        plan_for_judge, coder_diff, files_with_content, gate_failures,
     )
+    # Roll the fallback-extraction tokens into the Critic's total cost
+    # so the cost-summary card doesn't lose them.
+    tokens_in += fallback_tokens_in
+    tokens_out += fallback_tokens_out
 
     # Verdict: incomplete if EITHER stage flags a problem.
     has_blocking_failure = any(cf.severity == "block" for cf in failed)
@@ -796,8 +918,12 @@ async def run_critic_repo(
 
     continuation_prompt: str | None = None
     if incomplete:
+        # Pass `plan_for_judge` (which equals architect_plan when the
+        # Architect was healthy, OR the synthetic brief-fallback plan
+        # when degraded) so the handoff doc references the same criteria
+        # the Critic actually graded against.
         continuation_prompt = build_continuation_handoff_doc(
-            architect_plan=architect_plan,
+            architect_plan=plan_for_judge,
             prior_diff=coder_diff,
             prior_files_changed=files_changed,
             passed_criteria=passed,
@@ -848,5 +974,6 @@ __all__ = [
     "run_critic_repo",
     "run_deterministic_gate",
     "run_llm_checklist_judge",
+    "_extract_criteria_from_brief",
 ]
 _ = os  # silence unused-import lint until a caller needs it

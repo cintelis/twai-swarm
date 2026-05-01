@@ -39,6 +39,9 @@ with workflow.unsafe.imports_passed_through():
         # Sprint 18d — Reviewer Best-of-N selection.
         reviewer_repo_task_activity,
     )
+    # Sprint 18.1 — pure heuristic for cross_cutting fallback when
+    # the Architect plan is degraded (empty subtasks).
+    from app.workflows._heuristics import infer_cross_cutting_from_brief
 
 
 # Sprint 18c: hard cap on continuation Coder passes after the initial
@@ -178,7 +181,20 @@ class RepoTaskWorkflow:
         # Critic loop below then operates on the winner only — running
         # continuations on losers would waste 2-6x cost for no quality
         # gain (their work is discarded).
-        is_cross_cutting = bool(arch_result.get("cross_cutting", False))
+        # Sprint 18.1: when the Architect plan is degraded (empty
+        # subtasks because emit_plan was never called and the
+        # force-emit fallback also failed), the model has no signal
+        # left to set cross_cutting. Fall back to a pure heuristic on
+        # the brief itself so cross-cutting briefs still trigger
+        # Best-of-N — the safety net 18d is meant to provide.
+        architect_says_cross_cutting = bool(arch_result.get("cross_cutting", False))
+        architect_plan_is_degraded = not arch_result.get("subtasks")
+        if architect_says_cross_cutting:
+            is_cross_cutting = True
+        elif architect_plan_is_degraded:
+            is_cross_cutting = infer_cross_cutting_from_brief(inp.brief)
+        else:
+            is_cross_cutting = False
         reviewer_result_dict: dict | None = None
         best_of_n_count = 1
         if is_cross_cutting and not inp.disable_best_of_n:
@@ -244,6 +260,10 @@ class RepoTaskWorkflow:
                     clone_result["path"], repo_name, arch_result,
                     coder_result["diff"], coder_result["files_with_content"],
                     inp.tenant_id, workflow.info().workflow_id,
+                    # Sprint 18.1: pass the brief so the Critic can fall
+                    # back to brief-derived criteria when the Architect
+                    # plan is degraded (empty subtasks).
+                    inp.brief,
                 ],
                 schedule_to_close_timeout=timedelta(minutes=10),
                 heartbeat_timeout=timedelta(minutes=2),
