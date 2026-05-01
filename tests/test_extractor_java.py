@@ -1175,3 +1175,304 @@ def test_nested_class_qn_unchanged_by_17e(parser):
     assert "pkg.Outer.Inner.foo" in fn_qns
     # No overload suffix on `foo` (it's a singleton).
     assert "pkg.Outer.Inner.foo:" not in str(fn_qns)
+
+
+# ─── 17f: Spring routes domain extractor ───────────────────────────────────
+
+def _scan_routes(parser, rel_path: str, src: bytes):
+    """Helper for 17f tests — runs extract_java_file with extract_routes=True."""
+    return extract_java_file(
+        REPO, rel_path, src, "sha", parser,
+        repo_files=set(), extract_routes=True,
+    )
+
+
+def test_simple_get_mapping(parser):
+    """`@RestController class C { @GetMapping("/users") String list() }`
+    → ONE RouteNode with method=GET, path=/users, handler_qn matches
+    the FunctionNode qn.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/users\")\n"
+        b"    public String list() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    r = batch.routes[0]
+    assert r.method == "GET"
+    assert r.path == "/users"
+    assert r.handler_qn == "pkg.C.list"
+    assert r.framework == "spring"
+    assert r.raw_path == "/users"
+    # RouteEdge mirrors the node.
+    assert len(batch.route_edges) == 1
+    e = batch.route_edges[0]
+    assert (e.path, e.method, e.handler_qn) == ("/users", "GET", "pkg.C.list")
+
+
+def test_class_level_request_mapping_prefix_composition(parser):
+    """Class-level `@RequestMapping("/api")` + method-level
+    `@GetMapping("/users")` → composed path `/api/users`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"@RequestMapping(\"/api\")\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/users\")\n"
+        b"    public String list() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    assert batch.routes[0].path == "/api/users"
+    assert batch.routes[0].method == "GET"
+
+
+def test_post_put_delete_patch_mappings(parser):
+    """All four verb-specific shorthands on one controller →
+    four RouteNodes with the right HTTP methods.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @PostMapping(\"/p\")  public String p() { return \"\"; }\n"
+        b"    @PutMapping(\"/u\")   public String u() { return \"\"; }\n"
+        b"    @DeleteMapping(\"/d\") public String d() { return \"\"; }\n"
+        b"    @PatchMapping(\"/x\") public String x() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    by_method = {r.method: r for r in batch.routes}
+    assert set(by_method) == {"POST", "PUT", "DELETE", "PATCH"}
+    assert by_method["POST"].path == "/p"
+    assert by_method["PUT"].path == "/u"
+    assert by_method["DELETE"].path == "/d"
+    assert by_method["PATCH"].path == "/x"
+    # Each handler resolves to its FunctionNode.
+    assert by_method["POST"].handler_qn == "pkg.C.p"
+    assert by_method["PATCH"].handler_qn == "pkg.C.x"
+
+
+def test_request_mapping_long_form(parser):
+    """`@RequestMapping(method = RequestMethod.GET, value = "/x")`
+    → RouteNode with method=GET, path=/x.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @RequestMapping(method = RequestMethod.GET, value = \"/x\")\n"
+        b"    public String x() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    r = batch.routes[0]
+    assert r.method == "GET"
+    assert r.path == "/x"
+
+
+def test_request_mapping_multiple_methods(parser):
+    """`@RequestMapping(value = "/x", method = {RequestMethod.GET,
+    RequestMethod.POST})` → 2 RouteNodes, same path, different methods.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @RequestMapping(value = \"/x\","
+        b" method = {RequestMethod.GET, RequestMethod.POST})\n"
+        b"    public String handle() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 2
+    methods = sorted(r.method for r in batch.routes)
+    assert methods == ["GET", "POST"]
+    assert all(r.path == "/x" for r in batch.routes)
+    assert all(r.handler_qn == "pkg.C.handle" for r in batch.routes)
+
+
+def test_no_controller_annotation_no_routes(parser):
+    """A class with `@GetMapping` on a method but NO `@RestController`
+    / `@Controller` on the class → ZERO RouteNodes (strict v1 gating).
+    """
+    src = (
+        b"package pkg;\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/users\")\n"
+        b"    public String list() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert batch.routes == []
+    assert batch.route_edges == []
+
+
+def test_extract_routes_flag_false_emits_nothing(parser):
+    """`extract_routes=False` (the default) → ZERO RouteNodes even on
+    a properly-annotated controller.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/users\")\n"
+        b"    public String list() { return \"\"; }\n"
+        b"}\n"
+    )
+    # Use the default-behaviour _scan helper (no extract_routes flag).
+    batch = _scan(parser, "src/pkg/C.java", src)
+    assert batch.routes == []
+    assert batch.route_edges == []
+
+
+def test_path_normalization(parser):
+    """`@GetMapping(" /Users/ ")` → path=`/users` (lower-cased,
+    trailing-slash stripped). Validates routing through
+    `routes_common.normalize_path`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @GetMapping(\" /Users/ \")\n"
+        b"    public String list() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    assert batch.routes[0].path == "/users"
+    # raw_path keeps the original (post-compose) form for debug.
+    assert "Users" in batch.routes[0].raw_path or "users" in batch.routes[0].raw_path
+
+
+def test_path_variable_preserved(parser):
+    """`@GetMapping("/users/{id}")` → path=`/users/{id}` —
+    `{id}` syntax is preserved by normalize_path (it just lowercases).
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/users/{id}\")\n"
+        b"    public String get() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    assert batch.routes[0].path == "/users/{id}"
+
+
+def test_handler_qn_uses_overload_suffix_when_present(parser):
+    """Two `@PostMapping("/x")` methods with different signatures →
+    each RouteNode's handler_qn carries the overload suffix so it
+    points at the right disambiguated FunctionNode.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"public class C {\n"
+        b"    @PostMapping(\"/x\") public String h(int a) { return \"\"; }\n"
+        b"    @PostMapping(\"/x\") public String h(String a) { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    # Two route nodes (one per overload).
+    assert len(batch.routes) == 2
+    handler_qns = sorted(r.handler_qn for r in batch.routes)
+    # Each handler_qn carries the overload-disambiguated qn from 17e.
+    assert handler_qns == ["pkg.C.h:String", "pkg.C.h:int"]
+    # And both handler_qns appear as actual FunctionNode qns.
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.C.h:int" in fn_qns
+    assert "pkg.C.h:String" in fn_qns
+
+
+def test_realistic_spring_controller(parser):
+    """End-to-end: a CalculatorController-shaped fixture mirroring the
+    fullstack-calculator audit. Two `@GetMapping`s with absolute paths
+    and no class-level prefix → 2 RouteNodes with correct paths +
+    handler qns.
+    """
+    src = (
+        b"package com.bench;\n"
+        b"@RestController\n"
+        b"public class CalculatorController {\n"
+        b"    @GetMapping(\"/api/calculate\")\n"
+        b"    public Result calculate() { return null; }\n"
+        b"    @GetMapping(\"/api/history\")\n"
+        b"    public java.util.List<Record> getHistory() { return null; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/com/bench/CalculatorController.java", src)
+    by_path = {r.path: r for r in batch.routes}
+    assert set(by_path) == {"/api/calculate", "/api/history"}
+    assert by_path["/api/calculate"].method == "GET"
+    assert by_path["/api/calculate"].handler_qn == "com.bench.CalculatorController.calculate"
+    assert by_path["/api/history"].method == "GET"
+    assert by_path["/api/history"].handler_qn == "com.bench.CalculatorController.getHistory"
+    assert all(r.framework == "spring" for r in batch.routes)
+    assert all(r.file_path == "src/com/bench/CalculatorController.java" for r in batch.routes)
+
+
+def test_class_level_request_mapping_with_auth_prefix(parser):
+    """Plan fixture: `@RequestMapping("/api/auth")` on the class +
+    `@PostMapping("/login")` on the method → composed `/api/auth/login`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"@RequestMapping(\"/api/auth\")\n"
+        b"public class AuthController {\n"
+        b"    @PostMapping(\"/login\")\n"
+        b"    public String login() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/AuthController.java", src)
+    assert len(batch.routes) == 1
+    r = batch.routes[0]
+    assert r.path == "/api/auth/login"
+    assert r.method == "POST"
+
+
+def test_request_mapping_no_value_uses_class_prefix_only(parser):
+    """`@GetMapping` (no parens, no path) on a method inside a class
+    with `@RequestMapping("/api")` → path equals the class prefix only.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@RestController\n"
+        b"@RequestMapping(\"/api\")\n"
+        b"public class C {\n"
+        b"    @GetMapping\n"
+        b"    public String root() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    assert batch.routes[0].path == "/api"
+    assert batch.routes[0].method == "GET"
+
+
+def test_controller_marker_alone_is_recognised(parser):
+    """`@Controller` (the non-Rest variant) on a class also enables
+    route extraction — same gating as `@RestController` for v1.
+    """
+    src = (
+        b"package pkg;\n"
+        b"@Controller\n"
+        b"public class C {\n"
+        b"    @GetMapping(\"/page\")\n"
+        b"    public String page() { return \"\"; }\n"
+        b"}\n"
+    )
+    batch = _scan_routes(parser, "src/pkg/C.java", src)
+    assert len(batch.routes) == 1
+    assert batch.routes[0].path == "/page"

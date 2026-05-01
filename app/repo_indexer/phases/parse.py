@@ -131,6 +131,7 @@ def _pool_extract(args: tuple) -> tuple:
             fragment = extract_java_file(
                 repo, rel_path, source, sha, _JAVA_PARSER,
                 repo_files=repo_files,
+                extract_routes=extract_routes,
             )
         else:
             return (rel_path, None, None)
@@ -215,6 +216,7 @@ class ParsePhase:
                         fragment = extract_java_file(
                             ctx.repo, rel_path, source, sha, ctx.java_parser,
                             repo_files=ctx.repo_files,
+                            extract_routes=ctx.extract_routes,
                         )
                     else:
                         continue

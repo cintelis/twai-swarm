@@ -1165,6 +1165,7 @@ def extract_java_file(
     sha: str,
     parser: Any,
     repo_files: set[str] | None = None,
+    extract_routes: bool = False,
 ) -> IndexBatch:
     """Parse one .java file and return its IndexBatch fragment.
 
@@ -1172,6 +1173,13 @@ def extract_java_file(
     but not currently consumed — Java import targets are dotted
     qualified names (not file paths), so cross-file resolution lives in
     the loader / resolver, not the extractor.
+
+    `extract_routes` (Sprint 17f) opts in to Spring HTTP route
+    extraction. When True, classes carrying `@RestController` /
+    `@Controller` and methods with `@GetMapping` / `@PostMapping` /
+    `@RequestMapping(...)` etc. produce RouteNode + RouteEdge records.
+    Default off to keep scans fast and to maintain backwards
+    compatibility with earlier 17a-e callers.
     """
     del repo_files  # Reserved for future use; resolver handles xref now.
 
@@ -1213,6 +1221,17 @@ def extract_java_file(
     local_names: set[str] = set()
     _collect_local_function_names(root, source, local_names)
 
+    # 17f: per-class collector for Spring routes post-pass. Maps each
+    # class_qn to (class_annotations, [(fn_index, method_annotations,
+    # line_start), ...]) — fn_index is the position in `batch.functions`
+    # so the post-pass can read the FINAL qn (after 17e's overload
+    # disambiguation has run). Populated by `_emit_class` /
+    # `_emit_function` during the normal walk, drained at the end if
+    # `extract_routes` is True. Keeps route extraction off the hot path
+    # of the AST walk and avoids threading class-level state through
+    # `_emit_function`'s call graph.
+    controllers: dict[str, tuple[tuple[str, ...], list[tuple[int, tuple[str, ...], int]]]] = {}
+
     def _emit_class(node: Any, parent_class_qn_stack: list[str]) -> None:
         """Emit ClassNode for one type declaration (class / interface /
         enum / record / annotation_type) and recurse into its body for
@@ -1248,6 +1267,14 @@ def extract_java_file(
             docstring="",
             annotations=annotations,
         ))
+
+        # 17f: register this class as a candidate for route extraction.
+        # Cheap — just records annotations + an empty method list. The
+        # post-pass filters out non-controllers before doing any work.
+        # Inner classes get their own entry; the gating on
+        # `@RestController`/`@Controller` happens in routes_java.
+        if extract_routes:
+            controllers[class_qn] = (annotations, [])
 
         # 17b: emit InheritsEdges for `extends` + `implements` clauses.
         # Implicit `java.lang.Object` (classes), `java.lang.Record`
@@ -1469,6 +1496,18 @@ def extract_java_file(
             annotations=annotations,
         ))
 
+        # 17f: register this method against its enclosing class so the
+        # post-pass route extractor can pair it with the class-level
+        # `@RestController` / `@RequestMapping` annotations. We store
+        # the FunctionNode INDEX rather than its qn — overload
+        # disambiguation runs after this walk completes and rewrites
+        # the qn in place; the index stays stable.
+        if extract_routes and is_method and annotations:
+            entry = controllers.get(parent_class_qn)
+            if entry is not None:
+                fn_idx = len(batch.functions) - 1
+                entry[1].append((fn_idx, annotations, line_start))
+
         # 17c/17e: walk the method body for call sites and emit
         # CallEdges. Abstract / interface methods have no body —
         # `body=None` → _emit_calls_for_caller is a no-op. Constructors
@@ -1520,6 +1559,28 @@ def extract_java_file(
     # 17e: post-pass — append `:type1,type2,...` qn suffix to overload
     # groups (≥2 methods on the same class with the same name).
     _disambiguate_overloads(batch)
+
+    # 17f: post-pass — Spring route extraction. Runs AFTER overload
+    # disambiguation so handler_qn on emitted RouteNodes matches the
+    # final FunctionNode qn (overload-suffix included where applicable).
+    # Strict v1 gating (`@RestController` / `@Controller` required)
+    # lives in routes_java.extract_routes_for_controller; we just hand
+    # it the per-class data and append whatever it returns.
+    if extract_routes and controllers:
+        from .domain_extractors.routes_java import extract_routes_for_controller
+        for class_qn, (class_annotations, method_entries) in controllers.items():
+            del class_qn  # only kept for readability of the loop body
+            # Resolve fn_idx → final qn now (post-disambiguation).
+            resolved_methods: list[tuple[str, tuple[str, ...], int]] = [
+                (batch.functions[fn_idx].qualified_name, anns, line)
+                for fn_idx, anns, line in method_entries
+            ]
+            for route_node, route_edge in extract_routes_for_controller(
+                class_annotations, resolved_methods, rel_path,
+                repo.name, repo.tenant_id,
+            ):
+                batch.routes.append(route_node)
+                batch.route_edges.append(route_edge)
 
     return batch
 
