@@ -396,11 +396,17 @@ async def index_repo_activity(
     repo_name: str,
     commit_sha: str,
     tenant_id: str = "default",
+    force_reindex: bool = False,
 ) -> dict:
     """Run the repo indexer over `repo_path` and write to Neo4j.
 
     Returns the IndexBatch counts dict so the workflow output can include
     "we indexed X files / Y functions before the Coder ran."
+
+    `force_reindex=True` bypasses the per-file SHA short-circuit so files
+    indexed by a prior extractor version get re-extracted (e.g. after
+    Sprint 17 added Java support, JS/TS files cached from earlier scans
+    needed re-extraction to pick up new edges).
     """
     from pathlib import Path
     from app.repo_indexer.actions import IndexBatch, RepoNode
@@ -413,6 +419,18 @@ async def index_repo_activity(
     import tree_sitter_typescript as tsts
     from tree_sitter import Language, Parser
 
+    # Sprint 17 — best-effort cpp/java parsers. Mirrors the `_pool_init`
+    # pattern in phases/parse.py: if the grammar isn't installed, leave
+    # the parser as None and the parse phase logs+skips those files.
+    try:
+        import tree_sitter_cpp as tscpp
+    except Exception:  # noqa: BLE001
+        tscpp = None
+    try:
+        import tree_sitter_java as tsjava
+    except Exception:  # noqa: BLE001
+        tsjava = None
+
     repo_root = Path(repo_path).resolve()
     if not repo_root.is_dir():
         raise FileNotFoundError(f"repo_path {repo_root} is not a directory")
@@ -423,6 +441,14 @@ async def index_repo_activity(
         "typescript": Parser(Language(tsts.language_typescript())),
         "tsx":        Parser(Language(tsts.language_tsx())),
     }
+    try:
+        cpp_parser = Parser(Language(tscpp.language())) if tscpp is not None else None
+    except Exception:  # noqa: BLE001
+        cpp_parser = None
+    try:
+        java_parser = Parser(Language(tsjava.language())) if tsjava is not None else None
+    except Exception:  # noqa: BLE001
+        java_parser = None
 
     aggregate = IndexBatch(repo=repo)
 
@@ -441,10 +467,16 @@ async def index_repo_activity(
         ctx = PhaseContext(
             repo=repo,
             repo_root=repo_root,
-            languages=("python", "typescript", "javascript"),
+            # Java + cpp added in Sprint 17 — walker filters by this list,
+            # so omitting them silently drops every .java/.cpp file from
+            # the parse pipeline. (That's how we shipped a "Java extractor"
+            # that never fired in the Temporal activity path.)
+            languages=("python", "typescript", "javascript", "cpp", "java"),
             batch=aggregate,
             py_parser=py_parser,
             ts_parsers=ts_parsers,
+            cpp_parser=cpp_parser,
+            java_parser=java_parser,
             progress=_progress,
             driver=driver,
             # Sequential parsing inside a Temporal activity. multiprocessing.Pool
@@ -457,6 +489,16 @@ async def index_repo_activity(
             # that want them set this flag via a separate mechanism (env var
             # or workflow input field) — out of scope for this refactor.
             embed_enabled=False,
+            # Routes are universally cheap to extract (a handful of decorator
+            # / method-call patterns per file) so we always turn them on
+            # for repo-task scans. Affects FastAPI/Flask/Express (Sprint 15a)
+            # and Spring (Sprint 17f).
+            extract_routes=True,
+            # Sprint 17 post-deploy fix: opt-in cache bust for callers that
+            # need to re-extract files whose on-disk SHA hasn't changed
+            # (e.g. extractor-version bump). Default False keeps incremental
+            # scans fast.
+            force_reindex=force_reindex,
         )
         run_pipeline(ctx, DEFAULT_PHASES)
         activity.heartbeat("writing to Neo4j")

@@ -168,3 +168,62 @@ def test_capture_diff_clean_repo_returns_empty(tmp_path):
     diff, files = _capture_diff(repo)
     assert diff == ""
     assert files == []
+
+
+# ─── Sprint 17 post-deploy: force_reindex + Java/CPP wiring regression ──────
+# These guard against silently dropping Java/CPP support from the Temporal
+# activity again. We don't invoke the activity end-to-end (needs Neo4j +
+# tree-sitter-java); source-string assertions are the cheap regression.
+
+def test_phase_context_force_reindex_field_exists():
+    from app.repo_indexer.actions import IndexBatch, RepoNode
+    from app.repo_indexer.runner import PhaseContext
+
+    repo = RepoNode(name="r", url="", commit_sha="")
+    ctx = PhaseContext(
+        repo=repo,
+        repo_root=Path("."),
+        languages=("python",),
+        batch=IndexBatch(repo=repo),
+        force_reindex=True,
+    )
+    assert ctx.force_reindex is True
+
+
+def test_repo_task_input_force_reindex_default_false():
+    from app.workflows import RepoTaskInput
+    inp = RepoTaskInput(repo_url="https://x/y.git", branch="main", brief="do thing")
+    assert inp.force_reindex is False
+
+
+def test_repo_task_input_accepts_force_reindex():
+    from app.workflows import RepoTaskInput
+    inp = RepoTaskInput(
+        repo_url="https://x/y.git", branch="main", brief="do thing",
+        force_reindex=True,
+    )
+    assert inp.force_reindex is True
+
+
+def test_index_activity_languages_includes_java_and_cpp():
+    """Regression: ensure the activity's hardcoded languages tuple keeps
+    java and cpp. Previously walker filtering silently dropped both."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(acts.index_repo_activity, "__wrapped__", acts.index_repo_activity)
+    src = inspect.getsource(fn)
+    assert '"java"' in src
+    assert '"cpp"' in src
+
+
+def test_index_activity_constructs_java_parser():
+    """Regression: the activity must instantiate the java parser before
+    handing it to PhaseContext, otherwise ParsePhase logs "java parser
+    unavailable" for every .java file."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(acts.index_repo_activity, "__wrapped__", acts.index_repo_activity)
+    src = inspect.getsource(fn)
+    assert "tree_sitter_java" in src
+    assert "java_parser" in src
+    assert "Parser(Language(tsjava.language()))" in src

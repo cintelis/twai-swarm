@@ -153,7 +153,10 @@ class ParsePhase:
         # is wired in and the test harness hasn't pre-seeded the cache.
         # `driver is None` (dry-run / unit tests) leaves the cache empty
         # and the short-circuit naturally disabled.
-        if ctx.driver is not None and not ctx.prior_shas:
+        # Sprint 17 post-deploy: `ctx.force_reindex` skips the prefetch so
+        # files cached by a prior extractor version get re-extracted even
+        # when their on-disk SHA is unchanged.
+        if ctx.driver is not None and not ctx.prior_shas and not ctx.force_reindex:
             from ..loader import fetch_file_shas
             ctx.prior_shas = fetch_file_shas(
                 ctx.driver, ctx.repo.name, ctx.repo.tenant_id,

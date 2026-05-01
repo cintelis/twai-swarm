@@ -42,6 +42,11 @@ class RepoTaskInput:
     repo_name: str = ""      # name to register in Neo4j (defaults to URL's last path segment)
     tenant_id: str = "default"
     auto_pr: bool = True     # open a PR via the GitHub App when Coder finishes (default on)
+    # Sprint 17 post-deploy fix: bypass the indexer's per-file SHA short-circuit
+    # when an extractor-version bump means previously-cached files need to be
+    # re-extracted (e.g. Java extractor + Spring routes added in 17). Defaults
+    # off so routine repo-task runs stay incremental.
+    force_reindex: bool = False
 
 
 @dataclass
@@ -87,7 +92,7 @@ class RepoTaskWorkflow:
 
         await workflow.execute_activity(
             index_repo_activity,
-            args=[clone_result["path"], repo_name, clone_result["commit_sha"], inp.tenant_id],
+            args=[clone_result["path"], repo_name, clone_result["commit_sha"], inp.tenant_id, inp.force_reindex],
             schedule_to_close_timeout=timedelta(minutes=10),
             heartbeat_timeout=timedelta(minutes=2),
         )

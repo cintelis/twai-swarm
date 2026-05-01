@@ -99,3 +99,40 @@ def test_mixed_skips_unchanged_only(tmp_path, parser):
     assert ctx.batch.files[0].path == "b.py"
     qns = {fn.qualified_name for fn in ctx.batch.functions}
     assert qns == {"b.beta"}
+
+
+def test_force_reindex_bypasses_sha_prefetch(tmp_path, parser, monkeypatch):
+    """Sprint 17 post-deploy fix: force_reindex=True must skip the
+    fetch_file_shas call so previously-cached files get re-extracted.
+
+    We wire a sentinel driver and monkey-patch fetch_file_shas to raise
+    — if ParsePhase calls it the test fails; if force_reindex correctly
+    short-circuits the prefetch, the run completes normally.
+    """
+    _make_repo(tmp_path)
+
+    def _explode(*args, **kwargs):  # pragma: no cover — test asserts NOT called
+        raise AssertionError("fetch_file_shas must not be called when force_reindex=True")
+
+    # Patch the symbol where ParsePhase imports it from.
+    from app.repo_indexer import loader
+    monkeypatch.setattr(loader, "fetch_file_shas", _explode)
+
+    sentinel_driver = object()  # truthy-non-None — would normally trigger prefetch
+    ctx = PhaseContext(
+        repo=REPO,
+        repo_root=tmp_path,
+        languages=("python",),
+        batch=IndexBatch(repo=REPO),
+        py_parser=parser,
+        ts_parsers=None,
+        driver=sentinel_driver,
+        prior_shas={},
+        force_reindex=True,
+    )
+    ParsePhase().run(ctx)
+
+    # Both files should have been extracted (prefetch was bypassed AND
+    # prior_shas was empty, so nothing skipped).
+    assert ctx.skipped_files == 0
+    assert len(ctx.batch.files) == 2

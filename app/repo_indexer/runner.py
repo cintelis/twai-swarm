@@ -49,6 +49,13 @@ class PhaseContext:
     driver: Any = None
     prior_shas: dict[str, str] = field(default_factory=dict)
     skipped_files: int = 0
+    # Sprint 17 post-deploy fix. Forces re-extraction by ignoring prior
+    # SHAs from Neo4j. Use after extractor-version bumps that change what
+    # gets emitted from existing files (e.g. adding Java + Spring routes
+    # made previously-cached JS/TS files need a re-scan to pick up new
+    # edges, but their on-disk SHAs are unchanged so the SHA short-circuit
+    # would skip them). Default False so incremental scans stay efficient.
+    force_reindex: bool = False
     # Sprint 11c: parallel parse. <=1 → sequential (default, byte-identical to
     # pre-11c). >=2 → multiprocessing.Pool, one tree-sitter parser set per
     # worker (parsers aren't picklable). CLI default is cpu_count()//2 but the

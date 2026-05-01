@@ -177,6 +177,11 @@ class CreateRepoTaskReq(BaseModel):
     brief: str
     repo_name: str | None = None      # default: derive from URL
     tenant_id: str | None = None
+    # Sprint 17 post-deploy: opt-in cache bust for the indexer SHA
+    # short-circuit. Set true after extractor-version bumps so previously
+    # cached files get re-extracted. Default False to preserve fast incremental
+    # scans on the common path.
+    force_reindex: bool = False
 
 
 class CreateRepoTaskResp(BaseModel):
@@ -209,6 +214,7 @@ async def create_repo_task(request: Request, req: CreateRepoTaskReq):
             brief=req.brief,
             repo_name=req.repo_name or "",
             tenant_id=tenant_id,
+            force_reindex=req.force_reindex,
         ),
         id=workflow_id,
         task_queue="project-workflows",
