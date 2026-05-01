@@ -177,3 +177,75 @@ def test_repo_task_activities_still_have_activity_defn():
         assert hasattr(fn, "__temporal_activity_definition") or hasattr(fn, "__wrapped__"), (
             f"{fn.__name__} no longer looks like a Temporal activity"
         )
+
+
+# ─── Sprint 19.1: greenfield activity wiring ───────────────────────────────
+
+
+def test_run_agent_activity_wraps_in_workflow_trace_when_workflow_id_provided():
+    """Sprint 19.1: greenfield run_agent_activity wraps body in workflow_trace
+    + agent_span using `phase=f"agent.{input.role}"` and `name=f"agent.{input.role}"`
+    so each agent role nests as its own span under the project trace."""
+    src = _src(activities.run_agent_activity)
+    assert "observability.workflow_trace(" in src
+    assert "observability.agent_span(" in src
+    assert 'phase=f"agent.{input.role}"' in src
+    assert 'name=f"agent.{input.role}"' in src
+    assert "agent_role=input.role" in src
+
+
+def test_run_agent_activity_no_workflow_trace_when_workflow_id_empty():
+    """Sprint 19.1: when workflow_id is empty (legacy callers, replayed
+    histories), the wrap is skipped so no bogus empty-id trace is emitted.
+    Source-string asserts the guard exists."""
+    src = _src(activities.run_agent_activity)
+    # The signature defaults workflow_id to "" so older call sites without
+    # the arg keep working.
+    assert 'workflow_id: str = ""' in src
+    # And there's a guard around the trace wrap.
+    assert "if workflow_id:" in src
+
+
+def test_run_agent_activity_calls_flush_in_finally():
+    """Sprint 19.1: per-activity flush in finally so events ship before
+    Temporal moves on (matches the repo-task pattern from Sprint 19)."""
+    src = _src(activities.run_agent_activity)
+    assert "observability.flush()" in src
+    # And it's in a `finally:` — cheapest way to assert is that the
+    # flush() call appears AFTER the last `try:` keyword in the body.
+    last_try = src.rfind("try:")
+    last_finally = src.rfind("finally:")
+    flush_pos = src.rfind("observability.flush()")
+    assert last_try < last_finally < flush_pos
+
+
+def test_run_coder_activity_wraps_in_workflow_trace():
+    """Sprint 19.1: greenfield Coder activity now also wraps its body in
+    workflow_trace + agent_span (phase="coder", agent_role="coder")."""
+    src = _src(activities.run_coder_activity)
+    assert "observability.workflow_trace(" in src
+    assert 'phase="coder"' in src
+    assert "observability.agent_span(" in src
+    assert 'name="coder"' in src
+    assert 'agent_role="coder"' in src
+
+
+def test_run_coder_activity_calls_flush_in_finally():
+    """Sprint 19.1: per-activity flush in finally for the greenfield Coder."""
+    src = _src(activities.run_coder_activity)
+    assert "observability.flush()" in src
+    # Flush is the outermost finally, after the workflow_trace wrap closes.
+    flush_pos = src.rfind("observability.flush()")
+    assert flush_pos > src.rfind("observability.workflow_trace(")
+
+
+def test_project_workflow_passes_workflow_id_to_run_agent_activity():
+    """Sprint 19.1: ProjectWorkflow.run_step now plumbs wf_id into
+    run_agent_activity's args list so the activity can wrap its body
+    in workflow_trace. Without this each greenfield agent's LLM call
+    lands as an orphan generation in Langfuse."""
+    import inspect as _inspect
+    from app.workflows.project import ProjectWorkflow
+    src = _inspect.getsource(ProjectWorkflow)
+    # The execute_activity call passes args=[task_id, task_input, wf_id].
+    assert "args=[task_id, task_input, wf_id]" in src

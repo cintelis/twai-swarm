@@ -147,7 +147,11 @@ class ProjectWorkflow:
             )
             return await workflow.execute_activity(
                 run_agent_activity,
-                args=[task_id, task_input],
+                # Sprint 19.1: pass workflow_id so the activity can wrap its
+                # body in observability.workflow_trace + agent_span. Without
+                # this each greenfield agent's LLM call lands as an orphan
+                # generation in Langfuse — same data, no nested tree.
+                args=[task_id, task_input, wf_id],
                 task_queue=config.QUEUES[role],
                 # Architect + coder can run 3-8 min with web_search / 16K
                 # output; BA + researcher 1-3 min. Generous ceiling so real

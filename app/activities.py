@@ -5,6 +5,7 @@ Workflows must stay deterministic, so they can ONLY call into here.
 Rule of thumb: if it touches the network, a clock, or randomness, it's an activity.
 """
 import asyncio
+import contextlib
 import hashlib
 import logging
 import time
@@ -89,8 +90,22 @@ async def create_task_record(input: AgentTaskInput) -> str:
     )
 
 @activity.defn
-async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskResult:
-    """Run one agent. Heartbeats keep Temporal from marking long LLM calls as stuck."""
+async def run_agent_activity(
+    task_id: str,
+    input: AgentTaskInput,
+    workflow_id: str = "",
+) -> AgentTaskResult:
+    """Run one agent. Heartbeats keep Temporal from marking long LLM calls as stuck.
+
+    Sprint 19.1: optional `workflow_id` lets the greenfield ProjectWorkflow
+    plumb its workflow id through so the activity body can be wrapped in a
+    Langfuse `workflow_trace` + `agent_span`. Mirrors the repo-task wrapping
+    pattern from Sprint 19; nested LLM `generation()` calls auto-attach via
+    ContextVars so each agent's provider call lands as a child of the
+    `agent.<role>` span instead of an orphan generation. When `workflow_id`
+    is empty (older callers, replayed histories), we skip the wrap and
+    preserve the pre-19.1 orphan-generation behaviour.
+    """
     activity_started_at = time.monotonic()
     span_ctx = telemetry.span(
         "twai_swarm.activity.run_agent",
@@ -102,78 +117,113 @@ async def run_agent_activity(task_id: str, input: AgentTaskInput) -> AgentTaskRe
         },
     )
     span_ctx.__enter__()
-    await db.update_task_running(task_id)
 
-    # get_context_for_task = parent-walk ancestors + (for synthesis roles)
-    # kNN over similar prior task outputs in the same project. Each entry
-    # is tagged with _source = "ancestor" | "similar" so the prompt can
-    # frame them differently. Falls back to ancestors-only on embedding failure.
-    context = await db.get_context_for_task(task_id)
+    # Sprint 19.1: only wrap in Langfuse trace + span when we have a
+    # workflow_id (call sites that don't pass it get the legacy no-trace
+    # path). The two helpers are themselves no-ops when Langfuse is
+    # unconfigured, but we still gate on workflow_id so we don't emit a
+    # bogus trace row keyed off an empty string.
+    @contextlib.contextmanager
+    def _maybe_workflow_trace():
+        if workflow_id:
+            with observability.workflow_trace(
+                workflow_id=workflow_id,
+                name=f"project-{workflow_id}",
+                brief=getattr(input, "description", "") or "",
+                tenant_id=input.tenant_id,
+                phase=f"agent.{input.role}",
+            ):
+                yield
+        else:
+            yield
 
-    # Fire an initial heartbeat, then hand it off to a background task that
-    # keeps pinging Temporal every 20s while we're awaiting the LLM.
-    activity.heartbeat("calling LLM")
-    hb_task = asyncio.create_task(_keep_alive())
+    @contextlib.contextmanager
+    def _maybe_agent_span():
+        if workflow_id:
+            with observability.agent_span(
+                name=f"agent.{input.role}",
+                agent_role=input.role,
+            ):
+                yield
+        else:
+            yield
 
     try:
-        result = await agents.run_agent(
-            role=input.role,
-            task_description=input.description,
-            context=context,
-            complexity_hint=input.complexity_hint,
-            tenant_id=input.tenant_id,
-        )
-    except Exception as e:
-        logger.error(
-            "run_agent_activity failed (task_id=%s): %s\n%s",
-            task_id, e, traceback.format_exc(),
-        )
-        await db.fail_task(task_id, str(e))
-        raise
+        with _maybe_workflow_trace(), _maybe_agent_span():
+            await db.update_task_running(task_id)
+
+            # get_context_for_task = parent-walk ancestors + (for synthesis roles)
+            # kNN over similar prior task outputs in the same project. Each entry
+            # is tagged with _source = "ancestor" | "similar" so the prompt can
+            # frame them differently. Falls back to ancestors-only on embedding failure.
+            context = await db.get_context_for_task(task_id)
+
+            # Fire an initial heartbeat, then hand it off to a background task that
+            # keeps pinging Temporal every 20s while we're awaiting the LLM.
+            activity.heartbeat("calling LLM")
+            hb_task = asyncio.create_task(_keep_alive())
+
+            try:
+                result = await agents.run_agent(
+                    role=input.role,
+                    task_description=input.description,
+                    context=context,
+                    complexity_hint=input.complexity_hint,
+                    tenant_id=input.tenant_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "run_agent_activity failed (task_id=%s): %s\n%s",
+                    task_id, e, traceback.format_exc(),
+                )
+                await db.fail_task(task_id, str(e))
+                raise
+            finally:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Sidecar grounding metadata (web_search citations etc.) lands inside the
+            # output JSON under `_citations` so it's queryable without a schema change
+            # or sidecar table. UI strips it when pretty-printing the agent's payload.
+            output_to_persist = result["output"]
+            citations = result.get("citations") or []
+            if isinstance(output_to_persist, dict) and citations:
+                output_to_persist = {**output_to_persist, "_citations": citations}
+
+            await db.complete_task(
+                task_id,
+                output=output_to_persist,
+                provider=result["provider"],
+                model=result["model"],
+                tokens_in=result["tokens_in"],
+                tokens_out=result["tokens_out"],
+                cost_usd=result["cost_usd"],
+            )
+
+            # Embed the task output for downstream kNN retrieval. Best-effort —
+            # logged and swallowed on failure so embedding cost doesn't fail the workflow.
+            await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
+
+            # Record activity duration + close the span we opened above.
+            telemetry.histogram_record(
+                "agent_activity_duration",
+                time.monotonic() - activity_started_at,
+                role=input.role,
+                tenant_id=input.tenant_id,
+            )
+            span_ctx.__exit__(None, None, None)
+
+            return AgentTaskResult(
+                task_id=task_id,
+                output=result["output"],
+                model=result["model"],
+                tier=result["model_key"],
+            )
     finally:
-        hb_task.cancel()
-        try:
-            await hb_task
-        except asyncio.CancelledError:
-            pass
-
-    # Sidecar grounding metadata (web_search citations etc.) lands inside the
-    # output JSON under `_citations` so it's queryable without a schema change
-    # or sidecar table. UI strips it when pretty-printing the agent's payload.
-    output_to_persist = result["output"]
-    citations = result.get("citations") or []
-    if isinstance(output_to_persist, dict) and citations:
-        output_to_persist = {**output_to_persist, "_citations": citations}
-
-    await db.complete_task(
-        task_id,
-        output=output_to_persist,
-        provider=result["provider"],
-        model=result["model"],
-        tokens_in=result["tokens_in"],
-        tokens_out=result["tokens_out"],
-        cost_usd=result["cost_usd"],
-    )
-
-    # Embed the task output for downstream kNN retrieval. Best-effort —
-    # logged and swallowed on failure so embedding cost doesn't fail the workflow.
-    await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
-
-    # Record activity duration + close the span we opened above.
-    telemetry.histogram_record(
-        "agent_activity_duration",
-        time.monotonic() - activity_started_at,
-        role=input.role,
-        tenant_id=input.tenant_id,
-    )
-    span_ctx.__exit__(None, None, None)
-
-    return AgentTaskResult(
-        task_id=task_id,
-        output=result["output"],
-        model=result["model"],
-        tier=result["model_key"],
-    )
+        observability.flush()
 
 @activity.defn
 async def create_project_record(
@@ -193,6 +243,12 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
 
     On any exception, falls back to the one-shot coder so the workflow
     still ships something. The fallback path is logged at ERROR.
+
+    Sprint 19.1: body wrapped in `observability.workflow_trace` +
+    `agent_span` so the greenfield Coder's tool-runner generations
+    nest under the same `project-<workflow_id>` trace tree as the
+    other greenfield agents (BA / Architect / SE / Reviewer / etc.).
+    Mirrors the repo-task `run_repo_coder_activity` wrapping pattern.
     """
     from . import config
     from .agents import coder_agentic
@@ -209,126 +265,141 @@ async def run_coder_activity(task_id: str, input: AgentTaskInput, workflow_id: s
         },
     )
     span_ctx.__enter__()
-    await db.update_task_running(task_id)
-    context = await db.get_ancestor_outputs(task_id)
-
-    # Pull architecture / SE plan / documenter output out of the context list.
-    def _find(role: str) -> dict | None:
-        for c in context:
-            if c.get("role") == role:
-                out = c.get("output")
-                return out if isinstance(out, dict) else None
-        return None
-
-    architecture = _find("architect")
-    se_plan = _find("se")
-    documenter = _find("documenter")
-
-    activity.heartbeat("coder starting")
-    hb_task = asyncio.create_task(_keep_alive(message="coder running"))
 
     try:
-        if config.CODER_MODE == "oneshot":
-            # Explicit opt-out — use the old path directly.
-            result = await agents.run_agent(
-                role="coder",
-                task_description=input.description,
-                context=context,
-                complexity_hint=input.complexity_hint,
-                tenant_id=input.tenant_id,
-            )
-        else:
-            try:
-                coder_out = await coder_agentic.run_agentic_coder(
-                    workflow_id=workflow_id,
-                    brief=input.description,
-                    architecture=architecture,
-                    se_plan=se_plan,
-                    documenter=documenter,
-                    heartbeat=activity.heartbeat,
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"project-{workflow_id}",
+            brief=getattr(input, "description", "") or "",
+            tenant_id=input.tenant_id,
+            phase="coder",
+        ):
+            with observability.agent_span(
+                name="coder",
+                agent_role="coder",
+            ):
+                await db.update_task_running(task_id)
+                context = await db.get_ancestor_outputs(task_id)
+
+                # Pull architecture / SE plan / documenter output out of the context list.
+                def _find(role: str) -> dict | None:
+                    for c in context:
+                        if c.get("role") == role:
+                            out = c.get("output")
+                            return out if isinstance(out, dict) else None
+                    return None
+
+                architecture = _find("architect")
+                se_plan = _find("se")
+                documenter = _find("documenter")
+
+                activity.heartbeat("coder starting")
+                hb_task = asyncio.create_task(_keep_alive(message="coder running"))
+
+                try:
+                    if config.CODER_MODE == "oneshot":
+                        # Explicit opt-out — use the old path directly.
+                        result = await agents.run_agent(
+                            role="coder",
+                            task_description=input.description,
+                            context=context,
+                            complexity_hint=input.complexity_hint,
+                            tenant_id=input.tenant_id,
+                        )
+                    else:
+                        try:
+                            coder_out = await coder_agentic.run_agentic_coder(
+                                workflow_id=workflow_id,
+                                brief=input.description,
+                                architecture=architecture,
+                                se_plan=se_plan,
+                                documenter=documenter,
+                                heartbeat=activity.heartbeat,
+                                tenant_id=input.tenant_id,
+                            )
+                            # Repackage into the shape run_agent returns so the DB
+                            # write + return dataclass below don't need a branch.
+                            result = {
+                                "output": {k: v for k, v in coder_out.items() if not k.startswith("_")},
+                                "provider": coder_out["_provider"],
+                                "model": coder_out["_model"],
+                                "model_key": "anthropic/claude-haiku-4-5",
+                                "route_reason": "coder hardcoded to Haiku 4.5 (agentic)",
+                                "tokens_in": coder_out["_tokens_in"],
+                                "tokens_out": coder_out["_tokens_out"],
+                                "cost_usd": coder_out["_cost_usd"],
+                                "citations": [],
+                            }
+                        except Exception as e:
+                            logger.error(
+                                "agentic coder failed (task_id=%s), falling back to oneshot: %s\n%s",
+                                task_id, e, traceback.format_exc(),
+                            )
+                            result = await agents.run_agent(
+                                role="coder",
+                                task_description=input.description,
+                                context=context,
+                                complexity_hint=input.complexity_hint,
+                            )
+                except Exception as e:
+                    logger.error(
+                        "run_coder_activity failed (task_id=%s): %s\n%s",
+                        task_id, e, traceback.format_exc(),
+                    )
+                    await db.fail_task(task_id, str(e))
+                    raise
+                finally:
+                    hb_task.cancel()
+                    try:
+                        await hb_task
+                    except asyncio.CancelledError:
+                        pass
+
+                output_to_persist = result["output"]
+                citations = result.get("citations") or []
+                if isinstance(output_to_persist, dict) and citations:
+                    output_to_persist = {**output_to_persist, "_citations": citations}
+
+                await db.complete_task(
+                    task_id,
+                    output=output_to_persist,
+                    provider=result["provider"],
+                    model=result["model"],
+                    tokens_in=result["tokens_in"],
+                    tokens_out=result["tokens_out"],
+                    cost_usd=result["cost_usd"],
+                )
+
+                # Embed the Coder output too — useful as kNN context for future projects'
+                # SE/Reviewer/Documenter ("we've coded something like this before").
+                # The embedding text strips the files[] array (see task_to_embedding_text).
+                await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
+
+                # Coder-specific metrics + close span
+                iters = result.get("output", {}).get("iterations") if isinstance(result.get("output"), dict) else None
+                if isinstance(iters, int):
+                    verify_passed = bool(result["output"].get("verify_passed", False))
+                    telemetry.histogram_record(
+                        "coder_iterations", float(iters),
+                        verify_passed=verify_passed,
+                        tenant_id=input.tenant_id,
+                    )
+                telemetry.histogram_record(
+                    "agent_activity_duration",
+                    time.monotonic() - activity_started_at,
+                    role="coder",
                     tenant_id=input.tenant_id,
                 )
-                # Repackage into the shape run_agent returns so the DB
-                # write + return dataclass below don't need a branch.
-                result = {
-                    "output": {k: v for k, v in coder_out.items() if not k.startswith("_")},
-                    "provider": coder_out["_provider"],
-                    "model": coder_out["_model"],
-                    "model_key": "anthropic/claude-haiku-4-5",
-                    "route_reason": "coder hardcoded to Haiku 4.5 (agentic)",
-                    "tokens_in": coder_out["_tokens_in"],
-                    "tokens_out": coder_out["_tokens_out"],
-                    "cost_usd": coder_out["_cost_usd"],
-                    "citations": [],
-                }
-            except Exception as e:
-                logger.error(
-                    "agentic coder failed (task_id=%s), falling back to oneshot: %s\n%s",
-                    task_id, e, traceback.format_exc(),
+                span_ctx.__exit__(None, None, None)
+
+                return AgentTaskResult(
+                    task_id=task_id,
+                    output=result["output"],
+                    model=result["model"],
+                    tier=result["model_key"],
                 )
-                result = await agents.run_agent(
-                    role="coder",
-                    task_description=input.description,
-                    context=context,
-                    complexity_hint=input.complexity_hint,
-                )
-    except Exception as e:
-        logger.error(
-            "run_coder_activity failed (task_id=%s): %s\n%s",
-            task_id, e, traceback.format_exc(),
-        )
-        await db.fail_task(task_id, str(e))
-        raise
     finally:
-        hb_task.cancel()
-        try:
-            await hb_task
-        except asyncio.CancelledError:
-            pass
-
-    output_to_persist = result["output"]
-    citations = result.get("citations") or []
-    if isinstance(output_to_persist, dict) and citations:
-        output_to_persist = {**output_to_persist, "_citations": citations}
-
-    await db.complete_task(
-        task_id,
-        output=output_to_persist,
-        provider=result["provider"],
-        model=result["model"],
-        tokens_in=result["tokens_in"],
-        tokens_out=result["tokens_out"],
-        cost_usd=result["cost_usd"],
-    )
-
-    # Embed the Coder output too — useful as kNN context for future projects'
-    # SE/Reviewer/Documenter ("we've coded something like this before").
-    # The embedding text strips the files[] array (see task_to_embedding_text).
-    await _embed_task_output(task_id, input.role, input.title, result["output"], tenant_id=input.tenant_id)
-
-    # Coder-specific metrics + close span
-    iters = result.get("output", {}).get("iterations") if isinstance(result.get("output"), dict) else None
-    if isinstance(iters, int):
-        verify_passed = bool(result["output"].get("verify_passed", False))
-        telemetry.histogram_record(
-            "coder_iterations", float(iters),
-            verify_passed=verify_passed,
-            tenant_id=input.tenant_id,
-        )
-    telemetry.histogram_record(
-        "agent_activity_duration",
-        time.monotonic() - activity_started_at,
-        role="coder",
-        tenant_id=input.tenant_id,
-    )
-    span_ctx.__exit__(None, None, None)
-
-    return AgentTaskResult(
-        task_id=task_id,
-        output=result["output"],
-        model=result["model"],
-        tier=result["model_key"],
-    )
+        observability.flush()
 
 
 
