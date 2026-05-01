@@ -29,6 +29,7 @@ except Exception:
 
 from app.repo_indexer.actions import RepoNode  # noqa: E402
 from app.repo_indexer.extractor_java import (  # noqa: E402
+    JAVA_LANG_IMPLICIT,
     _extract_package,
     _filename_stem,
     _module_qn_from_package,
@@ -758,3 +759,184 @@ def test_calls_inside_anonymous_class_attribute_to_enclosing(parser):
     batch = _scan(parser, "src/pkg/Cls.java", src)
     edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
     assert ("pkg.Cls.run", "doIt") in edges
+
+
+# ─── 17d: Imports + java.lang.* allowlist ─────────────────────────────────
+
+
+def test_named_import_emits_symbol_edge(parser):
+    """`import com.foo.Bar;` → ONE ImportEdge with target_qn=com.foo.Bar,
+    local_name=Bar, kind=symbol. The resolver maps target_qn to a
+    ClassNode/Module later; the extractor just emits the raw qn.
+    """
+    src = (
+        b"package pkg;\n"
+        b"import com.foo.Bar;\n"
+        b"class X {}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert len(batch.imports) == 1
+    edge = batch.imports[0]
+    assert edge.file_path == "src/pkg/X.java"
+    assert edge.target_qn == "com.foo.Bar"
+    assert edge.local_name == "Bar"
+    assert edge.kind == "symbol"
+
+
+def test_wildcard_import_emits_module_edge(parser):
+    """`import com.foo.*;` → ONE ImportEdge with target_qn=com.foo
+    (the package), local_name="*", kind=module. The resolver expands
+    the package's exports against the file's binding scope.
+    """
+    src = (
+        b"package pkg;\n"
+        b"import com.foo.*;\n"
+        b"class X {}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert len(batch.imports) == 1
+    edge = batch.imports[0]
+    assert edge.target_qn == "com.foo"
+    assert edge.local_name == "*"
+    assert edge.kind == "module"
+
+
+def test_static_named_import(parser):
+    """`import static com.foo.Bar.baz;` → target_qn=com.foo.Bar.baz
+    (the static member's full qn), local_name=baz, kind=symbol.
+    The `static` keyword is an unnamed token child of import_declaration
+    — detected by scanning raw children for type=="static".
+    """
+    src = (
+        b"package pkg;\n"
+        b"import static com.foo.Bar.baz;\n"
+        b"class X {}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert len(batch.imports) == 1
+    edge = batch.imports[0]
+    assert edge.target_qn == "com.foo.Bar.baz"
+    assert edge.local_name == "baz"
+    assert edge.kind == "symbol"
+
+
+def test_static_wildcard_import(parser):
+    """`import static com.foo.Bar.*;` → target_qn=com.foo.Bar (the
+    type whose static members are imported), local_name="*", kind=symbol
+    (NOT module — the target is a class, not a package; the wildcard
+    expands to its static members).
+    """
+    src = (
+        b"package pkg;\n"
+        b"import static com.foo.Bar.*;\n"
+        b"class X {}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert len(batch.imports) == 1
+    edge = batch.imports[0]
+    assert edge.target_qn == "com.foo.Bar"
+    assert edge.local_name == "*"
+    assert edge.kind == "symbol"
+
+
+def test_multiple_imports_in_order(parser):
+    """Four different imports → four ImportEdges in source order. The
+    extractor walks `import_declaration` children of the program node
+    in document order, so the emit order matches the source.
+    """
+    src = (
+        b"package pkg;\n"
+        b"import java.util.List;\n"
+        b"import java.util.Map;\n"
+        b"import static java.lang.Math.PI;\n"
+        b"import com.foo.*;\n"
+        b"class X {}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert len(batch.imports) == 4
+    edges = [(e.target_qn, e.local_name, e.kind) for e in batch.imports]
+    assert edges == [
+        ("java.util.List", "List", "symbol"),
+        ("java.util.Map", "Map", "symbol"),
+        ("java.lang.Math.PI", "PI", "symbol"),
+        ("com.foo", "*", "module"),
+    ]
+
+
+def test_no_imports_emits_nothing(parser):
+    """File with `package x;` and a class but no imports → ZERO
+    ImportEdges. We don't synthesize any edges (e.g. java.lang.* is
+    NOT emitted as implicit imports — the resolver consults
+    `JAVA_LANG_IMPLICIT` instead).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class X { void foo() {} }\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    assert batch.imports == []
+
+
+def test_imports_dont_interfere_with_class_extraction(parser):
+    """Sanity test: imports + class + method all emit correctly when
+    they coexist. Guards against a 17d regression that drops 17a/17c
+    output. Asserts ImportEdge AND ClassNode AND FunctionNode all
+    present, and that the class qn / method qn still derive from the
+    package declaration (not from anything an import polluted).
+    """
+    src = (
+        b"package pkg;\n"
+        b"import com.foo.Bar;\n"
+        b"public class X {\n"
+        b"    public void hello() {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/X.java", src)
+    # Imports
+    assert len(batch.imports) == 1
+    assert batch.imports[0].target_qn == "com.foo.Bar"
+    # Classes
+    cls_qns = {c.qualified_name for c in batch.classes}
+    assert "pkg.X" in cls_qns
+    # Functions
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.X.hello" in fn_qns
+
+
+def test_java_lang_allowlist_constant_present():
+    """`JAVA_LANG_IMPLICIT` is a frozenset of the JLS §7.5.5 names
+    most commonly referenced bare in Java source. The resolver imports
+    this list to skip resolution of obviously-external names. Check
+    the expected canonical entries are present and the size is sane
+    (~35 entries — not the full java.lang surface).
+    """
+    assert isinstance(JAVA_LANG_IMPLICIT, frozenset)
+    must_have = {"Object", "String", "Integer", "Throwable", "Override"}
+    assert must_have.issubset(JAVA_LANG_IMPLICIT)
+    # Sanity bound: should be a curated short list, not exhaustive.
+    assert len(JAVA_LANG_IMPLICIT) <= 50
+
+
+def test_file_node_package_populated(parser):
+    """`package com.bench;` → emitted FileNode has `package="com.bench"`.
+    Added in 17a; re-verified here as part of the 17d story because
+    the resolver's same-package implicit-visibility lookup depends on
+    it being correct.
+    """
+    src = (
+        b"package com.bench;\n"
+        b"public class Foo {}\n"
+    )
+    batch = _scan(parser, "src/com/bench/Foo.java", src)
+    assert batch.files[0].package == "com.bench"
+
+
+def test_default_package_file_node_package_empty(parser):
+    """File with no `package` declaration → FileNode.package == "".
+    The resolver treats empty package as the default package — files
+    in the default package see each other but no other package's
+    members.
+    """
+    src = b"public class Foo {}\n"
+    batch = _scan(parser, "Foo.java", src)
+    assert batch.files[0].package == ""

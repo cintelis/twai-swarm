@@ -1,4 +1,4 @@
-"""Tree-sitter Java extractor — Sprint 17a / 17b / 17c.
+"""Tree-sitter Java extractor — Sprint 17a / 17b / 17c / 17d.
 
 Walks the AST of one Java source file and emits an IndexBatch fragment.
 Mirrors the shape of `extractor_cpp.py` and `extractor_python.py`;
@@ -83,9 +83,35 @@ Call-edge limitations (documented for 17e/17f follow-up):
       (`@SuppressWarnings(value = "x")`) are NOT `method_invocation`
       nodes — no special handling needed.
 
-Out of 17a/17b/17c scope (LATER sub-sprints — explicitly NOT handled):
-    - Imports + same-package implicit visibility + java.lang.* —
-      Sprint 17d.
+Imports + java.lang.* visibility (17d contribution):
+    - Every `import` declaration emits ONE ImportEdge. Four shapes:
+        `import com.foo.Bar;`         → target_qn="com.foo.Bar",
+                                         local_name="Bar",  kind="symbol"
+        `import com.foo.*;`           → target_qn="com.foo",
+                                         local_name="*",    kind="module"
+        `import static com.foo.B.x;`  → target_qn="com.foo.B.x",
+                                         local_name="x",    kind="symbol"
+        `import static com.foo.B.*;`  → target_qn="com.foo.B",
+                                         local_name="*",    kind="symbol"
+    - Same-package implicit visibility (`com.bench.Foo` and
+      `com.bench.Bar` see each other without an import) is NOT emitted
+      as synthetic edges — the resolver consults `FileNode.package`
+      (added in 17a) at query time. Emitting an ImportEdge per file
+      pair would explode edge count on multi-file packages.
+    - `java.lang.*` allowlist exposed as the module-level constant
+      `JAVA_LANG_IMPLICIT`. The resolver consults it to decide whether
+      a bare-name reference (`String`, `Override`, `RuntimeException`,
+      etc.) should resolve to an external Symbol or be treated as
+      unknown. The extractor itself does NOT special-case java.lang —
+      it just publishes the allowlist for downstream consumers.
+    - Build-system classpath discovery (Maven `pom.xml`, Gradle
+      `build.gradle`) is explicitly out of scope.
+    - `package-info.java` annotation imports use the same machinery —
+      no special-casing required.
+    - `module-info.java` `requires` / `exports` clauses are NOT
+      modelled (consistent with 17a's choice to skip module-info).
+
+Out of 17a/17b/17c/17d scope (LATER sub-sprints — explicitly NOT handled):
     - Method-overload qn disambiguation via `:type1,type2` suffix —
       Sprint 17e. Two `add(int,int)` and `add(double,double)` methods
       currently emit two FunctionNodes with the same qn; the loader's
@@ -115,11 +141,75 @@ from .actions import (
     ClassNode,
     FileNode,
     FunctionNode,
+    ImportEdge,
     IndexBatch,
     InheritsEdge,
     ModuleNode,
     RepoNode,
 )
+
+
+# ─── 17d: java.lang.* implicit-visibility allowlist ───────────────────────
+#
+# The Java Language Specification §7.5.5 declares all top-level types in
+# `java.lang.*` to be implicitly imported into every compilation unit. This
+# constant lists the package-level subset most likely to appear bare in
+# user code — basic types, common errors / exceptions, threading, class
+# metadata, and the standard built-in annotations. It is INTENTIONALLY
+# not exhaustive: the full `java.lang` surface (reflection types in
+# `java.lang.reflect`, instrument / management subpackages, etc.) is
+# huge and rarely used unqualified.
+#
+# Resolver convention: when the resolver encounters a bare-name reference
+# matching one of these names AND no in-file or imported binding shadows
+# it, treat it as a known external Symbol and don't waste cycles trying
+# to resolve. Source: JLS §7.5.5, Java 21 java.lang summary.
+JAVA_LANG_IMPLICIT: frozenset[str] = frozenset({
+    "ArithmeticException",
+    "ArrayIndexOutOfBoundsException",
+    "Boolean",
+    "Byte",
+    "Character",
+    "CharSequence",
+    "Class",
+    "ClassCastException",
+    "ClassLoader",
+    "Comparable",
+    "Deprecated",
+    "Double",
+    "Enum",
+    "Error",
+    "Exception",
+    "Float",
+    "FunctionalInterface",
+    "IllegalArgumentException",
+    "IllegalStateException",
+    "IndexOutOfBoundsException",
+    "Integer",
+    "Iterable",
+    "Long",
+    "Math",
+    "Number",
+    "NullPointerException",
+    "NumberFormatException",
+    "Object",
+    "Override",
+    "Record",
+    "Runnable",
+    "RuntimeException",
+    "SafeVarargs",
+    "Short",
+    "String",
+    "StringBuffer",
+    "StringBuilder",
+    "SuppressWarnings",
+    "System",
+    "Thread",
+    "ThreadLocal",
+    "Throwable",
+    "UnsupportedOperationException",
+    "Void",
+})
 
 
 def _node_text(source: bytes, node: Any) -> str:
@@ -759,6 +849,94 @@ def _collect_local_function_names(node: Any, source: bytes, out: set[str]) -> No
         _collect_local_function_names(child, source, out)
 
 
+# ─── 17d: import-edge extraction ──────────────────────────────────────────
+
+
+def _walk_imports(
+    source: bytes, root: Any,
+) -> list[tuple[str, str, str]]:
+    """Return [(target_qn, local_name, kind)] for every top-level import.
+
+    Java has four import shapes; the AST distinguishes them positionally
+    (no field names on `import_declaration`'s children):
+
+      `import com.foo.Bar;`
+        children: [`import` kw, scoped_identifier]
+        → ("com.foo.Bar", "Bar", "symbol")
+
+      `import com.foo.*;`
+        children: [`import` kw, scoped_identifier, asterisk]
+        → ("com.foo", "*", "module")
+
+      `import static com.foo.Bar.baz;`
+        children: [`import` kw, `static` kw, scoped_identifier]
+        → ("com.foo.Bar.baz", "baz", "symbol")
+
+      `import static com.foo.Bar.*;`
+        children: [`import` kw, `static` kw, scoped_identifier, asterisk]
+        → ("com.foo.Bar", "*", "symbol")
+
+    The `static` keyword is an UNNAMED token child of
+    `import_declaration` — `child_by_field_name` returns None for it.
+    Detect it by scanning raw `node.children` for `child.type == "static"`.
+
+    The dotted target is captured from the first named identifier-shaped
+    child (`scoped_identifier` for ≥2 segments, plain `identifier` for
+    pathological single-segment imports like `import com;`). We read its
+    raw text — tree-sitter preserves the dotted form verbatim, no manual
+    reassembly required.
+
+    Wildcards: presence of an `asterisk` named child tags the import as
+    a wildcard. local_name = "*". For non-static wildcards, kind becomes
+    "module" (the target is a package); for static wildcards, kind stays
+    "symbol" (the target is a type whose static members are imported).
+
+    Single-segment defensive case: `import com;` (invalid Java but lexes
+    cleanly) → emit ("com", "com", "symbol") so we don't crash and any
+    downstream consumer sees something rather than nothing.
+    """
+    out: list[tuple[str, str, str]] = []
+    for child in root.children:
+        if child.type != "import_declaration":
+            continue
+
+        is_static = False
+        target_node: Any = None
+        is_wildcard = False
+        for sub in child.children:
+            t = sub.type
+            if t == "static":
+                is_static = True
+            elif t in ("scoped_identifier", "identifier") and target_node is None:
+                target_node = sub
+            elif t == "asterisk":
+                is_wildcard = True
+
+        if target_node is None:
+            # Malformed — `import ;` or similar. Skip defensively.
+            continue
+        target = _node_text(source, target_node).strip()
+        if not target:
+            continue
+
+        if is_wildcard:
+            # `import com.foo.*;`            → module import of `com.foo`.
+            # `import static com.foo.Bar.*;` → symbol import of all
+            #                                  static members of Bar.
+            kind = "symbol" if is_static else "module"
+            out.append((target, "*", kind))
+            continue
+
+        # Named (non-wildcard) import. Local name is the LAST dotted
+        # segment of the target — for `import com.foo.Bar` that's "Bar";
+        # for `import static com.foo.Bar.baz` it's "baz"; for the
+        # pathological `import com;` (no dot at all) it's "com".
+        local_name = target.rsplit(".", 1)[-1]
+        out.append((target, local_name, "symbol"))
+
+    return out
+
+
 def extract_java_file(
     repo: RepoNode,
     rel_path: str,
@@ -769,11 +947,12 @@ def extract_java_file(
 ) -> IndexBatch:
     """Parse one .java file and return its IndexBatch fragment.
 
-    `repo_files` is currently unused (no import resolution in 17a) but
-    accepted for signature parity with `extract_cpp_file` and forward-
-    compatibility with Sprint 17d's import resolver.
+    `repo_files` is accepted for signature parity with `extract_cpp_file`
+    but not currently consumed — Java import targets are dotted
+    qualified names (not file paths), so cross-file resolution lives in
+    the loader / resolver, not the extractor.
     """
-    del repo_files  # 17d will use this for cross-file import resolution.
+    del repo_files  # Reserved for future use; resolver handles xref now.
 
     batch = IndexBatch(repo=repo)
     tree = parser.parse(source)
@@ -791,6 +970,19 @@ def extract_java_file(
     if module_qn:
         batch.modules.append(ModuleNode(
             repo=repo.name, qualified_name=module_qn, file_path=rel_path,
+        ))
+
+    # 17d: emit ImportEdges for every `import` declaration. Position
+    # mirrors python/cpp — imports are recorded BEFORE the recursive
+    # body walk, so the resolver sees the file's import set as a
+    # complete fact before its first call/inheritance lookup.
+    for target_qn, local_name, kind in _walk_imports(source, root):
+        batch.imports.append(ImportEdge(
+            repo=repo.name,
+            file_path=rel_path,
+            target_qn=target_qn,
+            local_name=local_name,
+            kind=kind,
         ))
 
     # 17c: pre-pass to collect every method / constructor / class /
