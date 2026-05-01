@@ -180,8 +180,6 @@ async def run_agentic_coder(
     if CODER_MODEL.startswith("claude-opus-"):
         runner_kwargs["thinking"] = {"type": "adaptive"}
 
-    runner = client.beta.messages.tool_runner(**runner_kwargs)
-
     iterations = 0
     total_input_tokens = 0
     total_output_tokens = 0
@@ -195,33 +193,57 @@ async def run_agentic_coder(
     tenant_ctx = observability.tenant_scope(tenant_id)
     tenant_ctx.__enter__()
     try:
-        async for message in runner:
-            iterations += 1
-            if heartbeat is not None:
-                try:
-                    heartbeat(f"coder iteration {iterations}")
-                except Exception:
-                    # Heartbeat failures shouldn't kill the loop.
-                    pass
+        # Sprint 19: wrap the greenfield Coder's tool_runner in a Langfuse
+        # generation, mirroring repo Coder. Greenfield ProjectWorkflow
+        # has no Sprint 19 workflow_trace yet (Sprint 20+ candidate), so
+        # this generation typically goes "orphan" — still tracked, no
+        # parent. When greenfield gets workflow_trace, this auto-attaches.
+        with observability.generation(
+            name=f"anthropic.{CODER_MODEL}.tool_runner",
+            model=CODER_MODEL,
+            provider="anthropic",
+            system=CODER_SYSTEM_PROMPT,
+            user=user_message,
+            tools=[
+                getattr(t, "name", None) or getattr(t, "__name__", "")
+                for t in tools
+            ],
+        ) as gen:
+            runner = client.beta.messages.tool_runner(**runner_kwargs)
+            async for message in runner:
+                iterations += 1
+                if heartbeat is not None:
+                    try:
+                        heartbeat(f"coder iteration {iterations}")
+                    except Exception:
+                        # Heartbeat failures shouldn't kill the loop.
+                        pass
 
-            if getattr(message, "usage", None) is not None:
-                total_input_tokens += int(getattr(message.usage, "input_tokens", 0) or 0)
-                total_output_tokens += int(getattr(message.usage, "output_tokens", 0) or 0)
+                if getattr(message, "usage", None) is not None:
+                    total_input_tokens += int(getattr(message.usage, "input_tokens", 0) or 0)
+                    total_output_tokens += int(getattr(message.usage, "output_tokens", 0) or 0)
 
-            # Capture the model's text so we have a summary if nothing else.
-            for block in (message.content or []):
-                if getattr(block, "type", None) == "text":
-                    t = getattr(block, "text", "") or ""
-                    if t.strip():
-                        last_text = t
+                # Capture the model's text so we have a summary if nothing else.
+                for block in (message.content or []):
+                    if getattr(block, "type", None) == "text":
+                        t = getattr(block, "text", "") or ""
+                        if t.strip():
+                            last_text = t
 
-            stop_reason = getattr(message, "stop_reason", None)
+                stop_reason = getattr(message, "stop_reason", None)
 
-            # Safety cap — if verify is green, the runner will usually stop
-            # itself on the next turn, but if the model keeps going we cut it off.
-            if iterations >= MAX_ITERATIONS:
-                logger.warning("coder hit MAX_ITERATIONS=%d, halting", MAX_ITERATIONS)
-                break
+                # Safety cap — if verify is green, the runner will usually stop
+                # itself on the next turn, but if the model keeps going we cut it off.
+                if iterations >= MAX_ITERATIONS:
+                    logger.warning("coder hit MAX_ITERATIONS=%d, halting", MAX_ITERATIONS)
+                    break
+            gen.end(
+                output=(last_text or "").strip()[:500],
+                usage={
+                    "input": total_input_tokens,
+                    "output": total_output_tokens,
+                },
+            )
     finally:
         # We purposely do NOT destroy the sandbox on the happy path — the
         # snapshot has to happen first. Destroy only happens after a successful

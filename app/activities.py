@@ -5,6 +5,7 @@ Workflows must stay deterministic, so they can ONLY call into here.
 Rule of thumb: if it touches the network, a clock, or randomness, it's an activity.
 """
 import asyncio
+import hashlib
 import logging
 import time
 import traceback
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 from temporalio import activity
 
-from . import db, agents, telemetry
+from . import db, agents, observability, telemetry
 
 
 async def _embed_task_output(
@@ -352,42 +353,57 @@ async def clone_repo_activity(
 
     v1: HTTPS-only, no auth (public repos OR url with embedded token).
     Sprint 10f layers GitHub App token injection for private repos.
+
+    Sprint 19: body wrapped in `observability.workflow_trace` so the
+    Langfuse trace gets created (if not already) on the first activity
+    in the workflow. Per-activity `flush()` in finally so events from
+    this activity ship before Temporal moves on.
     """
     import shutil
     from pathlib import Path
 
-    safe_id = "".join(c for c in workflow_id if c.isalnum() or c in ("-", "_"))
-    if not safe_id:
-        raise ValueError(f"workflow_id {workflow_id!r} produced empty safe path")
-    dest = Path("/tmp/repo-tasks") / safe_id
-    if dest.exists():
-        # Activity retry — start fresh. Some platforms refuse `git clone`
-        # into an already-existing dir even when it's empty, so we let
-        # git create dest itself.
-        shutil.rmtree(dest, ignore_errors=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            phase="clone",
+            repo_url=repo_url,
+            branch=branch,
+        ):
+            safe_id = "".join(c for c in workflow_id if c.isalnum() or c in ("-", "_"))
+            if not safe_id:
+                raise ValueError(f"workflow_id {workflow_id!r} produced empty safe path")
+            dest = Path("/tmp/repo-tasks") / safe_id
+            if dest.exists():
+                # Activity retry — start fresh. Some platforms refuse `git clone`
+                # into an already-existing dir even when it's empty, so we let
+                # git create dest itself.
+                shutil.rmtree(dest, ignore_errors=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
-    activity.heartbeat("cloning")
-    proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", "--branch", branch, repo_url, str(dest),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"git clone failed (rc={proc.returncode}): {stderr.decode('utf-8', 'replace')[:500]}"
-        )
+            activity.heartbeat("cloning")
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth", "1", "--branch", branch, repo_url, str(dest),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"git clone failed (rc={proc.returncode}): {stderr.decode('utf-8', 'replace')[:500]}"
+                )
 
-    sha_proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(dest), "rev-parse", "HEAD",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    sha_out, _ = await sha_proc.communicate()
-    commit_sha = sha_out.decode("utf-8").strip()
-    if not commit_sha:
-        raise RuntimeError("git rev-parse HEAD returned empty")
+            sha_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(dest), "rev-parse", "HEAD",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            sha_out, _ = await sha_proc.communicate()
+            commit_sha = sha_out.decode("utf-8").strip()
+            if not commit_sha:
+                raise RuntimeError("git rev-parse HEAD returned empty")
 
-    return {"path": str(dest), "commit_sha": commit_sha}
+            return {"path": str(dest), "commit_sha": commit_sha}
+    finally:
+        observability.flush()
 
 
 @activity.defn
@@ -407,8 +423,21 @@ async def index_repo_activity(
     indexed by a prior extractor version get re-extracted (e.g. after
     Sprint 17 added Java support, JS/TS files cached from earlier scans
     needed re-extraction to pick up new edges).
+
+    Sprint 19: body wrapped in `observability.workflow_trace`. The trace
+    upserts on workflow_id; if the workflow's clone activity ran first
+    on the same worker, this just merges metadata into the existing
+    trace. Indexer makes no LLM calls so no `agent_span` is needed.
     """
     from pathlib import Path
+    # Workflow id is bound to the activity at runtime; the indexer
+    # doesn't take it as a parameter pre-Sprint-19 because it didn't
+    # need to. Pull it from the Temporal activity context so we can
+    # attach the trace without changing the public signature.
+    try:
+        wf_id = activity.info().workflow_id
+    except Exception:
+        wf_id = "unknown"
     from app.repo_indexer.actions import IndexBatch, RepoNode
     from app.repo_indexer.loader import (
         driver_from_env, ensure_constraints, prune_stale, write_batch,
@@ -431,81 +460,92 @@ async def index_repo_activity(
     except Exception:  # noqa: BLE001
         tsjava = None
 
-    repo_root = Path(repo_path).resolve()
-    if not repo_root.is_dir():
-        raise FileNotFoundError(f"repo_path {repo_root} is not a directory")
-
-    repo = RepoNode(name=repo_name, url="", commit_sha=commit_sha, tenant_id=tenant_id)
-    py_parser = Parser(Language(tspython.language()))
-    ts_parsers = {
-        "typescript": Parser(Language(tsts.language_typescript())),
-        "tsx":        Parser(Language(tsts.language_tsx())),
-    }
     try:
-        cpp_parser = Parser(Language(tscpp.language())) if tscpp is not None else None
-    except Exception:  # noqa: BLE001
-        cpp_parser = None
-    try:
-        java_parser = Parser(Language(tsjava.language())) if tsjava is not None else None
-    except Exception:  # noqa: BLE001
-        java_parser = None
+        with observability.workflow_trace(
+            workflow_id=wf_id,
+            name=f"repo-task-{wf_id}",
+            tenant_id=tenant_id,
+            phase="index",
+            repo_name=repo_name,
+            commit_sha=commit_sha,
+        ):
+            repo_root = Path(repo_path).resolve()
+            if not repo_root.is_dir():
+                raise FileNotFoundError(f"repo_path {repo_root} is not a directory")
 
-    aggregate = IndexBatch(repo=repo)
+            repo = RepoNode(name=repo_name, url="", commit_sha=commit_sha, tenant_id=tenant_id)
+            py_parser = Parser(Language(tspython.language()))
+            ts_parsers = {
+                "typescript": Parser(Language(tsts.language_typescript())),
+                "tsx":        Parser(Language(tsts.language_tsx())),
+            }
+            try:
+                cpp_parser = Parser(Language(tscpp.language())) if tscpp is not None else None
+            except Exception:  # noqa: BLE001
+                cpp_parser = None
+            try:
+                java_parser = Parser(Language(tsjava.language())) if tsjava is not None else None
+            except Exception:  # noqa: BLE001
+                java_parser = None
 
-    # Route phase milestones through Temporal heartbeats so a slow scan
-    # doesn't time out. The progress callback fires once per phase boundary
-    # (scan / parse / resolve / community_detect / process_extract); the
-    # per-200-file rate prints in ParsePhase still go to stdout via raw
-    # `print` — they're not captured here.
-    def _progress(msg: str) -> None:
-        activity.heartbeat(msg)
-        print(msg, flush=True)
+            aggregate = IndexBatch(repo=repo)
 
-    with driver_from_env() as driver:
-        ensure_constraints(driver)
-        prune_stale(driver, repo_name, commit_sha)
-        ctx = PhaseContext(
-            repo=repo,
-            repo_root=repo_root,
-            # Java + cpp added in Sprint 17 — walker filters by this list,
-            # so omitting them silently drops every .java/.cpp file from
-            # the parse pipeline. (That's how we shipped a "Java extractor"
-            # that never fired in the Temporal activity path.)
-            languages=("python", "typescript", "javascript", "cpp", "java"),
-            batch=aggregate,
-            py_parser=py_parser,
-            ts_parsers=ts_parsers,
-            cpp_parser=cpp_parser,
-            java_parser=java_parser,
-            progress=_progress,
-            driver=driver,
-            # Sequential parsing inside a Temporal activity. multiprocessing.Pool
-            # from inside an activity has cross-platform sharp edges (Windows
-            # spawn re-imports the workflow context, fork on Linux can deadlock
-            # with Temporal's worker threads). Re-evaluate if scan time on a
-            # 13K-file repo becomes a real Coder UX problem.
-            parse_workers=1,
-            # Embeddings are opt-in even for Temporal scans. Activity callers
-            # that want them set this flag via a separate mechanism (env var
-            # or workflow input field) — out of scope for this refactor.
-            embed_enabled=False,
-            # Routes are universally cheap to extract (a handful of decorator
-            # / method-call patterns per file) so we always turn them on
-            # for repo-task scans. Affects FastAPI/Flask/Express (Sprint 15a)
-            # and Spring (Sprint 17f).
-            extract_routes=True,
-            # Sprint 17 post-deploy fix: opt-in cache bust for callers that
-            # need to re-extract files whose on-disk SHA hasn't changed
-            # (e.g. extractor-version bump). Default False keeps incremental
-            # scans fast.
-            force_reindex=force_reindex,
-        )
-        run_pipeline(ctx, DEFAULT_PHASES)
-        activity.heartbeat("writing to Neo4j")
-        write_batch(driver, aggregate)
+            # Route phase milestones through Temporal heartbeats so a slow scan
+            # doesn't time out. The progress callback fires once per phase boundary
+            # (scan / parse / resolve / community_detect / process_extract); the
+            # per-200-file rate prints in ParsePhase still go to stdout via raw
+            # `print` — they're not captured here.
+            def _progress(msg: str) -> None:
+                activity.heartbeat(msg)
+                print(msg, flush=True)
 
-    file_count = len(aggregate.files)
-    return {"file_count": file_count, **aggregate.counts()}
+            with driver_from_env() as driver:
+                ensure_constraints(driver)
+                prune_stale(driver, repo_name, commit_sha)
+                ctx = PhaseContext(
+                    repo=repo,
+                    repo_root=repo_root,
+                    # Java + cpp added in Sprint 17 — walker filters by this list,
+                    # so omitting them silently drops every .java/.cpp file from
+                    # the parse pipeline. (That's how we shipped a "Java extractor"
+                    # that never fired in the Temporal activity path.)
+                    languages=("python", "typescript", "javascript", "cpp", "java"),
+                    batch=aggregate,
+                    py_parser=py_parser,
+                    ts_parsers=ts_parsers,
+                    cpp_parser=cpp_parser,
+                    java_parser=java_parser,
+                    progress=_progress,
+                    driver=driver,
+                    # Sequential parsing inside a Temporal activity. multiprocessing.Pool
+                    # from inside an activity has cross-platform sharp edges (Windows
+                    # spawn re-imports the workflow context, fork on Linux can deadlock
+                    # with Temporal's worker threads). Re-evaluate if scan time on a
+                    # 13K-file repo becomes a real Coder UX problem.
+                    parse_workers=1,
+                    # Embeddings are opt-in even for Temporal scans. Activity callers
+                    # that want them set this flag via a separate mechanism (env var
+                    # or workflow input field) — out of scope for this refactor.
+                    embed_enabled=False,
+                    # Routes are universally cheap to extract (a handful of decorator
+                    # / method-call patterns per file) so we always turn them on
+                    # for repo-task scans. Affects FastAPI/Flask/Express (Sprint 15a)
+                    # and Spring (Sprint 17f).
+                    extract_routes=True,
+                    # Sprint 17 post-deploy fix: opt-in cache bust for callers that
+                    # need to re-extract files whose on-disk SHA hasn't changed
+                    # (e.g. extractor-version bump). Default False keeps incremental
+                    # scans fast.
+                    force_reindex=force_reindex,
+                )
+                run_pipeline(ctx, DEFAULT_PHASES)
+                activity.heartbeat("writing to Neo4j")
+                write_batch(driver, aggregate)
+
+            file_count = len(aggregate.files)
+            return {"file_count": file_count, **aggregate.counts()}
+    finally:
+        observability.flush()
 
 
 @activity.defn
@@ -542,49 +582,65 @@ async def architect_repo_task_activity(
     )
     from app.repo_indexer.loader import driver_from_env
 
+    brief_hash = hashlib.sha256(brief.encode("utf-8")).hexdigest()[:16]
     activity.heartbeat("architect starting")
     hb_task = asyncio.create_task(_keep_alive(message="architect running"))
     try:
-        with driver_from_env() as driver:
-            # Build the recon block here (workflow-side) so the Architect
-            # gets the same panoramic map the Coder would. Keeps both
-            # roles looking at the same evidence — important if Critic
-            # later wants to compare what the Architect saw vs what the
-            # Coder did.
-            recon_block = ""
-            try:
-                from app import repo_query
-                modules = await asyncio.to_thread(
-                    repo_query.find_modules,
-                    driver, repo_name, _RECON_MODULE_CAP, False,
-                )
-                processes = await asyncio.to_thread(
-                    repo_query.find_processes,
-                    driver, repo_name, None, _RECON_PROCESS_CAP, False,
-                )
-                recon_block = _format_recon_block(modules, processes)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "architect recon queries failed, proceeding without "
-                    "recon block: %s", e,
-                )
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            brief=brief,
+            tenant_id=tenant_id,
+            phase="architect",
+            repo_name=repo_name,
+        ):
+            with observability.agent_span(
+                name="architect",
+                agent_role="architect",
+                brief_hash=brief_hash,
+            ):
+                with driver_from_env() as driver:
+                    # Build the recon block here (workflow-side) so the
+                    # Architect gets the same panoramic map the Coder
+                    # would. Keeps both roles looking at the same
+                    # evidence — important if Critic later wants to
+                    # compare what the Architect saw vs what the Coder
+                    # did.
+                    recon_block = ""
+                    try:
+                        from app import repo_query
+                        modules = await asyncio.to_thread(
+                            repo_query.find_modules,
+                            driver, repo_name, _RECON_MODULE_CAP, False,
+                        )
+                        processes = await asyncio.to_thread(
+                            repo_query.find_processes,
+                            driver, repo_name, None, _RECON_PROCESS_CAP, False,
+                        )
+                        recon_block = _format_recon_block(modules, processes)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "architect recon queries failed, proceeding without "
+                            "recon block: %s", e,
+                        )
 
-            arch_out = await run_architect_repo(
-                workflow_id=workflow_id,
-                repo_root=Path(repo_path),
-                repo_name=repo_name,
-                brief=brief,
-                neo4j_driver=driver,
-                recon_block=recon_block,
-                heartbeat=activity.heartbeat,
-                tenant_id=tenant_id,
-            )
+                    arch_out = await run_architect_repo(
+                        workflow_id=workflow_id,
+                        repo_root=Path(repo_path),
+                        repo_name=repo_name,
+                        brief=brief,
+                        neo4j_driver=driver,
+                        recon_block=recon_block,
+                        heartbeat=activity.heartbeat,
+                        tenant_id=tenant_id,
+                    )
     finally:
         hb_task.cancel()
         try:
             await hb_task
         except asyncio.CancelledError:
             pass
+        observability.flush()
     return architect_output_to_dict(arch_out)
 
 
@@ -623,24 +679,45 @@ async def critic_repo_task_activity(
     # (gates run on the disk; the LLM judge gets the plan + diff
     # directly). Keeping them in the signature keeps the workflow's
     # call site uniform with the Architect/Coder activities.
-    _ = tenant_id, repo_name, workflow_id
+    _ = repo_name
 
     activity.heartbeat("critic starting")
     hb_task = asyncio.create_task(_keep_alive(message="critic running"))
     try:
-        result = await run_critic_repo(
-            architect_plan=architect_plan,
-            coder_diff=coder_diff,
-            files_with_content=files_with_content,
-            repo_root=Path(repo_path),
-            brief=brief,
-        )
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            tenant_id=tenant_id,
+            phase="critic",
+            n_subtasks=len((architect_plan or {}).get("subtasks") or []),
+            n_files_changed=len(files_with_content or []),
+        ):
+            with observability.agent_span(
+                name="critic",
+                agent_role="critic",
+                # Track verdict_source so operators can filter for the
+                # degraded "no architect plan" path; the synthetic
+                # brief-fallback subtask uses id="brief.fallback".
+                verdict_source=(
+                    "architect_plan"
+                    if architect_plan and (architect_plan.get("subtasks") or [])
+                    else "brief_fallback"
+                ),
+            ):
+                result = await run_critic_repo(
+                    architect_plan=architect_plan,
+                    coder_diff=coder_diff,
+                    files_with_content=files_with_content,
+                    repo_root=Path(repo_path),
+                    brief=brief,
+                )
     finally:
         hb_task.cancel()
         try:
             await hb_task
         except asyncio.CancelledError:
             pass
+        observability.flush()
     return critic_output_to_dict(result)
 
 
@@ -686,24 +763,43 @@ async def run_repo_coder_activity(
     activity.heartbeat("repo coder starting")
     hb_task = asyncio.create_task(_keep_alive(message="repo coder running"))
     try:
-        with driver_from_env() as driver:
-            result = await run_agentic_repo_coder(
-                workflow_id=workflow_id,
-                repo_root=Path(repo_path),
-                repo_name=repo_name,
-                brief=brief,
-                neo4j_driver=driver,
-                heartbeat=activity.heartbeat,
-                tenant_id=tenant_id,
-                architect_plan=architect_plan,
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            tenant_id=tenant_id,
+            phase="coder",
+            coder_seed=coder_seed,
+            repo_name=repo_name,
+            architect_plan_present=bool(architect_plan),
+        ):
+            with observability.agent_span(
+                name=f"coder.seed{coder_seed}",
+                agent_role="coder",
                 coder_seed=coder_seed,
-            )
+                # The temperature schedule lives in coder_repo so we
+                # don't duplicate the table here; the tool-runner
+                # generation will record it via model_parameters when
+                # we instrument the LLM call.
+            ):
+                with driver_from_env() as driver:
+                    result = await run_agentic_repo_coder(
+                        workflow_id=workflow_id,
+                        repo_root=Path(repo_path),
+                        repo_name=repo_name,
+                        brief=brief,
+                        neo4j_driver=driver,
+                        heartbeat=activity.heartbeat,
+                        tenant_id=tenant_id,
+                        architect_plan=architect_plan,
+                        coder_seed=coder_seed,
+                    )
     finally:
         hb_task.cancel()
         try:
             await hb_task
         except asyncio.CancelledError:
             pass
+        observability.flush()
     return result
 
 
@@ -740,27 +836,39 @@ async def reviewer_repo_task_activity(
         reviewer_output_to_dict, run_reviewer_repo,
     )
 
-    # Tenant_id and repo_name and workflow_id are accepted for symmetry
-    # with the other repo-task activities but the Reviewer doesn't need
-    # any of them — gates run on the disk; the LLM judge gets the plan +
-    # candidate diffs directly. Keeping them in the signature keeps the
-    # workflow's call site uniform.
-    _ = tenant_id, repo_name, workflow_id
+    # repo_name is accepted for symmetry with the other repo-task
+    # activities but the Reviewer doesn't need it — gates run on the
+    # disk; the LLM judge gets the plan + candidate diffs directly.
+    # tenant_id + workflow_id ARE used now (Sprint 19 trace + span).
+    _ = repo_name
 
     activity.heartbeat("reviewer starting")
     hb_task = asyncio.create_task(_keep_alive(message="reviewer running"))
     try:
-        result = await run_reviewer_repo(
-            architect_plan=architect_plan,
-            candidates=candidates,
-            repo_root=Path(repo_path),
-        )
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            tenant_id=tenant_id,
+            phase="reviewer",
+            n_candidates=len(candidates or []),
+        ):
+            with observability.agent_span(
+                name="reviewer",
+                agent_role="reviewer",
+                n_candidates=len(candidates or []),
+            ):
+                result = await run_reviewer_repo(
+                    architect_plan=architect_plan,
+                    candidates=candidates,
+                    repo_root=Path(repo_path),
+                )
     finally:
         hb_task.cancel()
         try:
             await hb_task
         except asyncio.CancelledError:
             pass
+        observability.flush()
     return reviewer_output_to_dict(result)
 
 
@@ -787,69 +895,80 @@ async def push_repo_changes_activity(
     import re
     from app import db, github_app
 
-    if not files:
-        return {"pr_url": None, "branch_name": None, "error": "no files to push"}
+    try:
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            tenant_id=tenant_id,
+            phase="push",
+            repo_url=repo_url,
+            n_files=len(files or []),
+        ):
+            if not files:
+                return {"pr_url": None, "branch_name": None, "error": "no files to push"}
 
-    # https://github.com/<owner>/<name>(.git)?
-    m = re.match(r"https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", repo_url)
-    if not m:
-        return {"pr_url": None, "branch_name": None, "error": f"could not parse repo_url: {repo_url}"}
-    owner, name = m.group(1), m.group(2)
+            # https://github.com/<owner>/<name>(.git)?
+            m = re.match(r"https?://github\.com/([^/]+)/([^/.]+?)(?:\.git)?/?$", repo_url)
+            if not m:
+                return {"pr_url": None, "branch_name": None, "error": f"could not parse repo_url: {repo_url}"}
+            owner, name = m.group(1), m.group(2)
 
-    # Find which installation can see this repo. The user can have multiple
-    # installations connected (across orgs); we pick the first one whose
-    # repo list includes the target. iter on demand — repo lists can be
-    # large for prolific orgs, so don't materialise all of them.
-    installations = await db.get_github_installations(tenant_id=tenant_id)
-    matched_inst_id: int | None = None
-    for inst in installations:
-        try:
-            repos = await github_app.list_installation_repos(inst["installation_id"])
-        except Exception as e:
-            activity.logger.warning(
-                "list_installation_repos failed for installation %s: %s",
-                inst["installation_id"], e,
+            # Find which installation can see this repo. The user can have multiple
+            # installations connected (across orgs); we pick the first one whose
+            # repo list includes the target. iter on demand — repo lists can be
+            # large for prolific orgs, so don't materialise all of them.
+            installations = await db.get_github_installations(tenant_id=tenant_id)
+            matched_inst_id: int | None = None
+            for inst in installations:
+                try:
+                    repos = await github_app.list_installation_repos(inst["installation_id"])
+                except Exception as e:
+                    activity.logger.warning(
+                        "list_installation_repos failed for installation %s: %s",
+                        inst["installation_id"], e,
+                    )
+                    continue
+                for r in repos:
+                    if r["owner"].lower() == owner.lower() and r["name"].lower() == name.lower():
+                        matched_inst_id = inst["installation_id"]
+                        break
+                if matched_inst_id is not None:
+                    break
+
+            if matched_inst_id is None:
+                return {
+                    "pr_url": None, "branch_name": None,
+                    "error": f"no GitHub App installation has access to {owner}/{name}",
+                }
+
+            short = workflow_id.removeprefix("repo-task-")[:8]
+            branch_name = f"swarm/{short}"
+            one_line = " ".join(brief.split())
+            pr_title = f"Swarm: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
+            pr_body = (
+                f"Automated change from twai-swarm workflow `{workflow_id}`.\n\n"
+                f"## Brief\n\n{brief}\n\n"
+                f"## Files changed ({len(files)})\n\n"
+                + "\n".join(f"- `{f['path']}`" for f in files)
             )
-            continue
-        for r in repos:
-            if r["owner"].lower() == owner.lower() and r["name"].lower() == name.lower():
-                matched_inst_id = inst["installation_id"]
-                break
-        if matched_inst_id is not None:
-            break
+            commit_message = f"swarm: {one_line[:72]}"
 
-    if matched_inst_id is None:
-        return {
-            "pr_url": None, "branch_name": None,
-            "error": f"no GitHub App installation has access to {owner}/{name}",
-        }
-
-    short = workflow_id.removeprefix("repo-task-")[:8]
-    branch_name = f"swarm/{short}"
-    one_line = " ".join(brief.split())
-    pr_title = f"Swarm: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
-    pr_body = (
-        f"Automated change from twai-swarm workflow `{workflow_id}`.\n\n"
-        f"## Brief\n\n{brief}\n\n"
-        f"## Files changed ({len(files)})\n\n"
-        + "\n".join(f"- `{f['path']}`" for f in files)
-    )
-    commit_message = f"swarm: {one_line[:72]}"
-
-    push = await github_app.push_files_as_branch(
-        installation_id=matched_inst_id,
-        repo_owner=owner,
-        repo_name=name,
-        branch=branch_name,
-        files=files,
-        commit_message=commit_message,
-        open_pr=True,
-        pr_title=pr_title,
-        pr_body=pr_body,
-    )
-    return {
-        "pr_url": getattr(push, "pr_url", None),
-        "pr_number": getattr(push, "pr_number", None),
-        "branch_name": branch_name,
-        "installation_id": matched_inst_id,
-    }
+            push = await github_app.push_files_as_branch(
+                installation_id=matched_inst_id,
+                repo_owner=owner,
+                repo_name=name,
+                branch=branch_name,
+                files=files,
+                commit_message=commit_message,
+                open_pr=True,
+                pr_title=pr_title,
+                pr_body=pr_body,
+            )
+            return {
+                "pr_url": getattr(push, "pr_url", None),
+                "pr_number": getattr(push, "pr_number", None),
+                "branch_name": branch_name,
+                "installation_id": matched_inst_id,
+            }
+    finally:
+        observability.flush()

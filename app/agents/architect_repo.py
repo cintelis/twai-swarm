@@ -286,6 +286,7 @@ async def _force_emit_plan(
     client: AsyncAnthropic,
     original_user_message: str,
     last_text: str,
+    system_prompt: str = "",
 ) -> dict | None:
     """Force the Architect to emit a plan when the iteration cap was hit.
 
@@ -304,6 +305,8 @@ async def _force_emit_plan(
     proceeds to the existing degraded path (empty subtasks, narrative =
     last_text).
     """
+    from app import observability
+
     deadline_message = (
         "Time's up. You have used your investigation budget without "
         "calling emit_plan. You must emit your plan now with whatever "
@@ -314,24 +317,40 @@ async def _force_emit_plan(
         "cross_cutting=True. Use your prior reasoning where possible:\n\n"
         f"{(last_text or '(no prior reasoning captured)')[:4000]}"
     )
+    # Sprint 19: wrap the force-emit fallback as its own generation so it
+    # shows up in Langfuse as a sibling of the main tool_runner generation
+    # under the architect span. Operators filtering for "force-emit fired"
+    # can find it by name suffix `.force_emit`.
     try:
-        forced_response = await client.messages.create(
+        with observability.generation(
+            name=f"anthropic.{ARCHITECT_MODEL}.force_emit",
             model=ARCHITECT_MODEL,
-            max_tokens=MAX_TOKENS_PER_TURN,
-            system=ARCHITECT_REPO_SYSTEM_PROMPT,
-            tools=[_EMIT_PLAN_TOOL_SCHEMA],
-            tool_choice={"type": "tool", "name": "emit_plan"},
-            messages=[
-                {"role": "user", "content": original_user_message},
-                {"role": "user", "content": deadline_message},
-            ],
-        )
+            provider="anthropic",
+            system=system_prompt or ARCHITECT_REPO_SYSTEM_PROMPT,
+            user=deadline_message,
+            tools=["emit_plan"],
+        ) as gen:
+            forced_response = await client.messages.create(
+                model=ARCHITECT_MODEL,
+                max_tokens=MAX_TOKENS_PER_TURN,
+                system=ARCHITECT_REPO_SYSTEM_PROMPT,
+                tools=[_EMIT_PLAN_TOOL_SCHEMA],
+                tool_choice={"type": "tool", "name": "emit_plan"},
+                messages=[
+                    {"role": "user", "content": original_user_message},
+                    {"role": "user", "content": deadline_message},
+                ],
+            )
+            forced_in = int(getattr(forced_response.usage, "input_tokens", 0) or 0)
+            forced_out = int(getattr(forced_response.usage, "output_tokens", 0) or 0)
+            gen.end(
+                output=f"force-emit returned {len(forced_response.content or [])} blocks",
+                usage={"input": forced_in, "output": forced_out},
+            )
     except Exception as e:  # noqa: BLE001
         logger.error("architect force-emit-plan fallback failed: %s", e)
         return None
 
-    forced_in = int(getattr(forced_response.usage, "input_tokens", 0) or 0)
-    forced_out = int(getattr(forced_response.usage, "output_tokens", 0) or 0)
     for block in (forced_response.content or []):
         if (
             getattr(block, "type", None) == "tool_use"
@@ -400,7 +419,6 @@ async def run_architect_repo(
         tools=tools_with_emit,
         messages=[initial_user_message],
     )
-    runner = client.beta.messages.tool_runner(**runner_kwargs)
 
     iterations = 0
     total_input_tokens = 0
@@ -411,48 +429,77 @@ async def run_architect_repo(
     tenant_ctx = observability.tenant_scope(tenant_id)
     tenant_ctx.__enter__()
     try:
-        async for message in runner:
-            iterations += 1
-            if heartbeat is not None:
-                try:
-                    heartbeat(
-                        f"architect iteration {iterations}/"
-                        f"{MAX_ARCHITECT_ITERATIONS}"
-                    )
-                except Exception:
-                    pass
-            if getattr(message, "usage", None) is not None:
-                total_input_tokens += int(
-                    getattr(message.usage, "input_tokens", 0) or 0
+        # Sprint 19: wrap the tool_runner in a single Langfuse generation.
+        # Per-turn breakdown is lost in this pattern (Langfuse only sees
+        # one generation per tool_runner invocation); future work can
+        # split into per-turn child generations. The generation auto-
+        # nests under the activity-level agent_span via ContextVars.
+        with observability.generation(
+            name=f"anthropic.{ARCHITECT_MODEL}.tool_runner",
+            model=ARCHITECT_MODEL,
+            provider="anthropic",
+            system=ARCHITECT_REPO_SYSTEM_PROMPT,
+            user=user_message,
+            tools=[
+                t.get("name") for t in tools_with_emit
+                if isinstance(t, dict) and t.get("name")
+            ],
+        ) as gen:
+            try:
+                runner = client.beta.messages.tool_runner(**runner_kwargs)
+                async for message in runner:
+                    iterations += 1
+                    if heartbeat is not None:
+                        try:
+                            heartbeat(
+                                f"architect iteration {iterations}/"
+                                f"{MAX_ARCHITECT_ITERATIONS}"
+                            )
+                        except Exception:
+                            pass
+                    if getattr(message, "usage", None) is not None:
+                        total_input_tokens += int(
+                            getattr(message.usage, "input_tokens", 0) or 0
+                        )
+                        total_output_tokens += int(
+                            getattr(message.usage, "output_tokens", 0) or 0
+                        )
+                    for block in (message.content or []):
+                        btype = getattr(block, "type", None)
+                        if btype == "text":
+                            t = getattr(block, "text", "") or ""
+                            if t.strip():
+                                last_text = t
+                        elif btype == "tool_use" and getattr(block, "name", None) == "emit_plan":
+                            plan_payload = getattr(block, "input", None) or {}
+                    # Once the model emits its plan we have everything we need;
+                    # break out of the runner so we don't burn another turn on a
+                    # courtesy ack message.
+                    if plan_payload is not None:
+                        break
+                    if iterations >= MAX_ARCHITECT_ITERATIONS:
+                        logger.warning(
+                            "architect hit MAX_ARCHITECT_ITERATIONS=%d without "
+                            "emit_plan; falling back to last_text",
+                            MAX_ARCHITECT_ITERATIONS,
+                        )
+                        break
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "architect tool_runner failed at iteration %d: %s",
+                    iterations, e,
                 )
-                total_output_tokens += int(
-                    getattr(message.usage, "output_tokens", 0) or 0
-                )
-            for block in (message.content or []):
-                btype = getattr(block, "type", None)
-                if btype == "text":
-                    t = getattr(block, "text", "") or ""
-                    if t.strip():
-                        last_text = t
-                elif btype == "tool_use" and getattr(block, "name", None) == "emit_plan":
-                    plan_payload = getattr(block, "input", None) or {}
-            # Once the model emits its plan we have everything we need;
-            # break out of the runner so we don't burn another turn on a
-            # courtesy ack message.
-            if plan_payload is not None:
-                break
-            if iterations >= MAX_ARCHITECT_ITERATIONS:
-                logger.warning(
-                    "architect hit MAX_ARCHITECT_ITERATIONS=%d without "
-                    "emit_plan; falling back to last_text",
-                    MAX_ARCHITECT_ITERATIONS,
-                )
-                break
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            "architect tool_runner failed at iteration %d: %s",
-            iterations, e,
-        )
+            gen.end(
+                output=(
+                    "emit_plan called"
+                    if plan_payload is not None
+                    else (last_text[:500] or "(no plan emitted)")
+                ),
+                usage={
+                    "input": total_input_tokens,
+                    "output": total_output_tokens,
+                },
+            )
     finally:
         tenant_ctx.__exit__(None, None, None)
 

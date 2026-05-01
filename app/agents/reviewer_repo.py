@@ -361,26 +361,45 @@ async def _call_judge(
 
     On API failure returns (None, "<error>", 0, 0); caller treats as
     pair uncertainty and falls back to deterministic tie-break.
+
+    Sprint 19: wrapped in a Langfuse generation. Each pairwise call is its
+    own generation — for K=3 candidates with position-swap, that's 6
+    generations per Reviewer invocation, all nested under the reviewer
+    agent_span via ContextVars.
     """
+    from app import observability
+
     user_message = _build_judge_user_message(architect_plan, diff_a, diff_b)
     try:
-        resp = await client.messages.create(
+        with observability.generation(
+            name=f"anthropic.{REVIEWER_MODEL}.pairwise",
             model=REVIEWER_MODEL,
-            max_tokens=MAX_TOKENS_JUDGE,
+            provider="anthropic",
             system=JUDGE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
+            user=user_message,
+        ) as gen:
+            resp = await client.messages.create(
+                model=REVIEWER_MODEL,
+                max_tokens=MAX_TOKENS_JUDGE,
+                system=JUDGE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            text_parts: list[str] = []
+            for block in (resp.content or []):
+                if getattr(block, "type", None) == "text":
+                    text_parts.append(getattr(block, "text", "") or "")
+            judge_text = "".join(text_parts)
+            tokens_in = int(getattr(resp.usage, "input_tokens", 0) or 0)
+            tokens_out = int(getattr(resp.usage, "output_tokens", 0) or 0)
+            gen.end(
+                output=judge_text[:500],
+                usage={"input": tokens_in, "output": tokens_out},
+            )
     except Exception as e:  # noqa: BLE001
         logger.error("reviewer judge call failed: %s", e)
         return (None, f"judge api error: {type(e).__name__}", 0, 0)
 
-    text_parts: list[str] = []
-    for block in (resp.content or []):
-        if getattr(block, "type", None) == "text":
-            text_parts.append(getattr(block, "text", "") or "")
-    winner, rationale = _parse_judge_winner("".join(text_parts))
-    tokens_in = int(getattr(resp.usage, "input_tokens", 0) or 0)
-    tokens_out = int(getattr(resp.usage, "output_tokens", 0) or 0)
+    winner, rationale = _parse_judge_winner(judge_text)
     return (winner, rationale, tokens_in, tokens_out)
 
 

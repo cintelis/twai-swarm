@@ -72,11 +72,13 @@ def test_generation_wraps_sdk_when_configured(monkeypatch):
     assert call_kwargs["model"] == "opus"
     assert call_kwargs["metadata"]["tenant_id"] == "acme"
 
-    # end() was forwarded with output + usage
+    # end() was forwarded with output + usage. Sprint 19 D3 migration:
+    # the wrapper now passes `usage_details=` (not `usage=`) downstream
+    # to client.generation, since v2.60.9 deprecated `usage`.
     mock_gen.end.assert_called_once()
     end_kwargs = mock_gen.end.call_args.kwargs
     assert end_kwargs["output"] == "hello"
-    assert end_kwargs["usage"] == {"input": 10, "output": 5}
+    assert end_kwargs["usage_details"] == {"input": 10, "output": 5}
 
 
 def test_generation_marks_error_on_exception(monkeypatch):

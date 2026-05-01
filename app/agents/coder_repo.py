@@ -340,8 +340,6 @@ async def run_agentic_repo_coder(
     # See coder_agentic for the rationale — adaptive thinking is Opus-only.
     if CODER_MODEL.startswith("claude-opus-"):
         runner_kwargs["thinking"] = {"type": "adaptive"}
-    runner = client.beta.messages.tool_runner(**runner_kwargs)
-
     iterations = 0
     total_input_tokens = 0
     total_output_tokens = 0
@@ -351,41 +349,67 @@ async def run_agentic_repo_coder(
     tenant_ctx = observability.tenant_scope(tenant_id)
     tenant_ctx.__enter__()
     try:
-        async for message in runner:
-            iterations += 1
-            # Sprint 18a: at 80% of MAX_ITERATIONS, surface a "completion mode"
-            # banner via the heartbeat so operators have visibility when the
-            # Coder is approaching the cap. Mid-stream injection of a Coder-
-            # facing message isn't supported by the Anthropic SDK's
-            # `tool_runner` (it manages its own message history end-to-end);
-            # the system prompt now declares the budget up front instead. If
-            # the SDK later exposes a per-turn injection hook, swap this
-            # heartbeat-only signal for an actual system-side note.
-            completion_mode = iterations >= int(MAX_ITERATIONS * 0.8)
-            if heartbeat is not None:
-                try:
-                    if completion_mode:
-                        heartbeat(
-                            f"repo coder iteration {iterations} — completion mode "
-                            f"({iterations}/{MAX_ITERATIONS}, "
-                            f"{MAX_ITERATIONS - iterations} turns left)"
-                        )
-                    else:
-                        heartbeat(f"repo coder iteration {iterations}")
-                except Exception:
-                    pass
-            if getattr(message, "usage", None) is not None:
-                total_input_tokens += int(getattr(message.usage, "input_tokens", 0) or 0)
-                total_output_tokens += int(getattr(message.usage, "output_tokens", 0) or 0)
-            for block in (message.content or []):
-                if getattr(block, "type", None) == "text":
-                    t = getattr(block, "text", "") or ""
-                    if t.strip():
-                        last_text = t
-            stop_reason = getattr(message, "stop_reason", None)
-            if iterations >= MAX_ITERATIONS:
-                logger.warning("repo coder hit MAX_ITERATIONS=%d, halting", MAX_ITERATIONS)
-                break
+        # Sprint 19: wrap the tool_runner in a single Langfuse generation
+        # — same pattern as architect_repo. Auto-nests under the
+        # coder.seed{coder_seed} agent_span via ContextVars.
+        with observability.generation(
+            name=f"anthropic.{CODER_MODEL}.tool_runner",
+            model=CODER_MODEL,
+            provider="anthropic",
+            system=REPO_CODER_SYSTEM_PROMPT,
+            user=user_message,
+            tools=[
+                getattr(t, "name", None) or getattr(t, "__name__", "")
+                for t in tools
+            ],
+            metadata={
+                "coder_seed": int(coder_seed),
+                "temperature": float(temperature),
+            },
+        ) as gen:
+            runner = client.beta.messages.tool_runner(**runner_kwargs)
+            async for message in runner:
+                iterations += 1
+                # Sprint 18a: at 80% of MAX_ITERATIONS, surface a "completion mode"
+                # banner via the heartbeat so operators have visibility when the
+                # Coder is approaching the cap. Mid-stream injection of a Coder-
+                # facing message isn't supported by the Anthropic SDK's
+                # `tool_runner` (it manages its own message history end-to-end);
+                # the system prompt now declares the budget up front instead. If
+                # the SDK later exposes a per-turn injection hook, swap this
+                # heartbeat-only signal for an actual system-side note.
+                completion_mode = iterations >= int(MAX_ITERATIONS * 0.8)
+                if heartbeat is not None:
+                    try:
+                        if completion_mode:
+                            heartbeat(
+                                f"repo coder iteration {iterations} — completion mode "
+                                f"({iterations}/{MAX_ITERATIONS}, "
+                                f"{MAX_ITERATIONS - iterations} turns left)"
+                            )
+                        else:
+                            heartbeat(f"repo coder iteration {iterations}")
+                    except Exception:
+                        pass
+                if getattr(message, "usage", None) is not None:
+                    total_input_tokens += int(getattr(message.usage, "input_tokens", 0) or 0)
+                    total_output_tokens += int(getattr(message.usage, "output_tokens", 0) or 0)
+                for block in (message.content or []):
+                    if getattr(block, "type", None) == "text":
+                        t = getattr(block, "text", "") or ""
+                        if t.strip():
+                            last_text = t
+                stop_reason = getattr(message, "stop_reason", None)
+                if iterations >= MAX_ITERATIONS:
+                    logger.warning("repo coder hit MAX_ITERATIONS=%d, halting", MAX_ITERATIONS)
+                    break
+            gen.end(
+                output=(last_text or "").strip()[:500],
+                usage={
+                    "input": total_input_tokens,
+                    "output": total_output_tokens,
+                },
+            )
     finally:
         tenant_ctx.__exit__(None, None, None)
 

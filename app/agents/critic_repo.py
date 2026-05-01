@@ -578,44 +578,60 @@ async def _extract_criteria_from_brief(
     extraction call also failed — caller proceeds with no checklist (the
     pre-18.1 behaviour, but at least we tried).
     """
+    from app import observability
+
     if not brief or not brief.strip():
         return ([], 0, 0)
+    extract_system = (
+        "You extract testable acceptance criteria from project briefs. "
+        "Output JSON via the emit_criteria tool. Each criterion is a "
+        "single sentence stating something that should be true after "
+        "the work is complete."
+    )
+    extract_user = (
+        f"Brief:\n{brief}\n\n"
+        "Extract 3-10 acceptance criteria. Each criterion should "
+        "be testable by reading the diff."
+    )
+    # Sprint 19: wrap as a generation. Auto-nests under the critic span.
     try:
-        response = await client.messages.create(
+        with observability.generation(
+            name=f"anthropic.{CRITIC_MODEL}.brief_criteria",
             model=CRITIC_MODEL,
-            max_tokens=2048,
-            system=(
-                "You extract testable acceptance criteria from project briefs. "
-                "Output JSON via the emit_criteria tool. Each criterion is a "
-                "single sentence stating something that should be true after "
-                "the work is complete."
-            ),
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Brief:\n{brief}\n\n"
-                    "Extract 3-10 acceptance criteria. Each criterion should "
-                    "be testable by reading the diff."
-                ),
-            }],
-            tools=[{
-                "name": "emit_criteria",
-                "description": "Emit the list of acceptance criteria",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "criteria": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 1,
-                            "maxItems": 15,
+            provider="anthropic",
+            system=extract_system,
+            user=extract_user,
+            tools=["emit_criteria"],
+        ) as gen:
+            response = await client.messages.create(
+                model=CRITIC_MODEL,
+                max_tokens=2048,
+                system=extract_system,
+                messages=[{"role": "user", "content": extract_user}],
+                tools=[{
+                    "name": "emit_criteria",
+                    "description": "Emit the list of acceptance criteria",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "criteria": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 15,
+                            },
                         },
+                        "required": ["criteria"],
                     },
-                    "required": ["criteria"],
-                },
-            }],
-            tool_choice={"type": "tool", "name": "emit_criteria"},
-        )
+                }],
+                tool_choice={"type": "tool", "name": "emit_criteria"},
+            )
+            tokens_in = int(getattr(response.usage, "input_tokens", 0) or 0)
+            tokens_out = int(getattr(response.usage, "output_tokens", 0) or 0)
+            gen.end(
+                output=f"emit_criteria called ({len(response.content or [])} blocks)",
+                usage={"input": tokens_in, "output": tokens_out},
+            )
     except Exception as e:  # noqa: BLE001
         logger.error(
             "critic brief-criteria extraction failed: %s; "
@@ -623,8 +639,6 @@ async def _extract_criteria_from_brief(
         )
         return ([], 0, 0)
 
-    tokens_in = int(getattr(response.usage, "input_tokens", 0) or 0)
-    tokens_out = int(getattr(response.usage, "output_tokens", 0) or 0)
     for block in (response.content or []):
         if (
             getattr(block, "type", None) == "tool_use"
@@ -654,6 +668,8 @@ async def run_llm_checklist_judge(
     unavailable" evidence note — defensive default that triggers a
     continuation rather than silently approving.
     """
+    from app import observability
+
     criteria = _flatten_acceptance_criteria(architect_plan)
     if not criteria:
         return ([], [], 0, 0)
@@ -661,18 +677,42 @@ async def run_llm_checklist_judge(
     prompt = _build_judge_prompt(
         criteria, coder_diff, files_with_content, unsatisfied_gate_failures,
     )
+    judge_system = (
+        "You are a strict evaluator. You grade Coder agent output "
+        "against acceptance criteria. Always return JSON in the "
+        "exact format specified."
+    )
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
+    # Sprint 19: wrap the judge call as a generation. Auto-nests under
+    # the critic agent_span via ContextVars.
+    tokens_in = 0
+    tokens_out = 0
     try:
-        resp = await client.messages.create(
+        with observability.generation(
+            name=f"anthropic.{CRITIC_MODEL}.judge",
             model=CRITIC_MODEL,
-            max_tokens=MAX_TOKENS_JUDGE,
-            system=(
-                "You are a strict evaluator. You grade Coder agent output "
-                "against acceptance criteria. Always return JSON in the "
-                "exact format specified."
-            ),
-            messages=[{"role": "user", "content": prompt}],
-        )
+            provider="anthropic",
+            system=judge_system,
+            user=prompt,
+            metadata={"n_criteria": len(criteria)},
+        ) as gen:
+            resp = await client.messages.create(
+                model=CRITIC_MODEL,
+                max_tokens=MAX_TOKENS_JUDGE,
+                system=judge_system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            tokens_in = int(getattr(resp.usage, "input_tokens", 0) or 0)
+            tokens_out = int(getattr(resp.usage, "output_tokens", 0) or 0)
+            text_parts: list[str] = []
+            for block in (resp.content or []):
+                if getattr(block, "type", None) == "text":
+                    text_parts.append(getattr(block, "text", "") or "")
+            judge_text = "".join(text_parts)
+            gen.end(
+                output=judge_text[:1000],
+                usage={"input": tokens_in, "output": tokens_out},
+            )
     except Exception as e:  # noqa: BLE001
         logger.error("critic LLM judge failed: %s; failing all criteria", e)
         failed = [
@@ -686,11 +726,7 @@ async def run_llm_checklist_judge(
         ]
         return ([], failed, 0, 0)
 
-    text_parts: list[str] = []
-    for block in (resp.content or []):
-        if getattr(block, "type", None) == "text":
-            text_parts.append(getattr(block, "text", "") or "")
-    parsed = _parse_judge_response("".join(text_parts), criteria)
+    parsed = _parse_judge_response(judge_text, criteria)
 
     passed: list[str] = []
     failed: list[CriticFailure] = []
@@ -713,8 +749,7 @@ async def run_llm_checklist_judge(
                 criterion=text, evidence=evidence, severity="block",
             ))
 
-    tokens_in = int(getattr(resp.usage, "input_tokens", 0) or 0)
-    tokens_out = int(getattr(resp.usage, "output_tokens", 0) or 0)
+    # tokens_in / tokens_out were captured inside the generation block above.
     return (passed, failed, tokens_in, tokens_out)
 
 

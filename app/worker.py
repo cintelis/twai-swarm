@@ -9,13 +9,14 @@ When any role's throughput becomes a bottleneck, run this image as a separate
 ECS service with TEMPORAL_QUEUES env var narrowed to specific roles.
 """
 import asyncio
+import atexit
 import os
 from aiohttp import web
 
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from app import config, telemetry
+from app import config, observability, telemetry
 from app.workflows import ProjectWorkflow, RepoTaskWorkflow
 from app.activities import (
     create_project_record,
@@ -34,6 +35,15 @@ from app.activities import (
     # Sprint 18d — Reviewer Best-of-N selection.
     reviewer_repo_task_activity,
 )
+
+# Sprint 19: belt-and-braces flush + thread-join on process exit. Per-
+# activity flush already covers the common path (an activity finishing
+# normally), but if the worker process gets SIGTERM mid-activity OR the
+# Temporal SDK doesn't reach the per-activity finally for some reason
+# (panic, OOM kill, etc.), atexit gives us one more chance to drain
+# the Langfuse event queue. v2.60.x SDK's shutdown() flushes AND joins
+# the consumer thread, which is what we want at process exit.
+atexit.register(observability.shutdown)
 
 ACTIVITIES = [
     create_project_record, create_task_record, run_agent_activity, run_coder_activity,
@@ -118,6 +128,11 @@ async def main():
         await asyncio.gather(*run_tasks)
     finally:
         await health_runner.cleanup()
+        # Sprint 19: graceful Langfuse shutdown if the worker stops
+        # cleanly (KeyboardInterrupt, asyncio.CancelledError, or all
+        # workers exiting). The atexit hook above is the fallback for
+        # the not-clean case (SIGKILL, etc.).
+        observability.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
