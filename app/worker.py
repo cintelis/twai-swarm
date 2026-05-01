@@ -31,6 +31,8 @@ from app.activities import (
     architect_repo_task_activity,
     # Sprint 18c — Critic post-step + continuation loop.
     critic_repo_task_activity,
+    # Sprint 18d — Reviewer Best-of-N selection.
+    reviewer_repo_task_activity,
 )
 
 ACTIVITIES = [
@@ -39,6 +41,7 @@ ACTIVITIES = [
     push_repo_changes_activity,
     architect_repo_task_activity,
     critic_repo_task_activity,
+    reviewer_repo_task_activity,
 ]
 WORKFLOWS = [ProjectWorkflow, RepoTaskWorkflow]
 

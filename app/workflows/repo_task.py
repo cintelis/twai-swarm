@@ -17,6 +17,7 @@ to Sprint 10f (it can reuse the existing GitHub App push code).
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -35,6 +36,8 @@ with workflow.unsafe.imports_passed_through():
         architect_repo_task_activity,
         # Sprint 18c — Critic post-step + continuation loop.
         critic_repo_task_activity,
+        # Sprint 18d — Reviewer Best-of-N selection.
+        reviewer_repo_task_activity,
     )
 
 
@@ -45,6 +48,15 @@ with workflow.unsafe.imports_passed_through():
 # AutoGPT's hallucination-loop failure mode. Plus a monotone-progress
 # check catches "going backwards" continuations early.
 MAX_CONTINUATIONS = 2
+
+# Sprint 18d: Best-of-N parallel Coder count for cross-cutting briefs.
+# Per D5 (Gao 2022 overoptimization): cap N=5 to avoid Goodhart's-law
+# divergence between proxy reward (judge) and gold reward (actual brief
+# satisfaction) at high N. Default=3 balances cost (3 Haiku Coders +
+# 1 Sonnet Reviewer ≈ 4x single-Coder run) against the empirical sweet
+# spot from AlphaCode 2 (3-5 candidates, two-stage selection).
+BEST_OF_N_DEFAULT = 3
+BEST_OF_N_MAX = 5
 
 
 @dataclass
@@ -60,6 +72,13 @@ class RepoTaskInput:
     # re-extracted (e.g. Java extractor + Spring routes added in 17). Defaults
     # off so routine repo-task runs stay incremental.
     force_reindex: bool = False
+    # Sprint 18d: opt-OUT of Best-of-N for cross-cutting briefs. Default
+    # False keeps Best-of-N enabled when the Architect tags the brief as
+    # cross_cutting (per D6). Operators flip this to True for cost-sensitive
+    # runs or when debugging a specific Coder seed in isolation. Single-file
+    # / standard briefs ignore this flag entirely — they never trigger
+    # Best-of-N regardless.
+    disable_best_of_n: bool = False
 
 
 @dataclass
@@ -94,6 +113,15 @@ class RepoTaskOutput:
     # initial pass passed the Critic on first try). Bounded by
     # MAX_CONTINUATIONS = 2.
     continuation_count: int = 0
+    # Sprint 18d — `dataclasses.asdict(ReviewerRepoOutput)` when a
+    # Best-of-N selection ran (cross_cutting brief), else None. Carries
+    # the candidate_assessments + pairwise_results for cost-summary +
+    # debugging.
+    reviewer_result: dict | None = None
+    # Sprint 18d — How many parallel Coders ran. 1 means single-Coder
+    # path (standard / single-file brief OR cross-cutting with
+    # disable_best_of_n=True). 3+ means Best-of-N (BEST_OF_N_DEFAULT).
+    best_of_n_count: int = 1
 
 
 @workflow.defn
@@ -141,15 +169,63 @@ class RepoTaskWorkflow:
             heartbeat_timeout=timedelta(minutes=2),
         )
 
-        coder_result = await workflow.execute_activity(
-            run_repo_coder_activity,
-            args=[
-                clone_result["path"], repo_name, inp.brief, inp.tenant_id,
-                workflow.info().workflow_id, arch_result,
-            ],
-            schedule_to_close_timeout=timedelta(minutes=20),
-            heartbeat_timeout=timedelta(minutes=3),
-        )
+        # Sprint 18d: Best-of-N branch. When the Architect tagged the
+        # brief as cross_cutting (per D6) AND the operator hasn't opted
+        # out, fan out K=3 parallel Coders against the SAME plan with
+        # different temperature seeds (per D5). After all complete, the
+        # Reviewer picks one winner via two-stage selection (deterministic
+        # gate filter → pairwise LLM-as-judge with position-swap). The
+        # Critic loop below then operates on the winner only — running
+        # continuations on losers would waste 2-6x cost for no quality
+        # gain (their work is discarded).
+        is_cross_cutting = bool(arch_result.get("cross_cutting", False))
+        reviewer_result_dict: dict | None = None
+        best_of_n_count = 1
+        if is_cross_cutting and not inp.disable_best_of_n:
+            n = min(BEST_OF_N_DEFAULT, BEST_OF_N_MAX)
+            best_of_n_count = n
+            coder_futures = [
+                workflow.execute_activity(
+                    run_repo_coder_activity,
+                    args=[
+                        clone_result["path"], repo_name, inp.brief,
+                        inp.tenant_id, workflow.info().workflow_id,
+                        arch_result, seed,
+                    ],
+                    schedule_to_close_timeout=timedelta(minutes=20),
+                    heartbeat_timeout=timedelta(minutes=3),
+                )
+                for seed in range(n)
+            ]
+            candidates = await asyncio.gather(*coder_futures)
+            reviewer_result_dict = await workflow.execute_activity(
+                reviewer_repo_task_activity,
+                args=[
+                    clone_result["path"], repo_name, arch_result,
+                    candidates, inp.tenant_id, workflow.info().workflow_id,
+                ],
+                schedule_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(minutes=2),
+            )
+            winner_idx = reviewer_result_dict.get("winner_index")
+            if winner_idx is None or not (0 <= int(winner_idx) < len(candidates)):
+                # All-failed-gate-and-no-fallback OR malformed reviewer
+                # output. Fall back to candidate 0 (the most-deterministic
+                # seed) so we still ship something — Critic loop below will
+                # catch any remaining gate failures.
+                coder_result = candidates[0]
+            else:
+                coder_result = candidates[int(winner_idx)]
+        else:
+            coder_result = await workflow.execute_activity(
+                run_repo_coder_activity,
+                args=[
+                    clone_result["path"], repo_name, inp.brief, inp.tenant_id,
+                    workflow.info().workflow_id, arch_result,
+                ],
+                schedule_to_close_timeout=timedelta(minutes=20),
+                heartbeat_timeout=timedelta(minutes=3),
+            )
 
         # Sprint 18c: Critic + continuation loop. After every Coder pass
         # (initial + up to MAX_CONTINUATIONS continuations), run the Critic
@@ -227,6 +303,20 @@ class RepoTaskWorkflow:
         # `brief` verbatim into the PR body, so this is the lightest-touch
         # injection point.
         push_brief = inp.brief
+        # Sprint 18d: when Best-of-N ran, prepend a header noting which
+        # candidate won and why. Goes ABOVE any continuation gaps footer
+        # so reviewers see the selection context first.
+        if reviewer_result_dict and best_of_n_count > 1:
+            winner_idx = reviewer_result_dict.get("winner_index")
+            chosen_seed = coder_result.get("_coder_seed", winner_idx)
+            rationale = reviewer_result_dict.get("rationale", "")
+            push_brief = (
+                f"{inp.brief}\n\n"
+                f"---\n\n"
+                f"Best-of-N selection: {best_of_n_count} candidates evaluated, "
+                f"winner #{winner_idx} (seed={chosen_seed}).\n"
+                f"{rationale}"
+            )
         if continuation_count > 0 and critic_results:
             final = critic_results[-1]
             failed = final.get("failed_criteria") or []
@@ -257,7 +347,8 @@ class RepoTaskWorkflow:
                         )
                     if len(gates) > 10:
                         footer_lines.append(f"- ...and {len(gates) - 10} more")
-                push_brief = inp.brief + "\n" + "\n".join(footer_lines)
+                # Append the gaps footer after any Best-of-N header above.
+                push_brief = push_brief + "\n" + "\n".join(footer_lines)
 
         if not inp.auto_pr:
             push_error = "auto_pr disabled"
@@ -299,4 +390,6 @@ class RepoTaskWorkflow:
             architect_plan=arch_result,
             critic_results=critic_results,
             continuation_count=continuation_count,
+            reviewer_result=reviewer_result_dict,
+            best_of_n_count=best_of_n_count,
         )

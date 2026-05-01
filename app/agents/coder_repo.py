@@ -53,6 +53,33 @@ MAX_TOKENS_PER_TURN = 16384
 # See coder_agentic.CODER_MODEL — same Anthropic-SDK constraint applies here.
 CODER_MODEL = "claude-haiku-4-5"
 
+# Sprint 18d Best-of-N: temperature schedule per `coder_seed` parameter.
+# Index 0 is the deterministic "control" run; 1 is medium variance; 2 is
+# high variance (explores more options). Seeds ≥3 cycle through these
+# three values — Best-of-N caps at N=5 (Gao 2022 overoptimization, D5)
+# and we never need more than 3 distinct buckets in practice.
+#
+# NOTE: the Anthropic SDK does NOT accept an explicit `seed` parameter on
+# `messages.create` / `tool_runner` (verified Sprint 18d). Reproducibility
+# across runs at a given seed is therefore best-effort — sampling is
+# pseudo-random with no exposed seed knob. The seed value here is solely
+# the index into the temperature schedule + a record-keeping field threaded
+# through the activity for telemetry. Upgrade if/when the SDK exposes a
+# real seed param.
+CODER_SEED_TEMPERATURE_SCHEDULE: tuple[float, ...] = (0.4, 0.7, 1.0)
+
+
+def _temperature_for_seed(coder_seed: int) -> float:
+    """Map a coder_seed integer to a temperature value.
+
+    Uses the Sprint 18d schedule (0.4, 0.7, 1.0) cyclically — seed=0 is
+    most deterministic, seed=2 is most exploratory; seed=3 cycles back
+    to 0.4. Negative seeds clamp to 0 for safety.
+    """
+    if coder_seed < 0:
+        coder_seed = 0
+    return CODER_SEED_TEMPERATURE_SCHEDULE[coder_seed % len(CODER_SEED_TEMPERATURE_SCHEDULE)]
+
 REPO_CODER_SYSTEM_PROMPT = """You are an agentic Coder working on an EXISTING repository.
 
 The full repo is already in your sandbox. You have the standard editing tools (list_files, read_file, write_file, run_verify, bash_exec) plus graph-aware tools backed by a pre-built code knowledge graph:
@@ -240,6 +267,7 @@ async def run_agentic_repo_coder(
     heartbeat: Any = None,
     tenant_id: str = "default",
     architect_plan: dict | None = None,
+    coder_seed: int = 0,
 ) -> dict:
     """Run the agentic Coder loop on an already-cloned + already-indexed repo.
 
@@ -254,6 +282,16 @@ async def run_agentic_repo_coder(
     its `acceptance_criteria` as a contract (per D1). Default None
     preserves the pre-18b single-Coder behaviour for callers that haven't
     been updated.
+
+    `coder_seed` (Sprint 18d) selects a temperature from
+    `CODER_SEED_TEMPERATURE_SCHEDULE` for Best-of-N parallel runs:
+    seed=0 → temp=0.4 (control), seed=1 → 0.7, seed=2 → 1.0, seed=3
+    cycles back to 0.4. Default 0 preserves the pre-18d single-Coder
+    behaviour. The seed is also returned in the result dict under
+    `_coder_seed` so the Reviewer can record which seed produced which
+    candidate. The Anthropic SDK does NOT expose a `seed` param so
+    reproducibility across runs at the same seed is best-effort — only
+    the temperature is propagated.
     """
     from app import observability
 
@@ -287,12 +325,17 @@ async def run_agentic_repo_coder(
     )
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
+    # Sprint 18d Best-of-N: temperature varies per coder_seed. The default
+    # path (seed=0) gets temp=0.4 — slightly higher than the SDK default
+    # but still mostly-deterministic, matching the "control run" intent.
+    temperature = _temperature_for_seed(coder_seed)
     runner_kwargs: dict = dict(
         model=CODER_MODEL,
         max_tokens=MAX_TOKENS_PER_TURN,
         system=REPO_CODER_SYSTEM_PROMPT,
         tools=tools,
         messages=[{"role": "user", "content": user_message}],
+        temperature=temperature,
     )
     # See coder_agentic for the rationale — adaptive thinking is Opus-only.
     if CODER_MODEL.startswith("claude-opus-"):
@@ -396,4 +439,9 @@ async def run_agentic_repo_coder(
         "_cost_usd":   round(input_cost + output_cost, 6),
         "_provider":   "anthropic",
         "_model":      CODER_MODEL,
+        # Sprint 18d: surface the seed + temperature back to the workflow
+        # so the Reviewer's CandidateAssessment can record provenance and
+        # operators can see which seed produced the winner.
+        "_coder_seed": int(coder_seed),
+        "_coder_temperature": float(temperature),
     }

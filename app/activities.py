@@ -650,6 +650,7 @@ async def run_repo_coder_activity(
     tenant_id: str,
     workflow_id: str,
     architect_plan: dict | None = None,
+    coder_seed: int = 0,
 ) -> dict:
     """Run the agentic Coder against the cloned + indexed repo.
 
@@ -669,6 +670,12 @@ async def run_repo_coder_activity(
     a markdown string with extra sections. The Architect plan is
     threaded through unchanged so the continuation Coder still sees
     the original acceptance_criteria, not just the gap list.
+
+    Sprint 18d: `coder_seed` selects the temperature for Best-of-N
+    parallel runs (seed=0→0.4, seed=1→0.7, seed=2→1.0; seed≥3 cycles).
+    Default 0 preserves the pre-18d single-Coder behaviour. The seed
+    is also surfaced back via the result dict's `_coder_seed` field so
+    the Reviewer can record provenance.
     """
     from pathlib import Path
     from app.agents.coder_repo import run_agentic_repo_coder
@@ -687,6 +694,7 @@ async def run_repo_coder_activity(
                 heartbeat=activity.heartbeat,
                 tenant_id=tenant_id,
                 architect_plan=architect_plan,
+                coder_seed=coder_seed,
             )
     finally:
         hb_task.cancel()
@@ -695,6 +703,63 @@ async def run_repo_coder_activity(
         except asyncio.CancelledError:
             pass
     return result
+
+
+@activity.defn
+async def reviewer_repo_task_activity(
+    repo_path: str,
+    repo_name: str,
+    architect_plan: dict,
+    candidates: list[dict],
+    tenant_id: str,
+    workflow_id: str,
+) -> dict:
+    """Run two-stage Best-of-N selection over `candidates`.
+
+    Sprint 18d: post-step that fires AFTER K parallel Coders complete
+    against the same Architect plan with different seeds/temperatures.
+    Stage 1 filters via the deterministic gate (overlay each candidate
+    onto a scratch dir copy of the cloned repo, then run ruff/compileall/
+    mvn/typecheck). Stage 2 runs pairwise LLM-as-judge with position-swap
+    over the survivors and picks the winner.
+
+    Returns `dataclasses.asdict(ReviewerRepoOutput)`. The workflow then
+    threads `winner_index` back into the candidate list to pick the
+    Coder result that proceeds through the Critic loop and the auto-PR
+    step. All non-winner candidates are discarded — their continuation-
+    loop cost would be wasted.
+
+    Failure modes (no candidates, every candidate malformed) surface as
+    a `ReviewerRepoOutput` with `winner_index=None`; the workflow then
+    falls back to candidate 0 so we still ship something.
+    """
+    from pathlib import Path
+    from app.agents.reviewer_repo import (
+        reviewer_output_to_dict, run_reviewer_repo,
+    )
+
+    # Tenant_id and repo_name and workflow_id are accepted for symmetry
+    # with the other repo-task activities but the Reviewer doesn't need
+    # any of them — gates run on the disk; the LLM judge gets the plan +
+    # candidate diffs directly. Keeping them in the signature keeps the
+    # workflow's call site uniform.
+    _ = tenant_id, repo_name, workflow_id
+
+    activity.heartbeat("reviewer starting")
+    hb_task = asyncio.create_task(_keep_alive(message="reviewer running"))
+    try:
+        result = await run_reviewer_repo(
+            architect_plan=architect_plan,
+            candidates=candidates,
+            repo_root=Path(repo_path),
+        )
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+    return reviewer_output_to_dict(result)
 
 
 @activity.defn

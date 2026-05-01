@@ -248,3 +248,54 @@ def test_system_prompt_mentions_architect_plan_contract():
     # The "surface disagreement" clause is the explicit out for plan/brief
     # mismatch — keep it discoverable.
     assert "disagreement" in p
+
+
+# --- Sprint 18d: coder_seed → temperature mapping ---------------------------
+#
+# Best-of-N parallel Coders share the same Architect plan but vary
+# temperature via the coder_seed parameter. The seed→temp schedule lives
+# at module level so the activity + tests reach for the same constant.
+# Anthropic SDK doesn't expose an explicit `seed` param on tool_runner;
+# only temperature is propagated, so reproducibility-at-seed is best
+# effort — see the run_agentic_repo_coder docstring.
+
+
+def test_run_agentic_repo_coder_accepts_coder_seed():
+    """The function signature must accept `coder_seed: int = 0`.
+
+    Default 0 preserves the pre-18d behaviour; Best-of-N callers pass
+    seed=1 and seed=2 to explore the temperature schedule.
+    """
+    import inspect
+    sig = inspect.signature(coder_repo.run_agentic_repo_coder)
+    assert "coder_seed" in sig.parameters
+    p = sig.parameters["coder_seed"]
+    assert p.default == 0
+    assert p.annotation in (int, "int")
+
+
+def test_coder_seed_temperature_schedule_is_three_buckets():
+    """Per the 18d spec: seed 0 → 0.4, seed 1 → 0.7, seed 2 → 1.0,
+    seed >= 3 cycles back to 0.4. Three distinct buckets is enough for
+    Best-of-N up to N=5 (Gao 2022 cap)."""
+    sched = coder_repo.CODER_SEED_TEMPERATURE_SCHEDULE
+    assert sched == (0.4, 0.7, 1.0)
+
+
+def test_coder_seed_maps_to_temperature():
+    """Verify the seed→temp mapping (0→0.4, 1→0.7, 2→1.0, 3→0.4 cycling)."""
+    fn = coder_repo._temperature_for_seed
+    assert fn(0) == 0.4
+    assert fn(1) == 0.7
+    assert fn(2) == 1.0
+    # Cycles back to 0 for seed >= 3.
+    assert fn(3) == 0.4
+    assert fn(4) == 0.7
+    assert fn(5) == 1.0
+    assert fn(6) == 0.4
+
+
+def test_coder_seed_negative_clamps_to_zero():
+    """Defensive: negative seed clamps to 0 rather than exploding via mod."""
+    assert coder_repo._temperature_for_seed(-1) == 0.4
+    assert coder_repo._temperature_for_seed(-100) == 0.4

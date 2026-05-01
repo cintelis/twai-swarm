@@ -324,3 +324,144 @@ def test_workflow_continuation_loop_handles_monotone_progress():
     src = inspect.getsource(RepoTaskWorkflow)
     # Check that the loop reads passed_criteria from prior critic results.
     assert "passed_criteria" in src
+
+
+# ─── Sprint 18d: Best-of-N Reviewer wiring ──────────────────────────────────
+
+
+def test_reviewer_activity_registered_in_worker():
+    """Sprint 18d wires `reviewer_repo_task_activity` into the worker so
+    Temporal can dispatch it. Without this registration the workflow's
+    execute_activity call raises at first run."""
+    from app import worker
+    from app.activities import reviewer_repo_task_activity
+    assert reviewer_repo_task_activity in worker.ACTIVITIES
+
+
+def test_reviewer_activity_signature():
+    """The reviewer activity's coroutine signature must accept the six
+    positional args the workflow passes (path, name, plan, candidates,
+    tenant, wf_id)."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(
+        acts.reviewer_repo_task_activity, "__wrapped__",
+        acts.reviewer_repo_task_activity,
+    )
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    assert params == [
+        "repo_path", "repo_name", "architect_plan", "candidates",
+        "tenant_id", "workflow_id",
+    ]
+
+
+def test_repo_task_input_disable_best_of_n_default_false():
+    """Backward compat: existing callers pass a 4-arg RepoTaskInput and
+    must keep getting Best-of-N enabled by default for cross-cutting
+    briefs. disable_best_of_n is opt-in."""
+    from app.workflows import RepoTaskInput
+    inp = RepoTaskInput(repo_url="https://x/y.git", branch="main", brief="do thing")
+    assert inp.disable_best_of_n is False
+
+
+def test_repo_task_input_accepts_disable_best_of_n():
+    from app.workflows import RepoTaskInput
+    inp = RepoTaskInput(
+        repo_url="https://x/y.git", branch="main", brief="do thing",
+        disable_best_of_n=True,
+    )
+    assert inp.disable_best_of_n is True
+
+
+def test_repo_task_output_includes_reviewer_result():
+    """RepoTaskOutput exposes reviewer_result + best_of_n_count so the UI
+    cost-summary can render the multi-agent breakdown for cross-cutting
+    briefs (and skip the section entirely for single-Coder runs)."""
+    from app.workflows import RepoTaskOutput
+    out = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+    )
+    assert out.reviewer_result is None
+    assert out.best_of_n_count == 1
+
+
+def test_repo_task_output_reviewer_result_accepts_dict():
+    """reviewer_result is a plain dict (not ReviewerRepoOutput) so it
+    survives Temporal's JSON serialisation without a converter."""
+    from app.workflows import RepoTaskOutput
+    out = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+        reviewer_result={
+            "winner_index": 1,
+            "rationale": "candidate 1 won pairwise",
+            "fallback_used": False,
+        },
+        best_of_n_count=3,
+    )
+    assert out.reviewer_result["winner_index"] == 1
+    assert out.best_of_n_count == 3
+
+
+def test_best_of_n_constants():
+    """D5: cap N=5 (Gao 2022); default N=3 per AlphaCode 2 sweet spot."""
+    from app.workflows.repo_task import BEST_OF_N_DEFAULT, BEST_OF_N_MAX
+    assert BEST_OF_N_DEFAULT == 3
+    assert BEST_OF_N_MAX == 5
+    assert BEST_OF_N_DEFAULT <= BEST_OF_N_MAX
+
+
+def test_workflow_uses_reviewer_when_cross_cutting():
+    """Source-string check: the workflow gates the reviewer call on
+    arch_result.cross_cutting and has a single-Coder fallback branch."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    # Cross-cutting gate exists.
+    assert "cross_cutting" in src
+    # Reviewer activity is invoked.
+    assert "reviewer_repo_task_activity" in src
+    # Best-of-N count is read from BEST_OF_N_DEFAULT.
+    assert "BEST_OF_N_DEFAULT" in src
+    # Parallel fan-out via asyncio.gather.
+    assert "asyncio.gather" in src
+    # Disable_best_of_n is honoured.
+    assert "disable_best_of_n" in src
+
+
+def test_workflow_pr_body_mentions_best_of_n_winner():
+    """Source-string check: when Best-of-N ran, the push_brief footer
+    mentions the winner index + seed + rationale per the 18d spec."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    assert "Best-of-N selection" in src
+    assert "winner #" in src
+    assert "seed=" in src
+
+
+def test_run_repo_coder_activity_accepts_coder_seed():
+    """The Temporal activity signature must accept coder_seed for
+    Best-of-N callers."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(
+        acts.run_repo_coder_activity, "__wrapped__",
+        acts.run_repo_coder_activity,
+    )
+    sig = inspect.signature(fn)
+    assert "coder_seed" in sig.parameters
+    assert sig.parameters["coder_seed"].default == 0
+
+
+def test_workflow_imports_asyncio():
+    """asyncio.gather is the parallel-fanout primitive — must be imported."""
+    import inspect
+    from app.workflows import repo_task as wf
+    src = inspect.getsource(wf)
+    # Top-level import (not just a string mention).
+    assert "import asyncio" in src
