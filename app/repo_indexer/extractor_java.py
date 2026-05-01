@@ -28,9 +28,20 @@ Annotation capture (17a contribution):
     - No argument parsing — Sprint 17f's Spring routes domain extractor
       will parse arguments out of these strings at consumption time.
 
-Out of 17a scope (LATER sub-sprints — explicitly NOT handled here):
-    - Inheritance edges (extends / implements / record-Record /
-      enum-Enum) — Sprint 17b.
+Inheritance capture (17b contribution):
+    - `class Foo extends Bar` → InheritsEdge(child_qn=qn(Foo),
+      parent_qn="Bar")
+    - `class Foo implements A, B` → one InheritsEdge per interface
+    - `interface Foo extends A, B` → multiple InheritsEdges
+    - Generic parents have args stripped: `extends Base<T>` →
+      parent_qn="Base"
+    - Scoped parents preserve dots: `extends pkg.Base` →
+      parent_qn="pkg.Base"
+    - Implicit `java.lang.Object` / `java.lang.Record` /
+      `java.lang.Enum` / `java.lang.annotation.Annotation` parents
+      are NOT modelled (matches the no-implicit-`java.lang.*` rule).
+
+Out of 17a/17b scope (LATER sub-sprints — explicitly NOT handled here):
     - Call edges (bare / field_access / scoped / new) — Sprint 17c.
     - Imports + same-package implicit visibility + java.lang.* —
       Sprint 17d.
@@ -63,6 +74,7 @@ from .actions import (
     FileNode,
     FunctionNode,
     IndexBatch,
+    InheritsEdge,
     ModuleNode,
     RepoNode,
 )
@@ -258,6 +270,181 @@ _FUNCTION_DECL_TYPES = frozenset({
 })
 
 
+def _extract_parent_name(source: bytes, type_node: Any) -> str:
+    """Return the dotted parent qn for a type node appearing in an
+    `extends` or `implements` clause.
+
+    Three node shapes the tree-sitter-java grammar produces in this
+    position (confirmed against grammar 0.23.x):
+
+      - `type_identifier`  →  bare name (`Animal`)
+      - `scoped_type_identifier`  →  dotted form (`pkg.Base`,
+        `com.foo.Bar.Inner`); `node.text` already preserves it verbatim
+      - `generic_type`  →  `[type_identifier_or_scoped, type_arguments]`
+        positionally; we recurse into child 0 and drop the args. So
+        `Base<T>` → `"Base"` and `pkg.Base<T,U>` → `"pkg.Base"`.
+
+    For any other node type we return `""` defensively — the caller
+    skips the edge rather than emitting a malformed parent_qn. This
+    matches the spec: the resolver maps these strings to ClassNodes
+    later; emitting garbage here would create dangling Symbol nodes.
+    """
+    if type_node is None:
+        return ""
+    t = type_node.type
+    if t == "type_identifier":
+        return _node_text(source, type_node).strip()
+    if t == "scoped_type_identifier":
+        # `node.text` flattens the dotted form (e.g. `pkg.Base`) directly.
+        return _node_text(source, type_node).strip()
+    if t == "generic_type":
+        # Positional children: [head_type, type_arguments]. Head is the
+        # first named child; recurse so we handle `pkg.Base<T>` (head =
+        # scoped_type_identifier) the same way as `Base<T>` (head =
+        # type_identifier).
+        for sub in type_node.children:
+            if sub.type in (
+                "type_identifier",
+                "scoped_type_identifier",
+                "generic_type",
+            ):
+                return _extract_parent_name(source, sub)
+        return ""
+    return ""
+
+
+def _iter_type_list_children(type_list_node: Any) -> list[Any]:
+    """Return the type-node children of a `type_list` node (the kind
+    that appears under `super_interfaces` and `extends_interfaces`).
+
+    Filters out punctuation (`,`) and other non-type children. The
+    interesting type nodes are `type_identifier`,
+    `scoped_type_identifier`, and `generic_type` — same set as
+    `_extract_parent_name` handles.
+    """
+    if type_list_node is None:
+        return []
+    out: list[Any] = []
+    for child in type_list_node.children:
+        if child.type in (
+            "type_identifier",
+            "scoped_type_identifier",
+            "generic_type",
+        ):
+            out.append(child)
+    return out
+
+
+def _find_named_child(node: Any, child_type: str) -> Any:
+    """Return the first named child of `node` whose type matches
+    `child_type`, or None. Used for grammar nodes that don't expose
+    their interesting children via `child_by_field_name` — notably
+    `extends_interfaces` on `interface_declaration`, which has no
+    field name attached.
+    """
+    if node is None:
+        return None
+    for child in node.children:
+        if child.type == child_type:
+            return child
+    return None
+
+
+def _emit_inherits_for_type_decl(
+    repo: RepoNode,
+    source: bytes,
+    node: Any,
+    class_qn: str,
+    batch: IndexBatch,
+) -> None:
+    """Emit InheritsEdges for one type declaration (class / interface /
+    enum / record). Annotation-type declarations are skipped — they
+    implicitly extend `java.lang.annotation.Annotation`, which we don't
+    model (matches the no-implicit-`java.lang.*` rule from the plan).
+
+    Edge sources by node kind:
+      - class_declaration:   `superclass=` field (single) +
+                             `interfaces=` field (multiple)
+      - record_declaration:  `interfaces=` field only (records can't
+                             `extends`; their implicit `java.lang.Record`
+                             parent is intentionally not modelled)
+      - enum_declaration:    `interfaces=` field only (enums can't
+                             `extends`; implicit `java.lang.Enum` not
+                             modelled)
+      - interface_declaration: walks named children for the
+                               `extends_interfaces` node — that node has
+                               NO field name, hence the manual scan.
+                               Interfaces support multiple parents.
+
+    `interfaces=` returns a `super_interfaces` node containing one
+    `type_list` child; iterate the type-list's typed children.
+    `extends_interfaces` (on interfaces) wraps a `type_list` directly.
+    """
+    t = node.type
+
+    if t == "class_declaration":
+        # extends: single parent.
+        superclass_node = node.child_by_field_name("superclass")
+        if superclass_node is not None:
+            for sub in superclass_node.children:
+                parent = _extract_parent_name(source, sub)
+                if parent:
+                    batch.inherits.append(InheritsEdge(
+                        repo=repo.name,
+                        child_qn=class_qn,
+                        parent_qn=parent,
+                    ))
+                    break  # extends takes exactly one type
+
+        # implements: zero-or-more parents.
+        interfaces_node = node.child_by_field_name("interfaces")
+        if interfaces_node is not None:
+            type_list = _find_named_child(interfaces_node, "type_list")
+            for type_child in _iter_type_list_children(type_list):
+                parent = _extract_parent_name(source, type_child)
+                if parent:
+                    batch.inherits.append(InheritsEdge(
+                        repo=repo.name,
+                        child_qn=class_qn,
+                        parent_qn=parent,
+                    ))
+
+    elif t in ("record_declaration", "enum_declaration"):
+        # Records and enums can `implements` but not `extends` — their
+        # implicit `java.lang.Record` / `java.lang.Enum` parents are
+        # intentionally NOT modelled (per plan §"java.lang.* allowlist").
+        interfaces_node = node.child_by_field_name("interfaces")
+        if interfaces_node is not None:
+            type_list = _find_named_child(interfaces_node, "type_list")
+            for type_child in _iter_type_list_children(type_list):
+                parent = _extract_parent_name(source, type_child)
+                if parent:
+                    batch.inherits.append(InheritsEdge(
+                        repo=repo.name,
+                        child_qn=class_qn,
+                        parent_qn=parent,
+                    ))
+
+    elif t == "interface_declaration":
+        # `extends_interfaces` is a named child with NO field name in
+        # tree-sitter-java 0.23.x — `child_by_field_name` returns None.
+        # Walk children manually.
+        extends_node = _find_named_child(node, "extends_interfaces")
+        if extends_node is not None:
+            type_list = _find_named_child(extends_node, "type_list")
+            for type_child in _iter_type_list_children(type_list):
+                parent = _extract_parent_name(source, type_child)
+                if parent:
+                    batch.inherits.append(InheritsEdge(
+                        repo=repo.name,
+                        child_qn=class_qn,
+                        parent_qn=parent,
+                    ))
+
+    # annotation_type_declaration: intentionally skipped — implicit
+    # `java.lang.annotation.Annotation` parent is not modelled.
+
+
 def _body_node(node: Any) -> Any:
     """Locate the body of a type-declaring container.
 
@@ -353,6 +540,13 @@ def extract_java_file(
             docstring="",
             annotations=annotations,
         ))
+
+        # 17b: emit InheritsEdges for `extends` + `implements` clauses.
+        # Implicit `java.lang.Object` (classes), `java.lang.Record`
+        # (records), `java.lang.Enum` (enums), and
+        # `java.lang.annotation.Annotation` (annotation types) are all
+        # intentionally NOT modelled — see plan §"java.lang.* allowlist".
+        _emit_inherits_for_type_decl(repo, source, node, class_qn, batch)
 
         body = _body_node(node)
         if body is None:

@@ -319,3 +319,166 @@ def test_package_info_emits_module_with_no_classes(parser):
     assert mod_qns == {"com.legacy.package-info"}
     assert len(batch.classes) == 0
     assert batch.files[0].package == "com.legacy"
+
+
+# ─── 17b: Inheritance edges (extends + implements) ────────────────────────
+
+
+def test_class_extends_single(parser):
+    """`class Cat extends Animal` → one InheritsEdge with
+    child_qn=`zoo.Cat` and parent_qn=`Animal`. Parent is unresolved
+    (no `Animal` class in this file); the resolver maps it later.
+    """
+    src = (
+        b"package zoo;\n"
+        b"public class Cat extends Animal {}\n"
+    )
+    batch = _scan(parser, "src/zoo/Cat.java", src)
+    assert len(batch.inherits) == 1
+    edge = batch.inherits[0]
+    assert edge.child_qn == "zoo.Cat"
+    assert edge.parent_qn == "Animal"
+
+
+def test_class_implements_multiple(parser):
+    """`class Cat extends Animal implements Cuddly, Trainable` →
+    1 extends + 2 implements = 3 InheritsEdges, one per parent.
+    Source-order preserved (extends first, then interfaces in declared
+    order).
+    """
+    src = (
+        b"package zoo;\n"
+        b"public class Cat extends Animal implements Cuddly, Trainable {}\n"
+    )
+    batch = _scan(parser, "src/zoo/Cat.java", src)
+    parents = [(e.child_qn, e.parent_qn) for e in batch.inherits]
+    assert ("zoo.Cat", "Animal") in parents
+    assert ("zoo.Cat", "Cuddly") in parents
+    assert ("zoo.Cat", "Trainable") in parents
+    assert len(parents) == 3
+
+
+def test_interface_extends_multiple(parser):
+    """`interface Pet extends Cuddly, Trainable` — interfaces support
+    multiple `extends` parents (unlike classes). Both edges emitted.
+    Tree-sitter-java exposes these via `extends_interfaces` (no field
+    name on that child — must walk named children manually).
+    """
+    src = (
+        b"package zoo;\n"
+        b"public interface Pet extends Cuddly, Trainable {}\n"
+    )
+    batch = _scan(parser, "src/zoo/Pet.java", src)
+    parents = {(e.child_qn, e.parent_qn) for e in batch.inherits}
+    assert parents == {("zoo.Pet", "Cuddly"), ("zoo.Pet", "Trainable")}
+
+
+def test_generic_parent_strips_args(parser):
+    """`class List extends ArrayList<String>` → parent_qn = `"ArrayList"`,
+    NOT `"ArrayList<String>"`. The grammar wraps the parent in a
+    `generic_type` node; we recurse to its head identifier and drop
+    the `type_arguments`. Same rule for `implements Comparable<Foo>`.
+    """
+    src = (
+        b"package col;\n"
+        b"public class List extends ArrayList<String> implements Comparable<List> {}\n"
+    )
+    batch = _scan(parser, "src/col/List.java", src)
+    parents = {(e.child_qn, e.parent_qn) for e in batch.inherits}
+    assert ("col.List", "ArrayList") in parents
+    assert ("col.List", "Comparable") in parents
+    # Make sure we DIDN'T leak the generic args into the parent_qn.
+    for _, parent in parents:
+        assert "<" not in parent
+        assert ">" not in parent
+
+
+def test_scoped_parent_preserved(parser):
+    """`class Foo extends com.bench.Bar` → parent_qn = `"com.bench.Bar"`
+    (dotted form preserved verbatim). The resolver maps the dotted
+    name to a ClassNode later; if it can't, the loader keeps it as a
+    Symbol node — both behaviours are correct for graph queries.
+    """
+    src = (
+        b"package app;\n"
+        b"public class Foo extends com.bench.Bar {}\n"
+    )
+    batch = _scan(parser, "src/app/Foo.java", src)
+    assert len(batch.inherits) == 1
+    edge = batch.inherits[0]
+    assert edge.child_qn == "app.Foo"
+    assert edge.parent_qn == "com.bench.Bar"
+
+
+def test_diamond_inheritance(parser):
+    """Diamond shape across interfaces and a class:
+        interface A {}
+        interface B extends A {}
+        interface C extends A {}
+        class D implements B, C {}
+    Expected: 4 InheritsEdges (B→A, C→A, D→B, D→C). A has no parents
+    (we don't model implicit `java.lang.Object`).
+    """
+    src = (
+        b"package dia;\n"
+        b"interface A {}\n"
+        b"interface B extends A {}\n"
+        b"interface C extends A {}\n"
+        b"class D implements B, C {}\n"
+    )
+    batch = _scan(parser, "src/dia/Diamond.java", src)
+    edges = {(e.child_qn, e.parent_qn) for e in batch.inherits}
+    assert edges == {
+        ("dia.B", "A"),
+        ("dia.C", "A"),
+        ("dia.D", "B"),
+        ("dia.D", "C"),
+    }
+
+
+def test_no_implicit_object_parent(parser):
+    """Bare `class Foo {}` (no `extends`, no `implements`) emits ZERO
+    InheritsEdges. We do NOT model the implicit `java.lang.Object`
+    parent — per plan §"java.lang.* allowlist", java.lang.* names
+    stay outside the graph; modelling Object on every class would
+    bloat the inheritance graph for zero query value.
+    """
+    src = (
+        b"package app;\n"
+        b"public class Foo {}\n"
+    )
+    batch = _scan(parser, "src/app/Foo.java", src)
+    assert len(batch.inherits) == 0
+
+
+def test_record_implements_serializable(parser):
+    """`record Point(int x, int y) implements Serializable {}` →
+    exactly ONE InheritsEdge (to `Serializable`). The implicit
+    `java.lang.Record` parent is NOT modelled — same rule as the
+    implicit `Object` parent on classes.
+    """
+    src = (
+        b"package geo;\n"
+        b"public record Point(int x, int y) implements Serializable {}\n"
+    )
+    batch = _scan(parser, "src/geo/Point.java", src)
+    assert len(batch.inherits) == 1
+    edge = batch.inherits[0]
+    assert edge.child_qn == "geo.Point"
+    assert edge.parent_qn == "Serializable"
+
+
+def test_enum_implements_interface(parser):
+    """`enum Color implements Named { RED, GREEN; }` → 1 InheritsEdge
+    to `Named`. The implicit `java.lang.Enum` parent is NOT modelled
+    — same rule.
+    """
+    src = (
+        b"package paint;\n"
+        b"public enum Color implements Named { RED, GREEN; }\n"
+    )
+    batch = _scan(parser, "src/paint/Color.java", src)
+    assert len(batch.inherits) == 1
+    edge = batch.inherits[0]
+    assert edge.child_qn == "paint.Color"
+    assert edge.parent_qn == "Named"
