@@ -719,11 +719,12 @@ def test_no_calls_in_abstract_method(parser):
     assert "pkg.Cls.bar" in callers
 
 
-def test_calls_inside_lambda_attribute_to_enclosing(parser):
-    """`void run() { Runnable r = () -> doIt(); }` — the lambda body
-    is walked as part of `run`'s body, so `doIt` attributes to
-    `pkg.Cls.run`. Lambdas don't yet have synthetic enclosing
-    FunctionNodes (Sprint 17e).
+def test_call_inside_lambda_attributes_to_lambda_not_enclosing(parser):
+    """17e: `void run() { Runnable r = () -> doIt(); }` — the call
+    inside the lambda body re-attributes to the synthetic lambda
+    FunctionNode (`pkg.Cls.run.__lambda_<N>`), NOT to the enclosing
+    `run`. (This replaces the 17c version that asserted the older
+    enclosing-attribution behaviour.)
     """
     src = (
         b"package pkg;\n"
@@ -733,20 +734,18 @@ def test_calls_inside_lambda_attribute_to_enclosing(parser):
     )
     batch = _scan(parser, "src/pkg/Cls.java", src)
     edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
-    assert ("pkg.Cls.run", "doIt") in edges
+    # Lambda is on line 3 (the `void run()` line in the input above).
+    assert ("pkg.Cls.run.__lambda_3", "doIt") in edges
+    # And NO edge from the enclosing method itself to `doIt`.
+    assert ("pkg.Cls.run", "doIt") not in edges
 
 
-def test_calls_inside_anonymous_class_attribute_to_enclosing(parser):
-    """`void run() { new Runnable() { public void run() { doIt(); }}; }`
-    — for 17c, calls inside the anonymous class body attribute to
-    the ENCLOSING `run` (because `_walk_calls` recurses through
-    object_creation_expression bodies). Documented imperfection;
-    Sprint 17e introduces synthetic anon-class FunctionNodes.
-
-    We accept either:
-      - one edge from `pkg.Cls.run` to `doIt` (ideal case), or
-      - the more verbose case where `Runnable` (the constructor)
-        is also recorded — both are correct.
+def test_call_inside_anonymous_class_method_attributes_to_anon(parser):
+    """17e: calls inside an anonymous class method's body re-attribute
+    to the anonymous class's method qn — `pkg.Cls.__anon_<N>.run` —
+    NOT to the enclosing `Cls.run`. The constructor call itself
+    (`new Runnable()`) DOES attribute to the enclosing method (it's
+    the call statement that triggers the anon-class creation).
     """
     src = (
         b"package pkg;\n"
@@ -758,7 +757,15 @@ def test_calls_inside_anonymous_class_attribute_to_enclosing(parser):
     )
     batch = _scan(parser, "src/pkg/Cls.java", src)
     edges = [(c.caller_qn, c.callee_qn) for c in batch.calls]
-    assert ("pkg.Cls.run", "doIt") in edges
+    # `doIt` must NOT attribute to the enclosing method anymore.
+    assert ("pkg.Cls.run", "doIt") not in edges
+    # `new Runnable()` is at line 4 in the source above — synthetic
+    # anon class qn = `pkg.Cls.__anon_4` (parent is the enclosing
+    # CLASS `pkg.Cls`, NOT the enclosing method `pkg.Cls.run`).
+    assert ("pkg.Cls.__anon_4.run", "doIt") in edges
+    # The constructor call (the `new Runnable()` itself) still
+    # attributes to the enclosing method.
+    assert ("pkg.Cls.run", "Runnable") in edges
 
 
 # ─── 17d: Imports + java.lang.* allowlist ─────────────────────────────────
@@ -940,3 +947,231 @@ def test_default_package_file_node_package_empty(parser):
     src = b"public class Foo {}\n"
     batch = _scan(parser, "Foo.java", src)
     assert batch.files[0].package == ""
+
+
+# ─── 17e: Overload disambiguation + generics + anon/lambda synthetics ─────
+
+
+def test_overloads_disambiguated_by_param_types(parser):
+    """Three `add` methods with different param types → 3 distinct
+    qns with `:type1,type2,...` suffix. Singletons (just one method)
+    keep their bare qn — see test_overload_singleton_no_suffix.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    int add(int a, int b) { return 0; }\n"
+        b"    String add(String a, String b) { return null; }\n"
+        b"    int add(int a, String b) { return 0; }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.Cls.add:int,int" in fn_qns
+    assert "pkg.Cls.add:String,String" in fn_qns
+    assert "pkg.Cls.add:int,String" in fn_qns
+    # And the bare un-suffixed qn does NOT exist.
+    assert "pkg.Cls.add" not in fn_qns
+
+
+def test_overload_singleton_no_suffix(parser):
+    """A class with only one method named `add` keeps the bare qn —
+    no `:` suffix. Mirrors cpp's `:const`-only-when-needed convention.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    int add(int a, int b) { return 0; }\n"
+        b"    int subtract(int a, int b) { return 0; }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.Cls.add" in fn_qns
+    assert "pkg.Cls.subtract" in fn_qns
+    # No suffix-bearing qns at all.
+    for qn in fn_qns:
+        assert ":" not in qn, qn
+
+
+def test_overload_param_order_matters(parser):
+    """`add(int, String)` and `add(String, int)` are distinct Java
+    overloads — the suffix uses SOURCE order, NOT alphabetical, so
+    they get distinct qns. (Sorting would collapse them, which would
+    be wrong.)
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void add(int a, String b) {}\n"
+        b"    void add(String a, int b) {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.Cls.add:int,String" in fn_qns
+    assert "pkg.Cls.add:String,int" in fn_qns
+
+
+def test_generics_stripped_for_overload_suffix(parser):
+    """Overload-suffix uses OUTER bare-type only; generics are
+    stripped: `process(List<User>)` → `:List`. Nested generics
+    (`Map<String, Foo>`) reduce to `:Map`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void process(java.util.List<User> xs) {}\n"
+        b"    void process(java.util.Map<String, Foo> ms) {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    fn_qns = {f.qualified_name for f in batch.functions}
+    # The outer head identifier is preserved verbatim — including
+    # any dotted scope on the type. `java.util.List<User>` has head
+    # `java.util.List`; `_strip_generics_for_overload_suffix` truncates
+    # at the first `<` and leaves the dotted scope intact.
+    assert "pkg.Cls.process:java.util.List" in fn_qns
+    assert "pkg.Cls.process:java.util.Map" in fn_qns
+
+
+def test_param_types_keeps_full_generic_text(parser):
+    """`param_types` field carries the FULL observed text (per the
+    actions.py contract: "captured as observed, no normalisation"),
+    even though the overload suffix uses only the outer bare type.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void process(java.util.List<User> xs) {}\n"
+        b"    void process(java.util.Map<String, Foo> ms) {}\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    by_first_param = {
+        dict(f.param_types).get(f.params[0]): f
+        for f in batch.functions if f.name == "process"
+    }
+    assert "java.util.List<User>" in by_first_param
+    assert "java.util.Map<String, Foo>" in by_first_param
+
+
+def test_anonymous_class_synthetic_name(parser):
+    """Anonymous class creation → ClassNode with name `__anon_<line>`,
+    where `line` is the start line of the `new Runnable() { … }` site.
+    Anon classes attach to the enclosing CLASS — qn parent is `Outer`,
+    NOT `Outer.run`.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Outer {\n"
+        b"    void run() { new Runnable() { public void inner() {} }; }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Outer.java", src)
+    cls_qns = {c.qualified_name for c in batch.classes}
+    # The `new Runnable()` is on line 3 of the source above.
+    assert "pkg.Outer.__anon_3" in cls_qns
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.Outer.__anon_3.inner" in fn_qns
+    # Anonymous class is parented to the enclosing CLASS, not method —
+    # so we should NOT see a `pkg.Outer.run.__anon_3` form anywhere.
+    for qn in cls_qns:
+        assert ".run.__anon" not in qn, qn
+
+
+def test_two_anonymous_classes_same_line(parser):
+    """When more than one anonymous class sits on the same source line
+    (chained-call shape), each gets a `__anon_<line>_<col>` name to
+    stay distinct.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Outer {\n"
+        b"    void run() { Stream.of(1).filter(new Pred() { public boolean test(Object x) { return true; } }).map(new Func() { public Object apply(Object x) { return x; } }); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Outer.java", src)
+    anon_classes = [c for c in batch.classes if c.name.startswith("__anon_")]
+    # Two anons should be emitted, both on line 3 (the `void run()`
+    # line above), with distinct col-disambiguated names.
+    assert len(anon_classes) == 2
+    qns = {c.qualified_name for c in anon_classes}
+    # Two distinct qns.
+    assert len(qns) == 2
+    # Both follow the `__anon_3_<col>` shape.
+    for c in anon_classes:
+        assert c.name.startswith("__anon_3_"), c.name
+
+
+def test_lambda_emits_synthetic_function_node(parser):
+    """A lambda inside a method body emits a synthetic FunctionNode
+    with name `__lambda_<line>` and qn parented to the enclosing
+    METHOD (NOT the enclosing class).
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void run() { Runnable r = () -> doIt(); }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    lambdas = [f for f in batch.functions if f.name.startswith("__lambda_")]
+    assert len(lambdas) == 1
+    lam = lambdas[0]
+    # Line 3 → `__lambda_3`. Parented to the enclosing method qn.
+    assert lam.qualified_name == "pkg.Cls.run.__lambda_3"
+    # Lambdas don't have a class parent in this model.
+    assert lam.is_method is False
+    assert lam.parent_class_qn == ""
+
+
+def test_lambda_param_capture(parser):
+    """Lambda parameters with explicit types — `(int x, int y) -> x + y`
+    — get `params=("x","y")` and `param_types=(("x","int"),("y","int"))`.
+    Inferred-type forms (`(x, y) -> …`) get empty type-text strings.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Cls {\n"
+        b"    void run() {\n"
+        b"        Adder a = (int x, int y) -> x + y;\n"
+        b"        Runnable r = () -> doIt();\n"
+        b"        java.util.function.Consumer<Integer> c = z -> doIt();\n"
+        b"    }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Cls.java", src)
+    lambdas = {
+        f.qualified_name: f
+        for f in batch.functions if f.name.startswith("__lambda_")
+    }
+    # Three lambdas, on lines 4, 5, 6.
+    typed = lambdas.get("pkg.Cls.run.__lambda_4")
+    noargs = lambdas.get("pkg.Cls.run.__lambda_5")
+    inferred_single = lambdas.get("pkg.Cls.run.__lambda_6")
+    assert typed is not None
+    assert noargs is not None
+    assert inferred_single is not None
+    assert typed.params == ("x", "y")
+    assert dict(typed.param_types) == {"x": "int", "y": "int"}
+    assert noargs.params == ()
+    assert inferred_single.params == ("z",)
+
+
+def test_nested_class_qn_unchanged_by_17e(parser):
+    """Regression test for 17a: nested classes still embed cleanly in
+    the qn (`Outer.Inner.foo`), with no overload suffix triggered for
+    a singleton method.
+    """
+    src = (
+        b"package pkg;\n"
+        b"class Outer {\n"
+        b"    class Inner { void foo() {} }\n"
+        b"}\n"
+    )
+    batch = _scan(parser, "src/pkg/Outer.java", src)
+    fn_qns = {f.qualified_name for f in batch.functions}
+    assert "pkg.Outer.Inner.foo" in fn_qns
+    # No overload suffix on `foo` (it's a singleton).
+    assert "pkg.Outer.Inner.foo:" not in str(fn_qns)

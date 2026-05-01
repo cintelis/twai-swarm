@@ -1,4 +1,4 @@
-"""Tree-sitter Java extractor — Sprint 17a / 17b / 17c / 17d.
+"""Tree-sitter Java extractor — Sprint 17a / 17b / 17c / 17d / 17e.
 
 Walks the AST of one Java source file and emits an IndexBatch fragment.
 Mirrors the shape of `extractor_cpp.py` and `extractor_python.py`;
@@ -67,21 +67,66 @@ Call edges (17c contribution):
       `.new` later or treat it as unresolved. If the shape is
       uncertain, we skip rather than crash.
 
-Call-edge limitations (documented for 17e/17f follow-up):
-    - Calls inside lambda bodies attribute to the ENCLOSING method
-      — lambdas don't yet have synthetic FunctionNodes (Sprint 17e).
-      Same for anonymous-class method bodies.
+Call-edge limitations (documented for 17f follow-up):
     - Static / instance initializer blocks (`static { … }` / `{ … }`)
       and field initializer expressions (`= new Foo()`) have no
       enclosing FunctionNode, so calls inside them are SKIPPED for
-      17c. Sprint 17e will model these as synthetic `__cinit__` /
-      `__init__`-style nodes.
+      17c/17e. Future sprint may model these as synthetic
+      `__cinit__` / `__init__`-style nodes.
     - No type-binding: `User u = new User(); u.foo()` emits
       callee_qn=`u.foo`, not `User.foo`. Receiver-type inference
       is a future-sprint concern.
     - Annotation arguments that look like calls
       (`@SuppressWarnings(value = "x")`) are NOT `method_invocation`
       nodes — no special handling needed.
+
+Overload disambiguation (17e contribution):
+    - When ≥2 methods within the SAME class share a (parent_class_qn,
+      bare-name), each gets a `:type1,type2,...` suffix appended to
+      its qn — using SOURCE order of params (NOT alphabetical), since
+      `add(int, String)` and `add(String, int)` are distinct Java
+      methods. Singletons (only one method with that name in the
+      class) keep the simple un-suffixed qn.
+    - The suffix is derived from the OUTER bare type name only:
+      `process(List<User>)` → `:List`, `process(Map<String, Foo>)` →
+      `:Map`. Trailing `[]` array brackets are stripped. The full
+      generic-bearing text stays in `param_types` (per the
+      "captured as observed" contract).
+    - Generics-in-overloads collision is ACCEPTED: `add(List<Integer>)`
+      and `add(List<String>)` both reduce to `:List` and collapse —
+      they're indistinguishable at JVM bytecode level (erasure)
+      anyway. Documented limitation.
+    - CallEdges emit raw target names (`"add"` or `"this.add"`) and
+      do NOT carry the overload suffix; the resolver does fuzzy
+      arity-matching at call-site lookup time. This means a sibling
+      bare call to `add` in the same file matches the resolver's
+      candidate set rather than a single suffixed FunctionNode qn.
+
+Synthetic FunctionNodes / ClassNodes (17e contribution):
+    - Anonymous classes (`new Runnable() { … }`) emit a synthetic
+      ClassNode with name `__anon_<line>` (or `__anon_<line>_<col>`
+      for the multiple-anon-on-one-line case). Anonymous classes
+      attach to the enclosing TYPE (NOT the enclosing method) — so
+      `class Outer { void run() { new R() {…}; } }` produces
+      ClassNode qn `pkg.Outer.__anon_<N>`, not `pkg.Outer.run.__anon_<N>`.
+      Methods declared inside the anonymous body emit FunctionNodes
+      attached to the synthetic class.
+    - Lambdas (`() -> doFoo()`, `x -> log(x)`) emit a synthetic
+      FunctionNode with name `__lambda_<line>` (or `__lambda_<line>_<col>`
+      for the multiple-lambdas-on-one-line case). Lambdas attach to
+      the ENCLOSING METHOD (different from anonymous classes — they
+      have no class parent in this model: `is_method=False`,
+      `parent_class_qn=""`). A lambda's qn is
+      `<enclosing_method_qn>.__lambda_<line>`.
+    - Calls inside a lambda body re-attribute to the lambda's qn
+      (NOT the enclosing method). Same for calls inside anonymous-
+      class method bodies — they re-attribute to the anon-class
+      method's qn. The walker re-enters at lambda / anonymous-class
+      boundaries with a new caller_qn for descendants.
+    - Lambda parameters are captured normally. Inferred-type forms
+      (`(x, y) -> …`, `x -> …`) emit param_types entries with
+      empty type-text strings — the position is preserved, the type
+      is unknown.
 
 Imports + java.lang.* visibility (17d contribution):
     - Every `import` declaration emits ONE ImportEdge. Four shapes:
@@ -111,15 +156,14 @@ Imports + java.lang.* visibility (17d contribution):
     - `module-info.java` `requires` / `exports` clauses are NOT
       modelled (consistent with 17a's choice to skip module-info).
 
-Out of 17a/17b/17c/17d scope (LATER sub-sprints — explicitly NOT handled):
-    - Method-overload qn disambiguation via `:type1,type2` suffix —
-      Sprint 17e. Two `add(int,int)` and `add(double,double)` methods
-      currently emit two FunctionNodes with the same qn; the loader's
-      MERGE-on-(repo, qn) will collapse them. Acceptable for 17a; 17e
-      will fix it.
-    - Anonymous classes + lambdas (synthetic `__anon_<line>` /
-      `__lambda_<line>` names) — Sprint 17e.
+Out of 17a/17b/17c/17d/17e scope (LATER sub-sprints — explicitly NOT handled):
     - Spring routes domain extraction — Sprint 17f.
+    - Receiver-type binding (`User u = new User(); u.foo()` resolving
+      to `User.foo`) — future sprint after typeBindings for Java.
+    - Annotation-processor synthesis (Lombok `@Data` getters, JPA
+      repo methods) — explicitly not modelled.
+    - Generic erasure → typed call resolution — out per plan.
+    - `permits` clause for sealed types — out per plan.
 
 Known V1 limitations (carried forward — see Sprint 17 plan §pitfalls):
     - Lombok `@Data` and similar annotation processors generate
@@ -134,6 +178,7 @@ Known V1 limitations (carried forward — see Sprint 17 plan §pitfalls):
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from .actions import (
@@ -214,6 +259,41 @@ JAVA_LANG_IMPLICIT: frozenset[str] = frozenset({
 
 def _node_text(source: bytes, node: Any) -> str:
     return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+def _strip_generics_for_overload_suffix(type_text: str) -> str:
+    """Reduce a Java type expression to its outer bare-type identifier.
+
+    Used by the overload-suffix computation (17e). Examples:
+        "int"                    → "int"
+        "String"                 → "String"
+        "List<User>"             → "List"
+        "Map<String, List<Foo>>" → "Map"
+        "T"                      → "T"
+        "String[]"               → "String"
+        "int..."                 → "int"
+        "List<User>[]"           → "List"
+        "com.foo.Bar"            → "com.foo.Bar"
+        "com.foo.Bar<T>"         → "com.foo.Bar"
+
+    Algorithm: truncate at the first `<`, then strip trailing `[]`
+    pairs and the vararg `...` marker. Whitespace stripped at the
+    edges. Single-uppercase generic type-vars (`T`, `K`, `V`) pass
+    through unchanged because they have no `<` and no `[]` to strip.
+    """
+    if not type_text:
+        return ""
+    s = type_text.strip()
+    if "<" in s:
+        s = s.split("<", 1)[0]
+    s = s.strip()
+    # Strip trailing `...` (varargs) once — `String...` → `String`.
+    if s.endswith("..."):
+        s = s[:-3].rstrip()
+    # Strip any trailing `[]` array brackets — `String[][]` → `String`.
+    while s.endswith("[]"):
+        s = s[:-2].rstrip()
+    return s
 
 
 def _filename_stem(rel_path: str) -> str:
@@ -687,39 +767,121 @@ def _strip_generics_to_head(source: bytes, type_node: Any) -> str:
     return _extract_parent_name(source, type_node)
 
 
+def _is_anonymous_class_creation(node: Any) -> Any:
+    """If `node` is an `object_creation_expression` with an anonymous
+    `class_body` child, return that class_body node. Otherwise None.
+
+    Anonymous class shape (tree-sitter-java 0.23.x):
+        object_creation_expression
+          ├── type:      type expression (e.g. `Runnable`)
+          ├── arguments: argument_list
+          └── class_body  ← extra named child only present when anon
+
+    The class_body has no field name — we scan named children.
+    """
+    if node is None or node.type != "object_creation_expression":
+        return None
+    for child in node.children:
+        if child.type == "class_body":
+            return child
+    return None
+
+
+def _extract_lambda_params(
+    source: bytes, lambda_node: Any,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Return (param_names, param_types) for a `lambda_expression` node.
+
+    Three shapes for the `parameters=` field:
+      - `inferred_parameters`  →  `(x, y) -> …`  — list of identifier
+                                  children. type_text = "" (inferred).
+      - `formal_parameters`    →  `(int x, int y) -> …` — same shape as
+                                  a method's params; reuse
+                                  `_extract_param_names_and_types`.
+      - `identifier`           →  `x -> …` — single bare param. No type.
+
+    Other (anomalous) shapes return empty tuples defensively — the
+    lambda's FunctionNode is still emitted, just with no params.
+    """
+    params = lambda_node.child_by_field_name("parameters")
+    if params is None:
+        return (), ()
+    t = params.type
+    if t == "formal_parameters":
+        return _extract_param_names_and_types(source, params)
+    if t == "inferred_parameters":
+        names: list[str] = []
+        for c in params.children:
+            if c.type == "identifier":
+                names.append(_node_text(source, c))
+        # No type info on inferred params; emit names with empty type.
+        types = tuple((n, "") for n in names)
+        return tuple(names), types
+    if t == "identifier":
+        n = _node_text(source, params)
+        return (n,), ()
+    return (), ()
+
+
 def _walk_calls(
     source: bytes,
     body_node: Any,
     local_names: set[str],
     module_qn: str,
-) -> list[tuple[str, int]]:
-    """Return [(callee_qn, line)] for every call site inside `body_node`.
+    on_call: Any,
+    on_lambda: Any,
+    on_anon_class: Any,
+) -> None:
+    """Walk `body_node` collecting call sites, INVOKING callbacks at
+    lambda / anonymous-class boundaries so the orchestrator can attribute
+    descendants under a fresh caller_qn.
 
-    Dispatches by node.type:
+    Callbacks:
+      on_call(callee_qn: str, line: int)
+        Invoked for every call site (method_invocation,
+        object_creation_expression that's NOT anonymous,
+        explicit_constructor_invocation, method_reference) under the
+        current caller scope.
+
+      on_lambda(lambda_node)
+        Invoked when the walker encounters a `lambda_expression`. The
+        callback is responsible for emitting the synthetic FunctionNode
+        and re-entering the walk on the lambda's body with a new
+        caller_qn. The walker DOES NOT recurse into the lambda's body
+        itself — boundary respected.
+
+      on_anon_class(object_creation_node, class_body_node)
+        Invoked when the walker encounters an `object_creation_expression`
+        with an anonymous class_body child. The callback emits the
+        synthetic ClassNode, recurses into its method declarations
+        (each gets its own FunctionNode with its own _walk_calls scope),
+        and DOES NOT cross back into the outer call scope. Note: the
+        constructor call itself (the `new Runnable()` part) is also
+        recorded via on_call so the enclosing method's CALLS edge is
+        preserved.
+
+    The walker handles four call flavours:
       - `method_invocation`             → bare or member call
-      - `object_creation_expression`    → constructor (`new Foo()`)
+      - `object_creation_expression`    → constructor (`new Foo()`); skip
+                                          recursion into arguments when
+                                          the creation is anonymous (the
+                                          on_anon_class handler walks the
+                                          arguments separately if needed)
       - `explicit_constructor_invocation` → `super(…)` / `this(…)`
       - `method_reference`              → `Foo::bar` / `this::run`
-                                          (low-priority; skip if shape
-                                          is uncertain rather than crash)
 
-    Walks ALL descendants (including lambda bodies and anonymous-class
-    bodies) so calls inside them attribute to the enclosing method.
-    Documented limitation; Sprint 17e introduces synthetic enclosing
-    nodes for lambdas / anon classes.
-
-    Local-name resolution: for bare identifier calls (no receiver),
-    if the callee name is in `local_names` we prefix with
-    `module_qn + "."`. This is a heuristic — works for the common
-    case of "method on file's primary class calling a sibling method"
-    (where module_qn is `pkg.PrimaryClass`). For nested-class methods
-    calling siblings on their own (different) class, the resolver
-    handles the disambiguation; the extractor stays conservative.
+    Local-name resolution: for bare identifier calls (no receiver), if
+    the callee name is in `local_names` we prefix with `module_qn + "."`.
     """
-    found: list[tuple[str, int]] = []
 
     def _visit(n: Any) -> None:
         t = n.type
+        if t == "lambda_expression":
+            # Hand off to the lambda emitter. Walker boundary — do NOT
+            # recurse into the lambda's body or parameters from here;
+            # the on_lambda callback will re-enter with a new caller_qn.
+            on_lambda(n)
+            return
         if t == "method_invocation":
             obj = n.child_by_field_name("object")
             name_node = n.child_by_field_name("name")
@@ -731,7 +893,7 @@ def _walk_calls(
                         callee = f"{module_qn}.{name}"
                     else:
                         callee = name
-                    found.append((callee, n.start_point[0] + 1))
+                    on_call(callee, n.start_point[0] + 1)
                 else:
                     # Member call: `obj.bar()`, `this.bar()`,
                     # `Foo.staticBar()`, `obj.list.add(x)`.
@@ -740,37 +902,52 @@ def _walk_calls(
                         callee = f"{receiver}.{name}"
                     else:
                         callee = name
-                    found.append((callee, n.start_point[0] + 1))
+                    on_call(callee, n.start_point[0] + 1)
             # Recurse into arguments — they may contain nested calls
-            # (`foo(bar(), baz())` → 3 edges).
+            # (`foo(bar(), baz())` → 3 edges) AND lambdas
+            # (`list.forEach(x -> log(x))` — the lambda is an argument).
             for child in n.children:
                 _visit(child)
             return
         if t == "object_creation_expression":
             # `new Foo()` / `new Foo<T>(arg)` / `new com.foo.Bar()`.
+            # First, record the constructor call itself (regardless of
+            # whether it's an anonymous-class creation or a plain `new`).
             type_node = n.child_by_field_name("type")
             if type_node is not None:
                 head = _strip_generics_to_head(source, type_node)
                 if head:
-                    found.append((head, n.start_point[0] + 1))
+                    on_call(head, n.start_point[0] + 1)
                 else:
                     # Unrecognised type shape — fall back to raw text
                     # with generics naively stripped. Documented quirk.
                     raw = _node_text(source, type_node).strip()
                     if raw:
-                        # Best-effort generics strip on a raw fallback.
                         if "<" in raw:
                             raw = raw.split("<", 1)[0]
-                        found.append((raw, n.start_point[0] + 1))
+                        on_call(raw, n.start_point[0] + 1)
+            # Anonymous-class detection. If present, hand the body off
+            # to the synthetic-class emitter and DO NOT recurse into
+            # its members from here. We DO still recurse into the
+            # constructor's argument_list (calls like
+            # `new Foo(bar()) { … }` should record `bar` under the
+            # outer caller).
+            anon_body = _is_anonymous_class_creation(n)
+            if anon_body is not None:
+                on_anon_class(n, anon_body)
+                # Recurse only into argument-list children; skip the
+                # class_body to avoid double-attribution.
+                for child in n.children:
+                    if child is anon_body:
+                        continue
+                    _visit(child)
+                return
             for child in n.children:
                 _visit(child)
             return
         if t == "explicit_constructor_invocation":
             # `super(…)` / `this(…)` (NOT `super.foo(…)` — that's a
             # regular method_invocation with `object=super`).
-            # Grammar shape: `constructor=super` / `constructor=this`
-            # is the field name; in some grammar versions the keyword
-            # appears as a positional child instead. Handle both.
             ctor_node = n.child_by_field_name("constructor")
             if ctor_node is not None:
                 ctor_text = _node_text(source, ctor_node).strip()
@@ -781,49 +958,36 @@ def _walk_calls(
                         ctor_text = sub.type
                         break
             if ctor_text in ("super", "this"):
-                found.append((ctor_text, n.start_point[0] + 1))
+                on_call(ctor_text, n.start_point[0] + 1)
             for child in n.children:
                 _visit(child)
             return
         if t == "method_reference":
             # `Foo::bar`, `this::run`, `String::length`, `Foo::new`.
-            # NO field names — positional children:
-            #   [receiver_or_type, "::", method_or_"new"]
-            # Filter out punctuation; first non-`::` named child is the
-            # receiver, last non-`::` named child is the method name.
             named_children = [
                 c for c in n.children if c.type != "::"
             ]
             if len(named_children) >= 2:
                 receiver_node = named_children[0]
                 method_node = named_children[-1]
-                # Receiver may be identifier / type_identifier /
-                # scoped_type_identifier / generic_type / `super` /
-                # `this` / field_access / etc.
                 receiver = _flatten_receiver_text(source, receiver_node)
                 if not receiver:
                     receiver = _node_text(source, receiver_node).strip()
-                # Method-name node is usually `identifier`, but for
-                # `Foo::new` the second child is the literal `new`
-                # keyword (which tree-sitter exposes as an unnamed
-                # token). Read it with raw text.
                 method_text = _node_text(source, method_node).strip()
                 if receiver and method_text:
-                    found.append(
-                        (f"{receiver}.{method_text}", n.start_point[0] + 1),
+                    on_call(
+                        f"{receiver}.{method_text}", n.start_point[0] + 1,
                     )
             # Don't recurse — method_reference has no nested calls.
             return
-        # Default: recurse into children. Importantly this walks INTO
-        # lambda_expression bodies, anonymous class bodies, switch
-        # expressions, etc., so calls inside them attribute to the
-        # enclosing method. Documented as a 17c limitation.
+        # Default: recurse into children. Lambda / anonymous-class
+        # boundaries are caught by the dedicated branches above; other
+        # control-flow nodes (if/while/switch) fall through here.
         for child in n.children:
             _visit(child)
 
     if body_node is not None:
         _visit(body_node)
-    return found
 
 
 def _collect_local_function_names(node: Any, source: bytes, out: set[str]) -> None:
@@ -937,6 +1101,63 @@ def _walk_imports(
     return out
 
 
+def _disambiguate_overloads(batch: IndexBatch) -> None:
+    """Mutate `batch.functions` in place: append `:type1,type2,...` suffix
+    to the qns of methods whose (parent_class_qn, name) group has more
+    than one member.
+
+    Param-type list uses SOURCE order (NOT alphabetical). `add(int, String)`
+    and `add(String, int)` are distinct Java overloads that must produce
+    distinct qns; sorting would collapse them.
+
+    Singletons (only one method with the (parent_class_qn, name) key) are
+    left untouched — their qn stays in its bare 17a form. This mirrors
+    how the cpp extractor only adds `:const` when needed (Sprint 16a).
+
+    Methods with empty `parent_class_qn` (synthetic lambdas, free
+    functions in the default package — both rare) are NOT subjected to
+    overload disambiguation. Lambdas already carry `__lambda_<line>`
+    line-disambiguation in their name; free functions outside a class
+    don't have meaningful overload semantics in this model.
+
+    Implementation note: FunctionNode is `@dataclass(frozen=True)`,
+    so we use `dataclasses.replace` to produce updated copies and
+    overwrite the list.
+    """
+    # Group FunctionNode indices by (parent_class_qn, name). Skip
+    # entries with empty parent_class_qn (lambdas, free functions).
+    groups: dict[tuple[str, str], list[int]] = {}
+    for idx, fn in enumerate(batch.functions):
+        if not fn.parent_class_qn:
+            continue
+        key = (fn.parent_class_qn, fn.name)
+        groups.setdefault(key, []).append(idx)
+
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        for idx in indices:
+            fn = batch.functions[idx]
+            # Build comma-joined outer-bare-type list in SOURCE order.
+            # `param_types` carries (name, type_text) tuples in source
+            # order; map each through _strip_generics_for_overload_suffix.
+            type_parts: list[str] = []
+            for _pname, type_text in fn.param_types:
+                stripped = _strip_generics_for_overload_suffix(type_text)
+                type_parts.append(stripped)
+            # Methods with no params still need disambiguation if their
+            # group has overloads — append an empty suffix `:` so all
+            # zero-param overloads share one identical qn (which is
+            # the correct behaviour: there can be at most ONE no-arg
+            # method per name per class). The frozen-empty case is
+            # rare (would require source-level error) but defensive.
+            suffix = ",".join(type_parts)
+            new_qn = f"{fn.qualified_name}:{suffix}"
+            batch.functions[idx] = dataclasses.replace(
+                fn, qualified_name=new_qn,
+            )
+
+
 def extract_java_file(
     repo: RepoNode,
     rel_path: str,
@@ -1045,6 +1266,142 @@ def extract_java_file(
         # not really methods; out of 17a scope.
         _walk(body, parent_class_qn_stack + [class_qn])
 
+    # 17e: synthetic-name collision tracker for lambdas + anon classes.
+    # Multiple lambdas / anon classes on the same line need a `_<col>`
+    # suffix to stay distinct. Key: ("lambda" | "anon", line). Value:
+    # set of column offsets seen at that key — second-and-later entries
+    # always get the col suffix; first entries also get the col suffix
+    # if/when a collision is detected at emit-time. The simpler rule:
+    # always include col when MORE THAN ONE entity sits at the same
+    # (kind, line). To implement deterministically without two passes,
+    # we count occurrences first then emit names.
+    line_kind_counts: dict[tuple[str, int], int] = {}
+
+    def _count_synthetic_names(n: Any) -> None:
+        """Pre-pass: tally per-line counts of lambdas + anonymous-class
+        creations so the emitter can decide whether to add `_<col>`
+        disambiguation suffixes. Walks the entire root.
+        """
+        t = n.type
+        if t == "lambda_expression":
+            key = ("lambda", n.start_point[0] + 1)
+            line_kind_counts[key] = line_kind_counts.get(key, 0) + 1
+        elif t == "object_creation_expression":
+            if _is_anonymous_class_creation(n) is not None:
+                key = ("anon", n.start_point[0] + 1)
+                line_kind_counts[key] = line_kind_counts.get(key, 0) + 1
+        for child in n.children:
+            _count_synthetic_names(child)
+
+    _count_synthetic_names(root)
+
+    def _synthetic_name(kind: str, line: int, col: int) -> str:
+        """Build a synthetic name for a lambda / anon class.
+
+        kind: "lambda" or "anon". line + col are 1-based.
+        Returns `__lambda_<line>` / `__anon_<line>` for singletons,
+        or `__lambda_<line>_<col>` / `__anon_<line>_<col>` when more
+        than one entity of this kind sits on the same line.
+        """
+        prefix = "__lambda" if kind == "lambda" else "__anon"
+        if line_kind_counts.get((kind, line), 0) > 1:
+            return f"{prefix}_{line}_{col}"
+        return f"{prefix}_{line}"
+
+    def _emit_calls_for_caller(
+        body: Any, caller_qn: str, enclosing_class_qn: str,
+    ) -> None:
+        """Walk `body` collecting CallEdges under `caller_qn`. Honors
+        lambda / anonymous-class boundaries: descendants inside those
+        attribute to fresh synthetic FunctionNode caller_qns.
+
+        `enclosing_class_qn` is the class context for the CURRENT caller
+        — used so that anonymous-class creations inside the caller's
+        body anchor the synthetic anon ClassNode under the correct
+        enclosing class. (Anonymous classes attach to the enclosing
+        TYPE, not the enclosing method.)
+        """
+        if body is None:
+            return
+
+        def _on_call(callee_qn: str, line: int) -> None:
+            batch.calls.append(CallEdge(
+                repo=repo.name,
+                caller_qn=caller_qn,
+                callee_qn=callee_qn,
+                line=line,
+            ))
+
+        def _on_lambda(lambda_node: Any) -> None:
+            line = lambda_node.start_point[0] + 1
+            col = lambda_node.start_point[1] + 1
+            lname = _synthetic_name("lambda", line, col)
+            # Lambdas attach to the enclosing METHOD, not the class.
+            # qn = <enclosing_method_qn>.__lambda_<line>
+            lqn = f"{caller_qn}.{lname}"
+            param_names, param_types = _extract_lambda_params(source, lambda_node)
+            line_end = lambda_node.end_point[0] + 1
+            batch.functions.append(FunctionNode(
+                repo=repo.name,
+                qualified_name=lqn,
+                name=lname,
+                file_path=rel_path,
+                line_start=line,
+                line_end=line_end,
+                is_async=False,
+                is_method=False,
+                parent_class_qn="",
+                params=param_names,
+                param_types=param_types,
+                return_type_raw="",
+                docstring="",
+                annotations=(),
+            ))
+            # Re-enter the call walker on the lambda's body with the
+            # lambda's qn as the new caller. The body= field can be an
+            # expression or a block; both walk fine.
+            lbody = lambda_node.child_by_field_name("body")
+            _emit_calls_for_caller(lbody, lqn, enclosing_class_qn)
+
+        def _on_anon_class(oce_node: Any, class_body: Any) -> None:
+            line = oce_node.start_point[0] + 1
+            col = oce_node.start_point[1] + 1
+            aname = _synthetic_name("anon", line, col)
+            # Anon classes attach to the enclosing CLASS (not method).
+            # If we're at file scope (no enclosing class, e.g. a lambda
+            # at top-level — impossible in valid Java but defensive),
+            # fall back to module qn.
+            if enclosing_class_qn:
+                anon_qn = f"{enclosing_class_qn}.{aname}"
+            elif module_qn:
+                anon_qn = f"{module_qn}.{aname}"
+            else:
+                anon_qn = aname
+            line_end = oce_node.end_point[0] + 1
+            batch.classes.append(ClassNode(
+                repo=repo.name,
+                qualified_name=anon_qn,
+                name=aname,
+                file_path=rel_path,
+                line_start=line,
+                line_end=line_end,
+                docstring="",
+                annotations=(),
+            ))
+            # Walk the anonymous class body for method declarations.
+            # Each method emits its own FunctionNode + walks its own
+            # body for calls (with its own caller_qn). This re-uses
+            # the standard _emit_function path with the anon class's
+            # qn pushed onto the stack.
+            _walk(class_body, [anon_qn])
+
+        _walk_calls(
+            source, body, local_names, module_qn,
+            on_call=_on_call,
+            on_lambda=_on_lambda,
+            on_anon_class=_on_anon_class,
+        )
+
     def _emit_function(node: Any, parent_class_qn_stack: list[str]) -> None:
         """Emit FunctionNode for one method / constructor / compact-
         constructor declaration. Methods at file-scope (impossible in
@@ -1062,10 +1419,9 @@ def extract_java_file(
         their parameters are inherited from the enclosing record header.
         We walk to the parent record_declaration to fetch them.
 
-        TODO 17e: When >1 method on the same class shares a name +
-        differs only by parameter types, we currently emit identical
-        qns and the loader's MERGE collapses them. Sprint 17e will add
-        the `:type1,type2` qn suffix for overload disambiguation.
+        Overload disambiguation (17e) is applied as a post-pass over
+        `batch.functions` once the whole file is walked — see
+        `_disambiguate_overloads`.
         """
         name_node = node.child_by_field_name("name")
         if name_node is None:
@@ -1113,23 +1469,15 @@ def extract_java_file(
             annotations=annotations,
         ))
 
-        # 17c: walk the method body for call sites and emit CallEdges.
-        # Abstract / interface methods have no body — `body=None` →
-        # _walk_calls returns []. Constructors and compact constructors
-        # always have a body when present. Static / instance initializer
-        # blocks are NOT method declarations and never reach here, so
-        # their calls are silently skipped (documented limitation).
+        # 17c/17e: walk the method body for call sites and emit
+        # CallEdges. Abstract / interface methods have no body —
+        # `body=None` → _emit_calls_for_caller is a no-op. Constructors
+        # and compact constructors always have a body when present.
+        # Static / instance initializer blocks are NOT method
+        # declarations and never reach here, so their calls are
+        # silently skipped (documented limitation).
         body_node = node.child_by_field_name("body")
-        if body_node is not None:
-            for callee_qn, line in _walk_calls(
-                source, body_node, local_names, module_qn,
-            ):
-                batch.calls.append(CallEdge(
-                    repo=repo.name,
-                    caller_qn=fn_qn,
-                    callee_qn=callee_qn,
-                    line=line,
-                ))
+        _emit_calls_for_caller(body_node, fn_qn, parent_class_qn)
 
     def _walk(node: Any, parent_class_qn_stack: list[str]) -> None:
         """Recurse into `node`'s children. Type declarations recurse via
@@ -1137,6 +1485,13 @@ def extract_java_file(
         constructors are emitted in place. Other nodes recurse so we find
         nested types inside method bodies (legal in Java — local
         classes — though rare).
+
+        17e: We DO NOT recurse into `lambda_expression` or anonymous
+        `object_creation_expression` from the type/method walker; their
+        contents are handled by `_emit_calls_for_caller` (which
+        re-attributes calls + emits synthetic FunctionNodes / ClassNodes).
+        Skipping them here prevents nested types declared inside a lambda
+        body from being emitted twice.
         """
         for child in node.children:
             t = child.type
@@ -1144,6 +1499,14 @@ def extract_java_file(
                 _emit_class(child, parent_class_qn_stack)
             elif t in _FUNCTION_DECL_TYPES:
                 _emit_function(child, parent_class_qn_stack)
+            elif t == "lambda_expression":
+                # Lambdas are handled by the caller-tracking call walker.
+                continue
+            elif t == "object_creation_expression" and (
+                _is_anonymous_class_creation(child) is not None
+            ):
+                # Anonymous classes are handled by the call walker too.
+                continue
             else:
                 # Recurse into anything else so we find nested
                 # type_declarations inside method bodies / enum body
@@ -1153,6 +1516,10 @@ def extract_java_file(
                 _walk(child, parent_class_qn_stack)
 
     _walk(root, [])
+
+    # 17e: post-pass — append `:type1,type2,...` qn suffix to overload
+    # groups (≥2 methods on the same class with the same name).
+    _disambiguate_overloads(batch)
 
     return batch
 
