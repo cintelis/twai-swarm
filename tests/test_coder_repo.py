@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.agents.coder_repo import _build_user_message, _format_recon_block
+from app.agents import coder_repo
+from app.agents.coder_repo import (
+    MAX_ITERATIONS,
+    REPO_CODER_SYSTEM_PROMPT,
+    _build_user_message,
+    _format_recon_block,
+)
 
 
 def _module(label: str, size: int, samples: list[str]) -> SimpleNamespace:
@@ -103,3 +109,58 @@ def test_format_recon_block_processes_only():
     assert "### Top processes (1)" in out
     # Two-member chain uses the simple arrow form.
     assert "main → init" in out
+
+
+# --- Sprint 18a: budget awareness + MAX_ITERATIONS bump ---------------------
+#
+# Mid-stream Coder-facing injection was investigated and PUNTED for 18a:
+# the Anthropic SDK's `client.beta.messages.tool_runner(...)` manages its
+# own message history end-to-end and exposes no documented per-turn hook
+# for inserting a system-side note between iterations without forking the
+# runner. Instead Sprint 18a:
+#   (a) raises MAX_ITERATIONS 15 → 30,
+#   (b) declares the budget in REPO_CODER_SYSTEM_PROMPT up front so the
+#       Coder can pace itself, and
+#   (c) emits a "completion mode" heartbeat at iteration ≥ 24 (80% of cap)
+#       so operators have visibility — see run_agentic_repo_coder.
+# When the SDK gains a per-turn injection hook, the heartbeat-only signal
+# in (c) should be upgraded to an actual Coder-visible message.
+
+
+def test_max_iterations_is_30():
+    """Sprint 18a bumped the repo-Coder ceiling from 15 → 30."""
+    assert MAX_ITERATIONS == 30
+    # And the module-level constant matches what the function reads.
+    assert coder_repo.MAX_ITERATIONS == 30
+
+
+def test_system_prompt_mentions_budget():
+    """The repo-Coder system prompt must declare its iteration budget."""
+    prompt_lower = REPO_CODER_SYSTEM_PROMPT.lower()
+    assert "budget" in prompt_lower
+    assert "30" in REPO_CODER_SYSTEM_PROMPT
+    assert "iteration" in prompt_lower
+
+
+def test_system_prompt_warns_against_late_refactor():
+    """The prompt must give a concrete late-iteration calibration warning.
+
+    The exact wording is "A 5-step refactor at iteration 28 will not finish."
+    — checking the "iteration 28" anchor keeps the test stable if the
+    surrounding sentence is reworded.
+    """
+    assert "iteration 28" in REPO_CODER_SYSTEM_PROMPT
+
+
+def test_system_prompt_mentions_completion_mode():
+    """Completion-mode handoff is documented in the prompt for when (and if)
+    operator-side heartbeats start being relayed back to the Coder."""
+    assert "completion mode" in REPO_CODER_SYSTEM_PROMPT.lower()
+
+
+def test_completion_mode_threshold_is_80_percent():
+    """At iteration 24 (80% of 30) the heartbeat should switch to completion-mode
+    wording. This is a literal-int check rather than a runtime trace because the
+    full loop pulls in Anthropic SDK + Neo4j; the threshold logic itself is a
+    one-liner in run_agentic_repo_coder and the constant is what we lock down."""
+    assert int(MAX_ITERATIONS * 0.8) == 24

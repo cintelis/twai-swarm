@@ -42,8 +42,13 @@ from .coder_tools import build_tools
 
 logger = logging.getLogger(__name__)
 
-# Same caps as run_agentic_coder (Sprint 9 numbers).
-MAX_ITERATIONS = 15
+# Iteration cap raised from 15 → 30 in Sprint 18a after the "Refresh Tokens"
+# repo-task brief truncated mid-task (PR #8 closed unmerged): the Coder ran
+# out of turns while still drafting tests. Repo-aware briefs do more work
+# per turn than greenfield (graph lookups + read + plan + edit + verify),
+# so 15 is too tight. Greenfield Coder (`coder_agentic.py`) keeps 15 because
+# template-customisation finishes well under that ceiling in practice.
+MAX_ITERATIONS = 30
 MAX_TOKENS_PER_TURN = 16384
 # See coder_agentic.CODER_MODEL — same Anthropic-SDK constraint applies here.
 CODER_MODEL = "claude-haiku-4-5"
@@ -75,6 +80,8 @@ Hard rules:
 - Always run repo_find_callers before changing a function's signature.
 - bash_exec runs in a scrubbed env. Don't try to read secrets — they're not there.
 - If a change has too-broad blast radius (>5 callers), pause and reconsider; mention the risk in your summary.
+
+Budget awareness: You operate inside a fixed iteration budget of 30 turns (raised from 15 in Sprint 18a). Each turn is one model response that may include multiple tool calls. Track your own progress against the brief: if you're at iteration 20+ and haven't started writing tests yet, prioritize tests over additional refactoring. A 5-step refactor at iteration 28 will not finish. If you receive a heartbeat or operator note indicating "completion mode" (typically around iteration 24, i.e. 80% of the budget), stop opening new lines of work — instead, list the brief asks NOT yet addressed and complete only those before returning your final summary.
 """
 
 
@@ -260,9 +267,25 @@ async def run_agentic_repo_coder(
     try:
         async for message in runner:
             iterations += 1
+            # Sprint 18a: at 80% of MAX_ITERATIONS, surface a "completion mode"
+            # banner via the heartbeat so operators have visibility when the
+            # Coder is approaching the cap. Mid-stream injection of a Coder-
+            # facing message isn't supported by the Anthropic SDK's
+            # `tool_runner` (it manages its own message history end-to-end);
+            # the system prompt now declares the budget up front instead. If
+            # the SDK later exposes a per-turn injection hook, swap this
+            # heartbeat-only signal for an actual system-side note.
+            completion_mode = iterations >= int(MAX_ITERATIONS * 0.8)
             if heartbeat is not None:
                 try:
-                    heartbeat(f"repo coder iteration {iterations}")
+                    if completion_mode:
+                        heartbeat(
+                            f"repo coder iteration {iterations} — completion mode "
+                            f"({iterations}/{MAX_ITERATIONS}, "
+                            f"{MAX_ITERATIONS - iterations} turns left)"
+                        )
+                    else:
+                        heartbeat(f"repo coder iteration {iterations}")
                 except Exception:
                     pass
             if getattr(message, "usage", None) is not None:
