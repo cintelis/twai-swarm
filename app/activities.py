@@ -793,6 +793,72 @@ async def critic_repo_task_activity(
 
 
 @activity.defn
+async def documenter_repo_task_activity(
+    repo_path: str,
+    repo_name: str,
+    brief: str,
+    architect_plan: dict | None,
+    coder_diff: str,
+    files_changed: list[str],
+    critic_result: dict | None,
+    tenant_id: str,
+    workflow_id: str,
+) -> dict:
+    """Generate a PR title + markdown body from the workflow artifacts.
+
+    Sprint 20a: post-step that runs AFTER the Critic continuation loop and
+    BEFORE `push_repo_changes_activity`. The xAI Grok call produces a
+    structured PR description (the workflow's existing brief-as-PR-body
+    behaviour was a wall of text; this is a structured summary). On any
+    failure, `run_documenter_repo` returns a fallback DocumenterRepoOutput
+    that keeps the legacy brief-verbatim shape, so the workflow always
+    has a usable title/body to thread into push.
+
+    repo_path / repo_name are accepted for symmetry with the rest of the
+    repo-task activity surface (and to keep the workflow's call site
+    uniform); the Documenter doesn't actually need a Neo4j driver or
+    on-disk access — it operates purely on the workflow's in-memory
+    artifacts (brief, plan, diff, files, critic verdict).
+    """
+    import dataclasses
+    from app.agents.documenter_repo import run_documenter_repo
+
+    _ = repo_path
+    _ = repo_name
+
+    activity.heartbeat("documenter starting")
+    hb_task = asyncio.create_task(_keep_alive(message="documenter running"))
+    try:
+        with observability.workflow_trace(
+            workflow_id=workflow_id,
+            name=f"repo-task-{workflow_id}",
+            brief=brief,
+            tenant_id=tenant_id,
+            phase="documenter",
+            n_files_changed=len(files_changed or []),
+        ):
+            with observability.agent_span(
+                name="documenter",
+                agent_role="documenter",
+            ):
+                result = await run_documenter_repo(
+                    brief=brief,
+                    architect_plan=architect_plan,
+                    coder_diff=coder_diff,
+                    files_changed=files_changed,
+                    critic_result=critic_result,
+                )
+                return dataclasses.asdict(result)
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+        observability.flush()
+
+
+@activity.defn
 async def run_repo_coder_activity(
     repo_path: str,
     repo_name: str,
@@ -950,6 +1016,8 @@ async def push_repo_changes_activity(
     workflow_id: str,
     brief: str,
     tenant_id: str,
+    pr_title_override: str | None = None,
+    pr_body_override: str | None = None,
 ) -> dict:
     """Push the Coder's edits as a new branch + PR via the GitHub App.
 
@@ -962,6 +1030,17 @@ async def push_repo_changes_activity(
     cleanly (push_files_as_branch force-updates the ref). PR title +
     body include the brief so a reviewer can see intent without
     leaving the PR.
+
+    Sprint 20a: optional `pr_title_override` / `pr_body_override` come
+    from `documenter_repo_task_activity`. When set, they replace the
+    legacy brief-derived title/body. When None (Documenter skipped or
+    fully degraded), the legacy behaviour is preserved — older callers
+    and replayed Temporal histories work unchanged. The `brief` parameter
+    is still rendered into the legacy body, AND if the workflow appended
+    a "Known gaps" footer to the brief (Sprint 18c), that footer also
+    flows through to the override path because the workflow now appends
+    it directly to the Documenter's body before passing in (see
+    repo_task.py).
     """
     import re
     from app import db, github_app
@@ -1015,13 +1094,25 @@ async def push_repo_changes_activity(
             short = workflow_id.removeprefix("repo-task-")[:8]
             branch_name = f"swarm/{short}"
             one_line = " ".join(brief.split())
-            pr_title = f"Swarm: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
-            pr_body = (
+            # Sprint 20a: prefer the Documenter-generated title/body when
+            # the workflow threaded them in. The override pair is opt-in
+            # (both default None) so older callers and replayed histories
+            # still get the legacy brief-derived shape unchanged.
+            legacy_pr_title = (
+                f"Swarm: {one_line[:80]}{'…' if len(one_line) > 80 else ''}"
+            )
+            legacy_pr_body = (
                 f"Automated change from twai-swarm workflow `{workflow_id}`.\n\n"
                 f"## Brief\n\n{brief}\n\n"
                 f"## Files changed ({len(files)})\n\n"
                 + "\n".join(f"- `{f['path']}`" for f in files)
             )
+            pr_title = pr_title_override if pr_title_override else legacy_pr_title
+            pr_body = pr_body_override if pr_body_override else legacy_pr_body
+            # The commit message stays brief-derived regardless of the
+            # Documenter — git commit messages have a different terseness
+            # convention than PR titles, and the brief's first line is
+            # already what we want.
             commit_message = f"swarm: {one_line[:72]}"
 
             push = await github_app.push_files_as_branch(

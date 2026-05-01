@@ -523,3 +523,124 @@ def test_workflow_imports_heuristics_module():
     assert block_start != -1
     block = src[block_start:block_end]
     assert "infer_cross_cutting_from_brief" in block
+
+
+# ─── Sprint 20a: Documenter activity registration + workflow wiring ─────────
+
+
+def test_documenter_activity_registered_in_worker():
+    """Sprint 20a wires `documenter_repo_task_activity` into the worker so
+    Temporal can dispatch it. Without this registration the workflow's
+    execute_activity call raises at first run."""
+    from app import worker
+    from app.activities import documenter_repo_task_activity
+    assert documenter_repo_task_activity in worker.ACTIVITIES
+
+
+def test_repo_task_output_includes_documenter_result():
+    """RepoTaskOutput exposes documenter_result so the UI / cost-summary
+    card can render the Documenter's contribution. Defaults to None for
+    backward compat with pre-20a callers (and replayed Temporal histories
+    that constructed RepoTaskOutput with the old field set)."""
+    from app.workflows import RepoTaskOutput
+    out = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+    )
+    assert out.documenter_result is None
+    out_set = RepoTaskOutput(
+        workflow_id="wf-1", repo_name="r", commit_sha="abc",
+        files_changed=[], diff="", iterations=0, summary="",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+        documenter_result={
+            "pr_title": "Auth: ...",
+            "pr_body": "## Summary\n...",
+            "_model": "grok-4-1-fast-reasoning",
+            "_provider": "xai",
+            "_tokens_in": 100,
+            "_tokens_out": 50,
+            "_cost_usd": 0.001,
+        },
+    )
+    assert out_set.documenter_result["pr_title"] == "Auth: ..."
+
+
+def test_push_activity_signature_accepts_overrides():
+    """Sprint 20a: push_repo_changes_activity must accept the optional
+    pr_title_override + pr_body_override pair so the workflow can thread
+    the Documenter's output through. Both default to None for backward
+    compat with the pre-20a 5-arg call shape (replayed histories)."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(
+        acts.push_repo_changes_activity, "__wrapped__",
+        acts.push_repo_changes_activity,
+    )
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    assert "pr_title_override" in params
+    assert "pr_body_override" in params
+    assert sig.parameters["pr_title_override"].default is None
+    assert sig.parameters["pr_body_override"].default is None
+    # Backward compat: the legacy 5 positional args must still be the
+    # first 5 in order.
+    assert params[:5] == [
+        "repo_url", "files", "workflow_id", "brief", "tenant_id",
+    ]
+
+
+def test_documenter_activity_signature():
+    """Source-string assertion: the activity accepts the nine positional
+    args the workflow passes (path, name, brief, plan, diff, files,
+    critic, tenant, wf_id)."""
+    import inspect
+    from app import activities as acts
+    fn = getattr(
+        acts.documenter_repo_task_activity, "__wrapped__",
+        acts.documenter_repo_task_activity,
+    )
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    assert params == [
+        "repo_path", "repo_name", "brief", "architect_plan",
+        "coder_diff", "files_changed", "critic_result",
+        "tenant_id", "workflow_id",
+    ]
+
+
+def test_workflow_uses_documenter_before_push():
+    """Source-string check: documenter_repo_task_activity is invoked AFTER
+    the critic loop and BEFORE push_repo_changes_activity. Cheap regression
+    against a refactor that drops or reorders the documenter step.
+
+    Looks for the actual `execute_activity(<name>` call site so prose
+    mentions of the activity name in comments don't false-positive the
+    ordering check.
+    """
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    documenter_pos = src.find("execute_activity(\n                documenter_repo_task_activity")
+    push_pos = src.find("execute_activity(\n                push_repo_changes_activity")
+    critic_pos = src.find("execute_activity(\n                critic_repo_task_activity")
+    assert documenter_pos != -1, "documenter activity is not invoked"
+    assert push_pos != -1, "push activity is not invoked"
+    assert critic_pos != -1, "critic activity is not invoked"
+    assert critic_pos < documenter_pos < push_pos, (
+        "documenter must run after critic and before push "
+        f"(critic={critic_pos}, documenter={documenter_pos}, push={push_pos})"
+    )
+
+
+def test_workflow_threads_overrides_into_push():
+    """Source-string check: the workflow extracts pr_title / pr_body from
+    the documenter result and passes them as the new positional overrides
+    to push_repo_changes_activity."""
+    import inspect
+    from app.workflows.repo_task import RepoTaskWorkflow
+    src = inspect.getsource(RepoTaskWorkflow)
+    assert "pr_title_override" in src
+    assert "pr_body_override" in src
+    assert 'documenter_result_dict.get("pr_title")' in src
+    assert 'documenter_result_dict.get("pr_body")' in src

@@ -34,6 +34,8 @@ from app.activities import (
     critic_repo_task_activity,
     # Sprint 18d — Reviewer Best-of-N selection.
     reviewer_repo_task_activity,
+    # Sprint 20a — Documenter PR title/body generator.
+    documenter_repo_task_activity,
 )
 
 # Sprint 19: belt-and-braces flush + thread-join on process exit. Per-
@@ -52,6 +54,7 @@ ACTIVITIES = [
     architect_repo_task_activity,
     critic_repo_task_activity,
     reviewer_repo_task_activity,
+    documenter_repo_task_activity,
 ]
 WORKFLOWS = [ProjectWorkflow, RepoTaskWorkflow]
 

@@ -38,6 +38,8 @@ with workflow.unsafe.imports_passed_through():
         critic_repo_task_activity,
         # Sprint 18d — Reviewer Best-of-N selection.
         reviewer_repo_task_activity,
+        # Sprint 20a — Documenter PR title/body generator.
+        documenter_repo_task_activity,
     )
     # Sprint 18.1 — pure heuristic for cross_cutting fallback when
     # the Architect plan is degraded (empty subtasks).
@@ -125,6 +127,13 @@ class RepoTaskOutput:
     # path (standard / single-file brief OR cross-cutting with
     # disable_best_of_n=True). 3+ means Best-of-N (BEST_OF_N_DEFAULT).
     best_of_n_count: int = 1
+    # Sprint 20a — `dataclasses.asdict(DocumenterRepoOutput)` when the
+    # Documenter step ran (which is unconditional whenever there's
+    # something to push). None means the Documenter was skipped because
+    # there were no files to push, or auto_pr was disabled. Even on xAI
+    # failure the Documenter returns a fallback DocumenterRepoOutput, so
+    # this is always populated when the Documenter step actually fired.
+    documenter_result: dict | None = None
 
 
 @workflow.defn
@@ -370,11 +379,91 @@ class RepoTaskWorkflow:
                 # Append the gaps footer after any Best-of-N header above.
                 push_brief = push_brief + "\n" + "\n".join(footer_lines)
 
+        # Sprint 20a: Documenter step. Runs whenever we'd otherwise push,
+        # so that the override threading below has fresh title/body inputs.
+        # Even on xAI failure the activity returns a fallback
+        # DocumenterRepoOutput (legacy brief-derived shape), so the push
+        # call always has SOMETHING to use. Skipped when there's nothing
+        # to push (auto_pr=False or empty diff) — the legacy push code
+        # still exits cleanly via push_error.
+        documenter_result_dict: dict | None = None
+        if inp.auto_pr and files_with_content:
+            documenter_result_dict = await workflow.execute_activity(
+                documenter_repo_task_activity,
+                args=[
+                    clone_result["path"],
+                    repo_name,
+                    inp.brief,
+                    arch_result,
+                    coder_result.get("diff", ""),
+                    coder_result.get("files_changed", []),
+                    critic_results[-1] if critic_results else None,
+                    inp.tenant_id,
+                    workflow.info().workflow_id,
+                ],
+                schedule_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(minutes=1),
+            )
+
         if not inp.auto_pr:
             push_error = "auto_pr disabled"
         elif not files_with_content:
             push_error = "no files changed"
         else:
+            # Sprint 20a: derive override pair from the Documenter result.
+            # When the override body is set, append the gaps footer (if
+            # any) to it directly so the structured PR body STILL surfaces
+            # the Critic's known-gaps for human triage. When the override
+            # is None (defensive — Documenter activity itself failed at
+            # the Temporal level), fall through to the legacy
+            # `push_brief` path (which already had the gaps footer applied
+            # above).
+            pr_title_override: str | None = None
+            pr_body_override: str | None = None
+            if documenter_result_dict:
+                pr_title_override = documenter_result_dict.get("pr_title")
+                doc_body = documenter_result_dict.get("pr_body") or ""
+                # Reuse the same gaps-footer construction the brief path
+                # uses. Cheap rebuild rather than threading state — this
+                # block only fires once per workflow.
+                if (
+                    continuation_count > 0
+                    and critic_results
+                    and critic_results[-1].get("verdict") == "incomplete"
+                ):
+                    final = critic_results[-1]
+                    failed = final.get("failed_criteria") or []
+                    gates = final.get("gate_failures") or []
+                    if failed or gates:
+                        footer_lines = [
+                            "",
+                            "---",
+                            f"## Known gaps (after {continuation_count} continuation pass"
+                            f"{'es' if continuation_count != 1 else ''})",
+                            "",
+                            "The Critic flagged the following items as still missing "
+                            "after the configured continuation budget was exhausted:",
+                            "",
+                        ]
+                        for cf in failed[:20]:
+                            footer_lines.append(
+                                f"- {cf.get('criterion', '')}: {cf.get('evidence', '')}"
+                            )
+                        if len(failed) > 20:
+                            footer_lines.append(f"- ...and {len(failed) - 20} more")
+                        if gates:
+                            footer_lines.append("")
+                            footer_lines.append("### Gate failures")
+                            for gf in gates[:10]:
+                                ln = f":{gf.get('line')}" if gf.get("line") else ""
+                                footer_lines.append(
+                                    f"- [{gf.get('tool', '')}] `{gf.get('file', '')}`{ln}"
+                                    f" — {gf.get('message', '')}"
+                                )
+                            if len(gates) > 10:
+                                footer_lines.append(f"- ...and {len(gates) - 10} more")
+                        doc_body = doc_body + "\n" + "\n".join(footer_lines)
+                pr_body_override = doc_body or None
             push_result = await workflow.execute_activity(
                 push_repo_changes_activity,
                 args=[
@@ -383,6 +472,8 @@ class RepoTaskWorkflow:
                     workflow.info().workflow_id,
                     push_brief,
                     inp.tenant_id,
+                    pr_title_override,
+                    pr_body_override,
                 ],
                 schedule_to_close_timeout=timedelta(minutes=5),
                 heartbeat_timeout=timedelta(minutes=1),
@@ -412,4 +503,5 @@ class RepoTaskWorkflow:
             continuation_count=continuation_count,
             reviewer_result=reviewer_result_dict,
             best_of_n_count=best_of_n_count,
+            documenter_result=documenter_result_dict,
         )
