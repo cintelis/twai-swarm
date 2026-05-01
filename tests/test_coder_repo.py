@@ -164,3 +164,87 @@ def test_completion_mode_threshold_is_80_percent():
     full loop pulls in Anthropic SDK + Neo4j; the threshold logic itself is a
     one-liner in run_agentic_repo_coder and the constant is what we lock down."""
     assert int(MAX_ITERATIONS * 0.8) == 24
+
+
+# --- Sprint 18b: architect plan injection -----------------------------------
+
+
+def test_build_user_message_includes_architect_plan_when_provided():
+    """When an Architect plan dict is passed, the rendered user message
+    must include a "## Architect plan" section + the narrative + the
+    subtask listing + (when present) a "## Risks" section."""
+    plan = {
+        "narrative": "Add the refresh endpoint then wire LoginPage.",
+        "subtasks": [
+            {
+                "id": "be.refresh",
+                "description": "POST /auth/refresh",
+                "files_to_touch": ["app/auth/routes.py"],
+                "acceptance_criteria": ["returns 200 on valid refresh token"],
+            },
+        ],
+        "cross_cutting": True,
+        "risk_notes": ["jwt.issue has 12 callers"],
+    }
+    msg = _build_user_message(
+        "Add refresh tokens.", "myrepo",
+        recon_block="",
+        architect_plan=plan,
+    )
+    assert "## Architect plan" in msg
+    assert "Add the refresh endpoint then wire LoginPage." in msg
+    assert "**be.refresh**" in msg
+    assert "returns 200 on valid refresh token" in msg
+    assert "## Risks" in msg
+    assert "jwt.issue has 12 callers" in msg
+    # Brief still rendered after the plan — Coder needs the original ask.
+    assert "## Task brief" in msg
+    assert "Add refresh tokens." in msg
+
+
+def test_build_user_message_omits_architect_plan_when_none():
+    """Default (no plan) preserves the pre-18b user message shape."""
+    msg = _build_user_message("Do a thing.", "myrepo")
+    assert "## Architect plan" not in msg
+    assert "## Risks" not in msg
+    assert "## Task brief" in msg
+    assert "Do a thing." in msg
+
+
+def test_build_user_message_orders_plan_between_recon_and_brief():
+    """Section order: recon → architect plan → risks → brief → repo.
+    The model reads top-down; recon is panoramic context, plan is the
+    scope contract, brief is ground truth."""
+    recon = "## Repo recon (auto-generated)\n\n### Modules (1)\n- `core` (3 symbols): a, b, c"
+    plan = {
+        "narrative": "narrative-here",
+        "subtasks": [],
+        "risk_notes": ["watch out"],
+    }
+    msg = _build_user_message(
+        "the brief", "myrepo", recon_block=recon, architect_plan=plan,
+    )
+    pos_recon = msg.find("## Repo recon")
+    pos_plan = msg.find("## Architect plan")
+    pos_risks = msg.find("## Risks")
+    pos_brief = msg.find("## Task brief")
+    assert -1 < pos_recon < pos_plan < pos_risks < pos_brief
+
+
+def test_build_user_message_omits_risks_when_plan_has_none():
+    """A plan dict with no risk_notes should not produce an empty Risks header."""
+    plan = {"narrative": "x", "subtasks": []}
+    msg = _build_user_message("brief", "r", architect_plan=plan)
+    assert "## Architect plan" in msg
+    assert "## Risks" not in msg
+
+
+def test_system_prompt_mentions_architect_plan_contract():
+    """The Coder system prompt must declare that the Architect's
+    acceptance_criteria are a contract (per Sprint 18b D1)."""
+    p = REPO_CODER_SYSTEM_PROMPT.lower()
+    assert "architect plan" in p
+    assert "acceptance_criteria" in p
+    # The "surface disagreement" clause is the explicit out for plan/brief
+    # mismatch — keep it discoverable.
+    assert "disagreement" in p

@@ -31,6 +31,8 @@ with workflow.unsafe.imports_passed_through():
         index_repo_activity,
         run_repo_coder_activity,
         push_repo_changes_activity,
+        # Sprint 18b — Architect pre-step.
+        architect_repo_task_activity,
     )
 
 
@@ -67,6 +69,11 @@ class RepoTaskOutput:
     pr_number: int | None = None
     branch_name: str | None = None
     push_error: str | None = None
+    # Sprint 18b — Architect plan dict (asdict(ArchitectRepoOutput)) so the
+    # UI can render the narrative + subtasks alongside the diff. None when
+    # the Architect step ran but produced no output (degraded path) or
+    # when a future opt-out flag is added.
+    architect_plan: dict | None = None
 
 
 @workflow.defn
@@ -97,9 +104,29 @@ class RepoTaskWorkflow:
             heartbeat_timeout=timedelta(minutes=2),
         )
 
+        # Sprint 18b: Architect runs BEFORE the Coder. Produces a structured
+        # plan (narrative + subtask DAG + acceptance_criteria + risk_notes)
+        # that the Coder then consumes as authoritative scope. Architect uses
+        # Sonnet 4.6 (planning is reasoning-heavy); Coder stays on Haiku.
+        # Failure inside the architect activity surfaces a degraded plan
+        # (empty subtasks, narrative = last_text) rather than blowing up the
+        # workflow — the Coder will still run, just without the plan.
+        arch_result = await workflow.execute_activity(
+            architect_repo_task_activity,
+            args=[
+                clone_result["path"], repo_name, inp.brief, inp.tenant_id,
+                workflow.info().workflow_id,
+            ],
+            schedule_to_close_timeout=timedelta(minutes=10),
+            heartbeat_timeout=timedelta(minutes=2),
+        )
+
         coder_result = await workflow.execute_activity(
             run_repo_coder_activity,
-            args=[clone_result["path"], repo_name, inp.brief, inp.tenant_id, workflow.info().workflow_id],
+            args=[
+                clone_result["path"], repo_name, inp.brief, inp.tenant_id,
+                workflow.info().workflow_id, arch_result,
+            ],
             schedule_to_close_timeout=timedelta(minutes=20),
             heartbeat_timeout=timedelta(minutes=3),
         )
@@ -151,4 +178,5 @@ class RepoTaskWorkflow:
             pr_number=pr_number,
             branch_name=branch_name,
             push_error=push_error,
+            architect_plan=arch_result,
         )

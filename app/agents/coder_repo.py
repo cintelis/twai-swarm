@@ -82,6 +82,8 @@ Hard rules:
 - If a change has too-broad blast radius (>5 callers), pause and reconsider; mention the risk in your summary.
 
 Budget awareness: You operate inside a fixed iteration budget of 30 turns (raised from 15 in Sprint 18a). Each turn is one model response that may include multiple tool calls. Track your own progress against the brief: if you're at iteration 20+ and haven't started writing tests yet, prioritize tests over additional refactoring. A 5-step refactor at iteration 28 will not finish. If you receive a heartbeat or operator note indicating "completion mode" (typically around iteration 24, i.e. 80% of the budget), stop opening new lines of work — instead, list the brief asks NOT yet addressed and complete only those before returning your final summary.
+
+Architect plan handling (Sprint 18b): When an "## Architect plan" section is present in your user message, treat the listed `acceptance_criteria` as a CONTRACT. The Architect already investigated the repo and decided what "done" looks like — your job is to satisfy every acceptance_criterion, not to re-litigate scope. If you complete the brief but skip an acceptance_criterion, that is a failure. If you genuinely disagree with the plan (it misses a file, mis-identifies a pattern, picks the wrong abstraction), surface the disagreement EXPLICITLY in your final summary — do NOT silently expand or contract scope. The "## Risks" section enumerates blast-radius warnings the Architect already flagged; respect them (especially "don't change this signature" notes).
 """
 
 
@@ -145,10 +147,39 @@ def _format_recon_block(modules: list, processes: list) -> str:
     return "\n".join(lines)
 
 
-def _build_user_message(brief: str, repo_name: str, recon_block: str = "") -> str:
+def _build_user_message(
+    brief: str,
+    repo_name: str,
+    recon_block: str = "",
+    architect_plan: dict | None = None,
+) -> str:
+    """Build the Coder's user-side message.
+
+    Sprint 18b: when an Architect plan is provided, prepend a structured
+    "## Architect plan" section + a "## Risks" section above the brief.
+    Per D1 the plan's `acceptance_criteria` are the contract the Coder
+    is judged against; rendering them prominently gives the Coder a
+    visible checklist instead of a buried hint.
+
+    Section ordering:  recon → architect plan → risks → brief → repo
+    The model reads top-down; recon is panoramic, plan is the scope, the
+    brief is the ground-truth ask. Brief stays even when a plan is
+    present so the model can flag plan/brief disagreement explicitly
+    (per the system prompt's "surface the disagreement" clause).
+    """
     parts: list[str] = []
     if recon_block:
         parts.append(recon_block)
+    if architect_plan:
+        # Lazy import — keeps coder_repo importable without architect_repo
+        # in environments that only need the legacy single-Coder path.
+        from .architect_repo import render_architect_plan_section, render_risk_section
+        plan_section = render_architect_plan_section(architect_plan)
+        if plan_section:
+            parts.append(plan_section)
+        risks = render_risk_section(architect_plan)
+        if risks:
+            parts.append(risks)
     parts.append(f"## Task brief\n{brief.strip()}")
     parts.append(
         f"## Repo\nThe repository `{repo_name}` is already cloned in your workspace and its call graph is indexed.\n"
@@ -208,6 +239,7 @@ async def run_agentic_repo_coder(
     neo4j_driver: Any,
     heartbeat: Any = None,
     tenant_id: str = "default",
+    architect_plan: dict | None = None,
 ) -> dict:
     """Run the agentic Coder loop on an already-cloned + already-indexed repo.
 
@@ -215,6 +247,13 @@ async def run_agentic_repo_coder(
     find_callers) need a connection to query against. The driver lives in
     the activity that calls this function so its lifecycle is tied to the
     activity, not the workflow.
+
+    `architect_plan` (Sprint 18b) is the dict-shaped output of
+    `app.agents.architect_repo.run_architect_repo` — when provided, it's
+    rendered into the user message above the brief and the Coder treats
+    its `acceptance_criteria` as a contract (per D1). Default None
+    preserves the pre-18b single-Coder behaviour for callers that haven't
+    been updated.
     """
     from app import observability
 
@@ -241,7 +280,11 @@ async def run_agentic_repo_coder(
     except Exception as e:  # noqa: BLE001 — best-effort; log and proceed.
         logger.warning("repo recon queries failed, proceeding without recon block: %s", e)
 
-    user_message = _build_user_message(brief, repo_name, recon_block=recon_block)
+    user_message = _build_user_message(
+        brief, repo_name,
+        recon_block=recon_block,
+        architect_plan=architect_plan,
+    )
 
     client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY, timeout=300.0)
     runner_kwargs: dict = dict(

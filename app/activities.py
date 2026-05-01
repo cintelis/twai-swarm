@@ -509,17 +509,104 @@ async def index_repo_activity(
 
 
 @activity.defn
-async def run_repo_coder_activity(
+async def architect_repo_task_activity(
     repo_path: str,
     repo_name: str,
     brief: str,
     tenant_id: str,
     workflow_id: str,
 ) -> dict:
+    """Run the planning Architect against the cloned + indexed repo.
+
+    Sprint 18b: pre-step before `run_repo_coder_activity`. Mirrors the
+    Coder activity's shape (own Neo4j driver, recon-block construction,
+    heartbeat keep-alive) but invokes `run_architect_repo` instead — the
+    Architect is a pure planner with the graph tools but no write tools.
+
+    Returns `dataclasses.asdict(ArchitectRepoOutput)`. The workflow then
+    threads this dict into `run_repo_coder_activity` as
+    `architect_plan: dict | None` so the Coder can render its narrative +
+    subtasks + acceptance_criteria above the brief (per D1).
+
+    Failure mode: the Architect call wraps its own tool-runner exceptions
+    and returns a degraded ArchitectRepoOutput rather than raising, so a
+    single bad turn doesn't fail the whole workflow — the Coder falls
+    through to a no-plan run.
+    """
+    from pathlib import Path
+    from app.agents.architect_repo import (
+        architect_output_to_dict, run_architect_repo,
+    )
+    from app.agents.coder_repo import (
+        _RECON_MODULE_CAP, _RECON_PROCESS_CAP, _format_recon_block,
+    )
+    from app.repo_indexer.loader import driver_from_env
+
+    activity.heartbeat("architect starting")
+    hb_task = asyncio.create_task(_keep_alive(message="architect running"))
+    try:
+        with driver_from_env() as driver:
+            # Build the recon block here (workflow-side) so the Architect
+            # gets the same panoramic map the Coder would. Keeps both
+            # roles looking at the same evidence — important if Critic
+            # later wants to compare what the Architect saw vs what the
+            # Coder did.
+            recon_block = ""
+            try:
+                from app import repo_query
+                modules = await asyncio.to_thread(
+                    repo_query.find_modules,
+                    driver, repo_name, _RECON_MODULE_CAP, False,
+                )
+                processes = await asyncio.to_thread(
+                    repo_query.find_processes,
+                    driver, repo_name, None, _RECON_PROCESS_CAP, False,
+                )
+                recon_block = _format_recon_block(modules, processes)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "architect recon queries failed, proceeding without "
+                    "recon block: %s", e,
+                )
+
+            arch_out = await run_architect_repo(
+                workflow_id=workflow_id,
+                repo_root=Path(repo_path),
+                repo_name=repo_name,
+                brief=brief,
+                neo4j_driver=driver,
+                recon_block=recon_block,
+                heartbeat=activity.heartbeat,
+                tenant_id=tenant_id,
+            )
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+    return architect_output_to_dict(arch_out)
+
+
+@activity.defn
+async def run_repo_coder_activity(
+    repo_path: str,
+    repo_name: str,
+    brief: str,
+    tenant_id: str,
+    workflow_id: str,
+    architect_plan: dict | None = None,
+) -> dict:
     """Run the agentic Coder against the cloned + indexed repo.
 
     Opens its own Neo4j driver — workflow-side I/O is forbidden by
     Temporal, so the driver lifecycle is tied to this activity.
+
+    Sprint 18b: `architect_plan` is the dict produced by
+    `architect_repo_task_activity`. Threaded through to
+    `run_agentic_repo_coder` which renders it as a "## Architect plan"
+    section in the Coder's user message. Default None preserves the
+    pre-18b call shape — older callers / replayed histories still work.
     """
     from pathlib import Path
     from app.agents.coder_repo import run_agentic_repo_coder
@@ -537,6 +624,7 @@ async def run_repo_coder_activity(
                 neo4j_driver=driver,
                 heartbeat=activity.heartbeat,
                 tenant_id=tenant_id,
+                architect_plan=architect_plan,
             )
     finally:
         hb_task.cancel()
