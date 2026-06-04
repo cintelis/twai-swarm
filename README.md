@@ -253,15 +253,15 @@ sequenceDiagram
 flowchart TD
     REQ["run_agent(role, complexity_hint)"] --> ROUTE["router.route()"]
     ROUTE -->|ROLE_DEFAULTS| KEY["model key"]
-    KEY --> ESC{"complexity_hint ≥ 3?"}
-    ESC -->|yes| BUMP["ESCALATION: bump one tier"]
+    KEY --> ESC{"complexity_hint is 3 (hard)?"}
+    ESC -->|yes| BUMP["ESCALATION bumps one tier"]
     ESC -->|no| KEEP["keep key"]
     BUMP --> CALL["_complete_with_fallback"]
     KEEP --> CALL
     CALL --> PRIMARY["primary provider adapter"]
-    PRIMARY -->|success| DONE["ProviderResult + cost<br/>attributed to who answered"]
-    PRIMARY -->|transient: 5xx · 429 · timeout| WALK["walk FALLBACK_CHAIN<br/>→ OpenAI gpt54"]
-    PRIMARY -->|auth / bad-request| RAISE["raise — fail loud"]
+    PRIMARY -->|success| DONE["ProviderResult + cost<br/>(attributed to whoever answered)"]
+    PRIMARY -->|transient · 5xx · 429 · timeout| WALK["walk FALLBACK_CHAIN<br/>to OpenAI gpt54"]
+    PRIMARY -->|auth / bad-request| RAISE["raise / fail loud"]
     WALK --> DONE
 ```
 
@@ -271,11 +271,11 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    SCAN["Scan<br/>walk + SKIP_DIRS"] --> PARSE["Parse<br/>tree-sitter Py/TS/Java/C++<br/>+ per-file SHA short-circuit"]
+    SCAN["Scan<br/>walk + SKIP_DIRS"] --> PARSE["Parse · tree-sitter<br/>Python / TS / Java / C++<br/>+ per-file SHA short-circuit"]
     PARSE --> RESOLVE["Resolve<br/>scope resolution"]
     RESOLVE --> PROC["Process extract<br/>cross-community call flows"]
     PROC --> COMM["Community detect"]
-    COMM --> EMBED["Embed · opt-in<br/>--with-embeddings"]
+    COMM --> EMBED["Embed (opt-in)<br/>symbol embeddings"]
     EMBED --> LOAD["Loader<br/>batched UNWIND + MERGE"]
     LOAD --> NEO[("Neo4j")]
 ```
@@ -295,11 +295,11 @@ flowchart LR
     Class -->|DEFINES| Function
     File -->|IMPORTS| Module
     Class -->|INHERITS_FROM| Class
-    Function -->|"CALLS {line}"| Function
+    Function -->|CALLS| Function
     Function -->|USES_TYPE| Class
     Function -->|MEMBER_OF| Community
     Class -->|MEMBER_OF| Community
-    Process -->|"STEP_IN_PROCESS {step}"| Function
+    Process -->|STEP_IN_PROCESS| Function
     File -->|DEFINES| Route
     Route -->|HANDLED_BY| Function
     File -->|DEFINES| Table
@@ -307,7 +307,7 @@ flowchart LR
     Table -->|HAS_COLUMN| Column
 ```
 
-> Domain-extractor nodes `Route`, `MCPTool`, `MCPResource`, `Table`, and `Column` only appear when the matching extractor is enabled. `MCPTool`/`MCPResource` mirror `Route`: `(File)-[:DEFINES]->(node)` and `(node)-[:HANDLED_BY]->(Function)`.
+> `CALLS` edges carry a `line` property; `STEP_IN_PROCESS` edges carry a `step` ordinal. Domain-extractor nodes `Route`, `MCPTool`, `MCPResource`, `Table`, and `Column` only appear when the matching extractor is enabled. `MCPTool`/`MCPResource` mirror `Route`: `(File)-[:DEFINES]->(node)` and `(node)-[:HANDLED_BY]->(Function)`.
 
 Read access goes through `app/repo_query.py` (hybrid BM25 full-text + cosine vector search) and is exposed read-only over MCP (`query`, `context`, `find_symbol` tools; `twai://repo/<name>/*` resources).
 
@@ -321,9 +321,9 @@ flowchart TB
         P3["task_embeddings (kNN context)"]
     end
     subgraph neo["Neo4j"]
-        N1["code structure: Repo/File/Module/Class/Function"]
-        N2["derived: Community · Process"]
-        N3["domain: Route · MCPTool · Table · Column"]
+        N1["code structure<br/>Repo / File / Module / Class / Function"]
+        N2["derived · Community · Process"]
+        N3["domain · Route · MCPTool · Table · Column"]
     end
     subgraph tc["Temporal Cloud"]
         T1["workflow history + durable state"]
