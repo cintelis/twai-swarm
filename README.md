@@ -81,6 +81,256 @@ BA + Researcher  (parallel)
 
 Seven agents, two providers (Anthropic + xAI/Grok 4.20). Router in `app/router.py` shows exactly which model each role picks and why.
 
+## System architecture
+
+The system is **one Docker image run as two roles** (an API service and a Temporal worker), plus a self-hosted **MCP server** that exposes the code graph. State lives in two databases — **Postgres + pgvector** (projects, tasks, costs) and **Neo4j** (the code knowledge graph) — with **Temporal Cloud** providing durability. The diagrams below break the system down sub-component by sub-component.
+
+### Sub-component overview
+
+```mermaid
+flowchart TB
+    subgraph clients["Clients"]
+        UI["Bundled SPA<br/>/ui"]
+        API_CLIENT["curl / HTTP clients"]
+        MCP_CLIENT["Claude Code / Desktop<br/>(MCP client)"]
+    end
+
+    subgraph image["Single Docker image"]
+        API["API service · FastAPI<br/>app/api.py · Express Mode"]
+        WORKER["Worker · Temporal activities<br/>app/worker.py"]
+        MCPSRV["MCP server<br/>app/mcp_server · stdio · read-only"]
+    end
+
+    subgraph stores["Data stores"]
+        PG[("Postgres + pgvector<br/>projects · tasks · costs · installs")]
+        NEO[("Neo4j<br/>code knowledge graph")]
+    end
+
+    subgraph external["External services"]
+        TC["Temporal Cloud"]
+        ANTH["Anthropic API"]
+        XAI["xAI API"]
+        OAI["OpenAI API · fallback"]
+        GH["GitHub App"]
+        LF["Langfuse · tracing"]
+    end
+
+    UI --> API
+    API_CLIENT --> API
+    MCP_CLIENT --> MCPSRV
+
+    API -->|start · signal · query| TC
+    WORKER <-->|poll task queues| TC
+    API --> PG
+    WORKER --> PG
+    WORKER --> NEO
+    MCPSRV --> NEO
+    WORKER --> ANTH
+    WORKER --> XAI
+    WORKER --> OAI
+    WORKER --> GH
+    WORKER --> LF
+```
+
+| Sub-component | Module | Responsibility |
+|---|---|---|
+| **API service** | `app/api.py` | Thin intake + bundled SPA. Starts/queries/signals workflows, serves cost + status, zips/downloads scaffolds, drives the GitHub App push flow. Auth via `app/auth.py`. |
+| **Worker** | `app/worker.py` | Registers all role queues + the `project-workflows` queue; runs every activity. One image scales per-role by narrowing `TEMPORAL_QUEUES`. |
+| **Workflows** | `app/workflows/` | Deterministic orchestrators — `ProjectWorkflow` (greenfield) and `RepoTaskWorkflow` (existing code). No I/O. |
+| **Activities** | `app/activities.py` | All side effects: DB writes, LLM calls, clone/index/push. |
+| **Agents** | `app/agents/` | Role prompts + the agentic/one-shot Coders. Pure functions, no Temporal imports. |
+| **Router** | `app/router.py` | Single source of truth for model strings, pricing, role defaults, escalation, and the fallback chain. |
+| **Providers** | `app/providers/` | Thin adapters (`anthropic`, `xai`, `openai`) behind a shared `complete()` interface. |
+| **Repo indexer** | `app/repo_indexer/` | tree-sitter → scope resolution → communities → embeddings → Neo4j. |
+| **Repo query / MCP** | `app/repo_query.py`, `app/mcp_server/` | Read layer over Neo4j (BM25 + vector) and its MCP surface. |
+| **GitHub App** | `app/github_app.py`, `app/github_webhook.py` | Installation tokens, branch/PR pushes, webhook HMAC verification. |
+| **Observability** | `app/observability.py`, `app/telemetry.py` | Langfuse traces + OpenTelemetry metrics. Both no-op when unconfigured. |
+| **Tenancy** | `app/tenant.py` | `tenant_id` threaded through workflows → activities → agents → traces → DB. |
+
+### Deployment topology (AWS · prefix `lean-agent`)
+
+```mermaid
+flowchart LR
+    GHA["GitHub Actions"] -->|OIDC| ECR["ECR · image"]
+
+    subgraph aws["AWS · ap-southeast-2"]
+        SM["Secrets Manager"]
+        RDS[("RDS Postgres<br/>+ pgvector")]
+        ALB["AWS-managed ALB<br/>*.on.aws"]
+        subgraph ecs["ECS cluster"]
+            APISVC["API service<br/>Express Mode · autoscale CPU"]
+            WORKERSVC["Worker service<br/>classic Fargate"]
+            NEOSVC["Neo4j 5 Community<br/>Fargate + CloudMap"]
+        end
+    end
+
+    ECR -.->|image| APISVC
+    ECR -.->|image| WORKERSVC
+    APISVC --> ALB
+    APISVC --> RDS
+    WORKERSVC --> RDS
+    WORKERSVC --> NEOSVC
+    APISVC --> SM
+    WORKERSVC --> SM
+    APISVC -->|TLS + API key| TC["Temporal Cloud"]
+    WORKERSVC -->|TLS + API key| TC
+```
+
+The API/worker split is deliberate: Express Mode is built for stateless HTTP (autoscale on CPU), while the worker is long-lived gRPC queue polling (scale on queue depth). See the [deployed architecture rationale](#architecture-deployed) below.
+
+### Pipeline 1 — `ProjectWorkflow` (greenfield: brief → scaffold)
+
+```mermaid
+flowchart TD
+    START["POST /projects"] --> BA["BA · sonnet"]
+    START --> RES["Researcher · grok-research"]
+    BA --> ARCH["Architect · opus"]
+    RES --> ARCH
+    ARCH --> GATE{"Human approval gate<br/>signal · 24h wait_condition"}
+    GATE -->|reject / timeout| REJ["Return rejected"]
+    GATE -->|approve / auto_approve| SE["SE · sonnet"]
+    SE --> EST["Estimator · grok"]
+    EST --> REV["Reviewer · opus"]
+    REV --> DOC["Documenter · grok-fast"]
+    DOC --> CODER["Agentic Coder · haiku<br/>tool loop until verify.sh passes"]
+    CODER --> OUT["docs + downloadable zip<br/>GET /projects/{id}/download"]
+```
+
+The approval gate is a genuine Temporal `wait_condition` — the workflow sleeps (no polling) until `POST /approve` / `/reject` or the 24h timeout. The Coder bypasses the router (Anthropic-SDK tool-runner) and falls back to a one-shot JSON generator if the loop errors.
+
+### Pipeline 2 — `RepoTaskWorkflow` (existing repo → PR)
+
+```mermaid
+flowchart TD
+    START["POST /repo-tasks"] --> CLONE["clone_repo_activity"]
+    CLONE --> INDEX["index_repo_activity → Neo4j"]
+    INDEX --> ARCH["architect_repo_task_activity<br/>plan + acceptance criteria"]
+    ARCH --> XC{"cross_cutting brief?"}
+    XC -->|yes & not disabled| BON["Best-of-N: 3 parallel Coders<br/>→ Reviewer picks winner"]
+    XC -->|no| SINGLE["Single Coder · graph-aware tools"]
+    BON --> CRITIC{"Critic verdict"}
+    SINGLE --> CRITIC
+    CRITIC -->|incomplete & budget & monotone progress| CONT["Continuation Coder<br/>(≤ 2 passes)"]
+    CONT --> CRITIC
+    CRITIC -->|complete / cap reached| DOCM["documenter_repo_task_activity<br/>PR title + body"]
+    DOCM --> PUSH["push_repo_changes_activity"]
+    PUSH --> OUT["unified diff + PR url"]
+```
+
+Both workflows are started on the `project-workflows` task queue; the per-role queues in `config.QUEUES` are used only for the individual agent *activities*.
+
+### Agent activity — the determinism boundary
+
+Workflows stay deterministic (no I/O, no clock, no randomness); every side effect is an activity. A single agent turn:
+
+```mermaid
+sequenceDiagram
+    participant WF as Workflow (deterministic)
+    participant ACT as Activity (worker)
+    participant RUN as agents/runner
+    participant PROV as provider adapter
+    participant LLM as LLM API
+    participant LF as Langfuse
+    participant DB as Postgres
+
+    WF->>ACT: execute_activity(run_agent_activity, capped retry)
+    ACT->>RUN: run_agent(role, context, tenant_id)
+    RUN->>PROV: complete(model, system, user, tools)
+    PROV->>LLM: messages.create(...)
+    LLM-->>PROV: text + token usage
+    PROV-->>RUN: ProviderResult
+    RUN->>LF: generation() trace (tenant-scoped)
+    RUN-->>ACT: {output, tokens_in/out, cost_usd}
+    ACT->>DB: persist task row + cost
+    ACT-->>WF: AgentTaskResult
+```
+
+`LLM_RETRY_POLICY` caps attempts at 3 (the Temporal default is infinite backoff, which re-bills full token counts). Auth/bad-request errors are non-retryable.
+
+### LLM routing & provider fallback
+
+```mermaid
+flowchart TD
+    REQ["run_agent(role, complexity_hint)"] --> ROUTE["router.route()"]
+    ROUTE -->|ROLE_DEFAULTS| KEY["model key"]
+    KEY --> ESC{"complexity_hint ≥ 3?"}
+    ESC -->|yes| BUMP["ESCALATION: bump one tier"]
+    ESC -->|no| KEEP["keep key"]
+    BUMP --> CALL["_complete_with_fallback"]
+    KEEP --> CALL
+    CALL --> PRIMARY["primary provider adapter"]
+    PRIMARY -->|success| DONE["ProviderResult + cost<br/>attributed to who answered"]
+    PRIMARY -->|transient: 5xx · 429 · timeout| WALK["walk FALLBACK_CHAIN<br/>→ OpenAI gpt54"]
+    PRIMARY -->|auth / bad-request| RAISE["raise — fail loud"]
+    WALK --> DONE
+```
+
+`router.MODELS` is the one place model strings *and* pricing live, so routing decisions and cost telemetry share a single source of truth.
+
+### Repo indexer pipeline
+
+```mermaid
+flowchart LR
+    SCAN["Scan<br/>walk + SKIP_DIRS"] --> PARSE["Parse<br/>tree-sitter Py/TS/Java/C++<br/>+ per-file SHA short-circuit"]
+    PARSE --> RESOLVE["Resolve<br/>scope resolution"]
+    RESOLVE --> PROC["Process extract<br/>cross-community call flows"]
+    PROC --> COMM["Community detect"]
+    COMM --> EMBED["Embed · opt-in<br/>--with-embeddings"]
+    EMBED --> LOAD["Loader<br/>batched UNWIND + MERGE"]
+    LOAD --> NEO[("Neo4j")]
+```
+
+Phases are `Phase` objects driven by `runner.run_pipeline` over a mutable `PhaseContext`. Re-scans are incremental via per-file SHA; `force_reindex=True` bypasses the short-circuit after an extractor-version bump. Optional **domain extractors** add HTTP routes, MCP tool/resource registrations, and ORM tables/columns.
+
+### Neo4j graph schema
+
+All nodes are scoped by `repo` (composite uniqueness keys); `tenant_id` rides as a property. Loader writes are idempotent `MERGE`s.
+
+```mermaid
+flowchart LR
+    Repo -->|CONTAINS| File
+    File -->|DEFINES| Module
+    Module -->|DEFINES| Class
+    Module -->|DEFINES| Function
+    Class -->|DEFINES| Function
+    File -->|IMPORTS| Module
+    Class -->|INHERITS_FROM| Class
+    Function -->|"CALLS {line}"| Function
+    Function -->|USES_TYPE| Class
+    Function -->|MEMBER_OF| Community
+    Class -->|MEMBER_OF| Community
+    Process -->|"STEP_IN_PROCESS {step}"| Function
+    File -->|DEFINES| Route
+    Route -->|HANDLED_BY| Function
+    File -->|DEFINES| Table
+    Class -->|DECLARES| Table
+    Table -->|HAS_COLUMN| Column
+```
+
+> Domain-extractor nodes `Route`, `MCPTool`, `MCPResource`, `Table`, and `Column` only appear when the matching extractor is enabled. `MCPTool`/`MCPResource` mirror `Route`: `(File)-[:DEFINES]->(node)` and `(node)-[:HANDLED_BY]->(Function)`.
+
+Read access goes through `app/repo_query.py` (hybrid BM25 full-text + cosine vector search) and is exposed read-only over MCP (`query`, `context`, `find_symbol` tools; `twai://repo/<name>/*` resources).
+
+### Where state lives
+
+```mermaid
+flowchart TB
+    subgraph pg["Postgres + pgvector"]
+        P1["projects · tasks · costs"]
+        P2["github installations + pushes"]
+        P3["task_embeddings (kNN context)"]
+    end
+    subgraph neo["Neo4j"]
+        N1["code structure: Repo/File/Module/Class/Function"]
+        N2["derived: Community · Process"]
+        N3["domain: Route · MCPTool · Table · Column"]
+    end
+    subgraph tc["Temporal Cloud"]
+        T1["workflow history + durable state"]
+        T2["approval-gate signals"]
+    end
+```
+
 ## Deploying to AWS
 
 ### One-time setup
