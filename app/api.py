@@ -63,6 +63,60 @@ async def auth_status() -> dict:
     """Tells the UI whether to show the token-entry modal at all."""
     return {"auth_required": auth.auth_enabled()}
 
+def _approval_awaiting(status: str, tasks: list[dict], approval_state: object) -> bool:
+    """Return True if the project is paused at the approval gate.
+
+    Conditions:
+    - workflow is RUNNING
+    - architect task completed
+    - SE task not yet started
+    - approval_state indicates neither approved nor rejected
+    """
+    has_architect = any(t.get("role") == "architect" and t.get("status") == "done" for t in tasks or [])
+    has_se = any(t.get("role") == "se" for t in tasks or [])
+
+    approved = False
+    rejected = False
+    if isinstance(approval_state, dict):
+        approved = bool(approval_state.get("approved", False))
+        rejected = bool(approval_state.get("rejected", False))
+    # Non-dict approval_state shapes are treated as indeterminate (False flags)
+
+    return (
+        status == "RUNNING"
+        and has_architect
+        and not has_se
+        and not approved
+        and not rejected
+    )
+
+
+def _validate_branch_name(name: str) -> bool:
+    """Conservative Git refname validator for user-supplied branch names.
+
+    Allows A-Z, a-z, 0-9, dot, underscore, slash, dash. Length 1..200.
+    Rejects:
+    - leading or trailing '/'
+    - consecutive '//'
+    - any '..' segment
+    - any characters outside the allowed set
+    - empty or too long
+    """
+    if not isinstance(name, str):
+        return False
+    if len(name) == 0 or len(name) > 200:
+        return False
+    if name.startswith("/") or name.endswith("/"):
+        return False
+    if "//" in name:
+        return False
+    if ".." in name:
+        return False
+    # Only allow the safe character set
+    if re.fullmatch(r"[A-Za-z0-9._/\-]+", name) is None:
+        return False
+    return True
+
 def _connect_kwargs():
     """Temporal Cloud uses TLS + API key; local dev uses plaintext."""
     if not config.TEMPORAL_TLS:
@@ -86,35 +140,34 @@ async def health(deep: str | None = None):
     if deep not in ("true", "1"):
         return {"status": "ok"}
 
-    temporal_state = "unknown"
-    postgres_state = "unknown"
-    errors = []
+    async def check_temporal() -> tuple[str, str | None]:
+        try:
+            from temporalio.api.workflowservice.v1 import GetSystemInfoRequest
+            client = await temporal()
+            await asyncio.wait_for(
+                client.workflow_service.get_system_info(GetSystemInfoRequest()),
+                timeout=3.0,
+            )
+            return "ok", None
+        except Exception as e:
+            return "down", f"temporal: {type(e).__name__}: {e}"
 
-    # Temporal check — lightweight system-info RPC with a 3s timeout.
-    try:
-        from temporalio.api.workflowservice.v1 import GetSystemInfoRequest
-        client = await temporal()
-        await asyncio.wait_for(
-            client.workflow_service.get_system_info(GetSystemInfoRequest()),
-            timeout=3.0,
-        )
-        temporal_state = "ok"
-    except Exception as e:
-        temporal_state = "down"
-        errors.append(f"temporal: {type(e).__name__}: {e}")
+    async def check_postgres() -> tuple[str, str | None]:
+        try:
+            pool = await db.get_pool()
+            await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=3.0)
+            return "ok", None
+        except Exception as e:
+            return "down", f"postgres: {type(e).__name__}: {e}"
 
-    # Postgres check — SELECT 1 with a 3s timeout.
-    try:
-        pool = await db.get_pool()
-        await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=3.0)
-        postgres_state = "ok"
-    except Exception as e:
-        postgres_state = "down"
-        errors.append(f"postgres: {type(e).__name__}: {e}")
+    (temporal_state, temporal_err), (postgres_state, postgres_err) = await asyncio.gather(
+        check_temporal(), check_postgres()
+    )
 
     if temporal_state == "ok" and postgres_state == "ok":
         return {"status": "ok", "temporal": "ok", "postgres": "ok"}
 
+    errors = [e for e in (temporal_err, postgres_err) if e]
     return JSONResponse(
         status_code=503,
         content={
@@ -521,8 +574,11 @@ async def download_project(workflow_id: str):
             f"{safe_name}/.swarm-info",
             f"workflow_id: {workflow_id}\nproject: {safe_name}\nlanguage: {output.get('language', 'unknown')}\n",
         )
-        for f in files:
-            path = (f.get("path") or "").lstrip("/").replace("\\", "/")
+        # Sort entries by normalized path for deterministic archives
+        def _norm_path(entry):
+            return (entry.get("path") or "").lstrip("/").replace("\\", "/")
+        for f in sorted(files, key=lambda e: _norm_path(e)):
+            path = _norm_path(f)
             content = f.get("content") or ""
             if not path or ".." in path.split("/"):
                 continue
@@ -565,14 +621,7 @@ async def get_project(workflow_id: str):
     # Compute awaiting_approval: architect is done but SE hasn't started
     has_architect = any(t["role"] == "architect" and t["status"] == "done" for t in tasks)
     has_se = any(t["role"] == "se" for t in tasks)
-    awaiting_approval = (
-        status == "RUNNING"
-        and has_architect
-        and not has_se
-        and approval_state is not None
-        and not approval_state.get("approved", False)
-        and not approval_state.get("rejected", False)
-    )
+    awaiting_approval = _approval_awaiting(status, tasks, approval_state)
 
     # Repo-task workflows don't run BA/Architect/SE/etc., so `tasks` is empty
     # and the agent-task UI is meaningless. Surface the workflow's result
@@ -891,6 +940,10 @@ async def github_push(workflow_id: str, req: GitHubPushReq):
             repo_was_created = True
         except github_app.GitHubAppError as e:
             raise HTTPException(502, f"repo creation failed: {e}")
+
+    # Validate optional user-supplied branch name early
+    if req.branch is not None and not _validate_branch_name(req.branch):
+        raise HTTPException(400, "invalid branch name")
 
     branch = req.branch or f"swarm/{workflow_id[:12]}-{int(_time.time())}"
     safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", project_row["name"]).strip("-") or "project"
