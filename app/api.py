@@ -619,8 +619,6 @@ async def get_project(workflow_id: str):
     tasks = await db.get_project_tasks(str(row["id"]))
 
     # Compute awaiting_approval: architect is done but SE hasn't started
-    has_architect = any(t["role"] == "architect" and t["status"] == "done" for t in tasks)
-    has_se = any(t["role"] == "se" for t in tasks)
     awaiting_approval = _approval_awaiting(status, tasks, approval_state)
 
     # Repo-task workflows don't run BA/Architect/SE/etc., so `tasks` is empty
